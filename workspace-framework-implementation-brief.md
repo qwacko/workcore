@@ -38,11 +38,11 @@ type TrackerContext = {
 
 const defineTracker = defineWorkspace<TrackerContext>();
 
-const tracker = defineTracker({
+const trackerBase = defineTracker({
   id: 'tracker',
 
   queries: {
-    activities: tableQuery({
+    activities: defineTracker.tableQuery({
       input: activityListInput,
       output: activityPageSchema,
       permission: 'activities.read',
@@ -77,7 +77,7 @@ const tracker = defineTracker({
   },
 
   mutations: {
-    editActivity: mutation({
+    editActivity: defineTracker.mutation({
       input: editActivitySchema,
       output: activitySchema,
       permission: 'activities.write',
@@ -93,8 +93,13 @@ const tracker = defineTracker({
     }),
   },
 
+});
+
+const defineTrackerOperations = defineTracker.withOperations<typeof trackerBase>();
+const tracker = defineTracker({
+  ...trackerBase,
   tasks: {
-    refreshSummary: task({
+    refreshSummary: defineTrackerOperations.task({
       input: emptyObjectSchema,
       output: summarySchema,
       permission: 'summary.refresh',
@@ -145,14 +150,14 @@ Initially support object forms with strings, numbers, booleans, enums, optional 
 
 ```ts
 const platform = createPlatform({
-  applications: [{
+  applications: [registerApplication({
     definition: tracker,
     createAppContext: async ({ scope, actor }) => ({
       activities: scopedActivityRepository(pool, scope, actor),
       garmin: garminClient,
       // Additional databases, external functions or repositories fit here.
     }),
-  }],
+  })],
   auth: betterAuthAdapter(auth),
   authorise,
 
@@ -167,15 +172,18 @@ const platform = createPlatform({
   },
 });
 
+const adminHandler = createAdminHandler({
+  basePath: '/workcore/admin',
+  apiBasePath: '/workcore/api',
+});
 export const handle = platform.httpHandler({
   apiBasePath: '/workcore/api',
-  // Optional mounting configuration supplied by the installed admin package.
-  admin: { basePath: '/workcore/admin' },
+  admin: { basePath: '/workcore/admin', handle: adminHandler },
 }); // Request -> Promise<Response>
 // Start platform.worker() in the background worker process.
 ```
 
-Mount the handler in a host such as Hono, SvelteKit or another server with a thin Request/Response integration. The host serves requests and authenticates users; Workcore does not require its own web server. oRPC may be an implementation choice, not the core operation model. Better Auth, Redis and BullMQ integrations are reference implementations, not core dependencies. Associate each registered definition with its own typed context factory so multiple definitions can have differently shaped contexts. Exact registration and admin-mounting syntax must be verified during implementation.
+Mount the handler in a host such as Hono, SvelteKit or another server with a thin Request/Response integration. The host serves requests and authenticates users; Workcore does not require its own web server. oRPC may be an implementation choice, not the core operation model. Better Auth, Redis and BullMQ integrations are reference implementations, not core dependencies. Associate each registered definition with its own typed context factory so multiple definitions can have differently shaped contexts. The shipped route helper is supplied by the optional `@workcore/admin/server` package.
 
 Every operation receives:
 

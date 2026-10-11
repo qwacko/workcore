@@ -1,0 +1,28 @@
+{
+  "name": "workcore",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "test:e2e": "pnpm exec playwright test",
+    "typecheck": "pnpm -r typecheck",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish",
+    "dev": "pnpm --filter @workcore/example dev",
+    "dev:admin": "pnpm --filter @workcore/admin dev",
+    "test:packages": "pnpm build && node scripts/test-packed-consumer.mjs"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^3.0.3",
+    "@playwright/test": "^1.56.0",
+    "@types/node": "^24.7.0",
+    "typescript": "7.0.2",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@workcore/core",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  },
+  "files": ["dist/index.js", "dist/index.d.ts", "dist/index.js.map", "dist/index.d.ts.map"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": { "@standard-schema/spec": "^1.1.0" },
+  "devDependencies": { "@types/node": "^24.7.0", "typescript": "7.0.2", "vitest": "^3.2.4" }
+}

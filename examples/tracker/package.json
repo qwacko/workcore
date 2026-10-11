@@ -1,0 +1,8 @@
+{
+  "name": "@workcore/example",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx watch src/server.ts", "start": "node dist/server.js", "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "@hono/node-server": "^1.19.2", "@workcore/admin": "workspace:*", "@workcore/client": "workspace:*", "@workcore/codec-superjson": "workspace:*", "@workcore/core": "workspace:*", "hono": "^4.10.3", "zod": "^4.1.12" },
+  "devDependencies": { "@types/node": "^24.7.0", "tsx": "^4.20.6", "typescript": "7.0.2", "vitest": "^3.2.4" }
+}

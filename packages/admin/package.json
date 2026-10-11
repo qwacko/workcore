@@ -1,0 +1,10 @@
+{
+  "name": "@workcore/admin",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { "./server": { "types": "./dist/server.d.ts", "import": "./dist/server.js" } },
+  "files": ["dist/assets", "dist/server.js", "dist/server.d.ts"],
+  "scripts": { "build": "vite build && tsc -p tsconfig.json", "dev": "vite --host 0.0.0.0", "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit && svelte-check --tsconfig ./tsconfig.json --tsgo" },
+  "dependencies": { "@workcore/client": "workspace:*", "@workcore/codec-superjson": "workspace:*", "@workcore/core": "workspace:*", "superjson": "^2.2.6", "svelte": "^5.39.0" },
+  "devDependencies": { "@sveltejs/vite-plugin-svelte": "^6.2.1", "@types/node": "^24.7.0", "@typescript/native": "npm:typescript@7.0.2", "svelte-check": "^4.7.6", "typescript": "6.0.2", "vite": "^7.1.9", "vitest": "^3.2.4" }
+}
