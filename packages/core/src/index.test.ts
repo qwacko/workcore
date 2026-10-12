@@ -91,6 +91,37 @@ describe('Workcore HTTP runtime', () => {
     expect(mutationResponse.status).toBe(403);
   });
 
+  it('forwards request metadata to HTTP operation handlers', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'request-context', id: 'one', name: 'One', actors: ['alice'] }] });
+    const definition = defineWorkspace<AppContext>()({
+      id: 'request-context',
+      queries: {
+        inspectRequest: {
+          input: objectSchema,
+          output: schema<{ url: string; method: string; token: string | null }>((value): value is { url: string; method: string; token: string | null } => !!value && typeof value === 'object'),
+          api: true,
+          permission: [],
+          handler: ({ ctx }) => ({ url: ctx.request?.url ?? '', method: ctx.request?.method ?? '', token: ctx.request?.headers.get('x-request-token') ?? null }),
+        },
+      },
+    });
+    const platform = createPlatform({
+      applications: [definition.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })],
+      auth: { authenticate: () => ({ id: 'alice' }) },
+      services,
+    });
+    const handler = platform.httpHandler({ apiBasePath: '/api' });
+    const response = await handler(new Request('https://example.test/api/query', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-request-token': 'session-token' },
+      body: JSON.stringify({ applicationId: 'request-context', workspaceId: 'one', operation: 'inspectRequest', input: {} }),
+    }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).result).toEqual({
+      url: 'https://example.test/api/query', method: 'POST', token: 'session-token',
+    });
+  });
+
   it('fails closed for named permissions when no authorizer is configured', async () => {
     const services = createMemoryState({ workspaces: [{ applicationId: 'closed', id: 'one', name: 'One', actors: ['alice'] }] });
     const definition = defineWorkspace<AppContext>()({

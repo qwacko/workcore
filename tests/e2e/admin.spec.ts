@@ -1,14 +1,20 @@
 import { expect, test } from '@playwright/test';
 
+async function login(page: import('@playwright/test').Page, username: string, password = `${username}-demo-pass`) {
+  await page.goto('/login');
+  await page.getByLabel('Username').fill(username);
+  await page.getByLabel('Password').fill(password);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.getByRole('heading', { name: 'Operations', exact: true })).toBeVisible();
+}
+
 test('admin supports editing and streams the update to another authorized client', async ({ browser, baseURL }) => {
   const aliceContext = await browser.newContext();
   const bobContext = await browser.newContext();
   const alice = await aliceContext.newPage();
   const bob = await bobContext.newPage();
-  await alice.goto('/login/alice');
-  await bob.goto('/login/bob');
-  await expect(alice.getByRole('heading', { name: 'Operations', exact: true })).toBeVisible();
-  await expect(bob.getByRole('heading', { name: 'Operations', exact: true })).toBeVisible();
+  await login(alice, 'alice');
+  await login(bob, 'bob');
 
   await alice.getByLabel('Workspace').selectOption('team');
   await bob.getByLabel('Workspace').selectOption('team');
@@ -41,14 +47,14 @@ test('admin supports editing and streams the update to another authorized client
 });
 
 test('the admin can execute a generic JSON query in a second application', async ({ page }) => {
-  await page.goto('/login/alice');
+  await login(page, 'alice');
   await page.getByLabel('Application').selectOption('notes');
   await expect(page.getByRole('heading', { name: 'Notebook' })).toBeVisible();
   await expect(page.getByText('Write the second app example')).toBeVisible();
 });
 
 test('the admin wire codec preserves Date values across a query round trip', async ({ page }) => {
-  await page.goto('/login/alice');
+  await login(page, 'alice');
   await page.getByRole('button', { name: /Date round trip/ }).click();
   const value = '2026-10-12T10:30:00.000Z';
   await page.getByLabel('Input').fill(JSON.stringify({ at: value }, null, 2));
@@ -68,7 +74,7 @@ test('the admin wire codec preserves Date values across a query round trip', asy
 });
 
 test('tasks run once in the worker and schedules can be managed', async ({ page, baseURL }) => {
-  await page.goto('/login/alice');
+  await login(page, 'alice');
   await page.getByRole('button', { name: /Refresh summary/ }).click();
   const taskCount = async () => {
     const response = await page.request.get(`${baseURL}/workcore/api/tasks?applicationId=tracker&workspaceId=personal-alice`);
@@ -95,4 +101,67 @@ test('tasks run once in the worker and schedules can be managed', async ({ page,
   await page.getByRole('button', { name: 'Disable' }).click();
   await expect(page.getByRole('button', { name: 'Enable' })).toBeVisible();
   await page.getByRole('button', { name: 'Remove' }).click();
+});
+
+test('Better Auth-backed identity workspace is admin-only and lists persistent users', async ({ browser, baseURL }) => {
+  const signup = await browser.newPage();
+  const blockedSignup = await signup.request.post(`${baseURL}/api/auth/sign-up/email`, {
+    data: { email: 'public@example.test', name: 'Public Signup', password: 'not-a-demo-account' },
+  });
+  expect(blockedSignup.status()).toBe(403);
+  await signup.close();
+
+  const adminContext = await browser.newContext();
+  const aliceContext = await browser.newContext();
+  const admin = await adminContext.newPage();
+  const alice = await aliceContext.newPage();
+  await login(admin, 'admin');
+  await login(alice, 'alice');
+
+  const result = await admin.request.post(`${baseURL}/workcore/api/query`, {
+    data: { applicationId: 'identity', workspaceId: 'directory', operation: 'users', input: {} },
+  });
+  expect(result.ok()).toBeTruthy();
+  const users = await result.json() as { result: { rows: Array<{ id: string; username: string; role: string }> } };
+  expect(users.result.rows.map(({ username }) => username).sort()).toEqual(['admin', 'alice', 'bob']);
+  expect(users.result.rows.find(({ username }) => username === 'admin')?.role).toBe('admin');
+  const adminUser = users.result.rows.find(({ username }) => username === 'admin')!;
+  const demoteLastAdmin = await admin.request.post(`${baseURL}/workcore/api/mutate`, {
+    data: { applicationId: 'identity', workspaceId: 'directory', operation: 'setUserRole', input: { id: adminUser.id, role: 'user' } },
+  });
+  expect(demoteLastAdmin.ok()).toBeFalsy();
+  const bob = users.result.rows.find(({ username }) => username === 'bob')!;
+  const promote = await admin.request.post(`${baseURL}/workcore/api/mutate`, {
+    data: { applicationId: 'identity', workspaceId: 'directory', operation: 'setUserRole', input: { id: bob.id, role: 'admin' } },
+  });
+  expect(promote.ok()).toBeTruthy();
+  expect((await promote.json() as { result: { role: string } }).result.role).toBe('admin');
+  const restore = await admin.request.post(`${baseURL}/workcore/api/mutate`, {
+    data: { applicationId: 'identity', workspaceId: 'directory', operation: 'setUserRole', input: { id: bob.id, role: 'user' } },
+  });
+  expect(restore.ok()).toBeTruthy();
+  const rename = await admin.request.post(`${baseURL}/workcore/api/mutate`, {
+    data: { applicationId: 'identity', workspaceId: 'directory', operation: 'setUserName', input: { id: bob.id, name: 'Bob Demo Renamed' } },
+  });
+  expect(rename.ok()).toBeTruthy();
+  expect((await rename.json() as { result: { name: string } }).result.name).toBe('Bob Demo Renamed');
+  const restoreName = await admin.request.post(`${baseURL}/workcore/api/mutate`, {
+    data: { applicationId: 'identity', workspaceId: 'directory', operation: 'setUserName', input: { id: bob.id, name: 'Bob Example' } },
+  });
+  expect(restoreName.ok()).toBeTruthy();
+
+  await admin.getByLabel('Application').selectOption('identity');
+  const bobRow = admin.getByRole('row').filter({ hasText: 'bob' });
+  await bobRow.getByRole('button', { name: 'Change name' }).click();
+  await expect(admin.locator('.generated-form input[type="text"]').nth(1)).toHaveValue('Bob Example');
+  await admin.getByRole('button', { name: 'Users' }).click();
+  await bobRow.getByRole('button', { name: 'Change role' }).click();
+  await expect(admin.locator('.generated-form select')).toHaveValue('user');
+
+  const denied = await alice.request.post(`${baseURL}/workcore/api/query`, {
+    data: { applicationId: 'identity', workspaceId: 'directory', operation: 'users', input: {} },
+  });
+  expect(denied.status()).toBe(403);
+  await adminContext.close();
+  await aliceContext.close();
 });

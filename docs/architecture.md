@@ -45,9 +45,9 @@ The console consumes the same authorised manifest and API as custom clients. It 
 
 The reusable `@workcore/adapters` package exposes the local implementations as individual adapters. Applications compose them into `PlatformServices`; the tracker uses a shared file state for KV, tasks, schedules and history, while selecting its event adapter explicitly.
 
-The tracker example intentionally needs no database or Redis to run:
+The tracker example uses a local SQLite database for Better Auth identity, workspace membership and tracker domain data, but still needs no Redis or external service:
 
-- Domain activities are stored in `data/tracker.json`.
+- Better Auth users/sessions, workspace memberships and activities are stored in `data/workcore.sqlite` via Drizzle. Override the path with `WORKCORE_DATABASE`.
 - KV values, task queue/runs, schedules and safe history are stored in `data/workcore-state.json` with serialized local file updates.
 - A claimed task left in the processing list is requeued on the next adapter instance start (at-least-once behaviour).
 - Task queue and schedule payloads contain JSON-safe encoded handler inputs plus a codec ID; adapters must persist those fields unchanged, and worker processes must register compatible codecs until the work expires.
@@ -55,9 +55,9 @@ The tracker example intentionally needs no database or Redis to run:
 - `reserveRun` atomically checks the claim, revision and enabled state and persists `pendingRunId` before enqueue. The ID is derived from the schedule and occurrence and is reused on recovery, including after uncertain enqueue acknowledgements or bookkeeping failures. Task adapters must make enqueue idempotent by ID even for already-completed runs, and retain deduplication records for the schedule recovery window. Both local adapters implement this. A pending reserved occurrence is recovered rather than skipped as a missed recurring occurrence. Reservation is the dispatch boundary: edits made before it prevent stale dispatch; disabling/removing a schedule afterwards does not cancel an already-reserved run.
 - The worker serializes polling within a process and renews leases during long actor-resolution/authorization calls. Enqueue and schedule bookkeeping still span separate adapter calls, so these guarantees do not make domain side effects exactly-once or replace an outbox.
 - SSE events are in-process/transient. Active subscriptions recover through periodic refresh; a mutation event lost between domain write and event publication can still miss a task trigger.
-- Workspace membership and demo capability rules are in source. The `/login/:actor` cookie route is an unauthenticated local fixture.
+- Demo account identities/passwords and initial workspace membership rules are seed definitions in source; membership changes are persisted in SQLite. Better Auth owns username/password sessions and native routes under `/api/auth/*`; the host blocks public sign-up.
 
-These adapters are single-process local/demo implementations. File serialization is not a cross-process lock, scheduler claim protocol or production database. Do not expose this demo authentication or run multiple workers against the same files. Applications should implement the exported service interfaces using their shared database, queue, authentication and event infrastructure.
+The file-backed Workcore adapters and demo Better Auth/SQLite composition are local examples, not a production deployment recipe. File serialization is not a cross-process lock, scheduler claim protocol or production database. Change the seeded passwords and secret before exposing the demo. Applications should implement the exported service interfaces using their shared database, queue, authentication and event infrastructure.
 
 ## Security and failure semantics
 
@@ -75,7 +75,7 @@ These adapters are single-process local/demo implementations. File serialization
 
 ## Current limitations
 
-- No Better Auth integration or managed production service deployment is supplied. PostgreSQL state and Redis transient-event adapter entry points are available; consumers operate and secure their own infrastructure.
+- The core does not include a Better Auth adapter package or managed production service deployment. The tracker is a reference host integration; PostgreSQL state and Redis transient-event adapter entry points are available, and consumers operate and secure their own infrastructure.
 - No managed transaction/unit of work or outbox. Application handlers can use their own database transaction, but Workcore cannot atomically coordinate it with events, KV or queues.
 - Event publication and trigger enqueue are separate from a domain write. Transient event loss can miss live invalidation/trigger work until a client refreshes; refresh cannot restore a missed task trigger.
 - The local file adapters assume one process. `@workcore/adapters/postgres` supplies shared persistent state and atomic task/schedule claims; `@workcore/adapters/redis` supplies shared but transient event delivery. Durable event publication/outbox coordination remains deferred.

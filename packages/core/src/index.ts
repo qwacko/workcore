@@ -71,7 +71,12 @@ export type ExecutionContext<App> = {
   signal: AbortSignal;
   services: ScopedServices;
   app: App;
+  /** Incoming HTTP request metadata for interactive calls; absent for worker and scheduled executions. */
+  request?: RequestContext;
 };
+
+/** Request metadata forwarded to synchronous operation handlers. Headers may contain credentials; never log or persist them. */
+export type RequestContext = { url: string; method: string; headers: Headers };
 
 export interface ScopedServices {
   kv: {
@@ -754,10 +759,11 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
     let context: unknown;
     try {
       context = await registration.createAppContext({ scope, actor });
+      const requestContext = createRequestContext(request);
       const result = await executeWithDeadline(request.signal, options.operationTimeoutMs ?? 30_000, (signal) => def.handler({
-        ctx: createExecutionContext(scope, actor, correlationId, context, options.services, signal),
+        ctx: createExecutionContext(scope, actor, correlationId, context, options.services, signal, undefined, requestContext),
         input: validatedInput,
-        operations: createCaller(registration, actor, scope, correlationId, options, apps, signal, codec),
+        operations: createCaller(registration, actor, scope, correlationId, options, apps, signal, codec, undefined, 0, undefined, requestContext),
       }));
       const validatedResult = await validateOutput(def.output, result);
       const encodedResult = encodeWithCodec(codec, validatedResult);
@@ -877,9 +883,14 @@ async function executeWithDeadline<T>(parent: AbortSignal, timeoutMs: number, ex
   }
 }
 
-function createExecutionContext(scope: Scope, actor: Actor, correlationId: string, app: unknown, services: PlatformServices, signal: AbortSignal, runId?: string): ExecutionContext<unknown> {
+function createRequestContext(request?: Request): RequestContext | undefined {
+  return request ? { url: request.url, method: request.method, headers: new Headers(request.headers) } : undefined;
+}
+
+function createExecutionContext(scope: Scope, actor: Actor, correlationId: string, app: unknown, services: PlatformServices, signal: AbortSignal, runId?: string, request?: RequestContext): ExecutionContext<unknown> {
   return {
     scope, actor, correlationId, signal, app,
+    ...(request ? { request: { ...request, headers: new Headers(request.headers) } } : {}),
     services: {
       kv: {
         get: async (key) => services.kv.get(scope, key) as Promise<never>,
@@ -892,7 +903,7 @@ function createExecutionContext(scope: Scope, actor: Actor, correlationId: strin
   };
 }
 
-function createCaller(registration: ApplicationRegistration, actor: Actor, scope: Scope, correlationId: string, options: PlatformOptions, apps: Map<string, ApplicationRegistration>, signal: AbortSignal, codec: WireCodec = jsonWireCodec, causationId?: string, triggerDepth = 0, currentExecutionId?: string): OperationCaller {
+function createCaller(registration: ApplicationRegistration, actor: Actor, scope: Scope, correlationId: string, options: PlatformOptions, apps: Map<string, ApplicationRegistration>, signal: AbortSignal, codec: WireCodec = jsonWireCodec, causationId?: string, triggerDepth = 0, currentExecutionId?: string, request?: RequestContext): OperationCaller {
   const invoke = async (kind: 'query' | 'mutation' | 'task', name: string, input: unknown) => {
     if (!await options.services.workspaces.canAccess(actor, scope)) throw new WorkcoreError('FORBIDDEN', 'Workspace access denied', 403);
     const def = operationAt(registration.definition, kind, name);
@@ -910,7 +921,7 @@ function createCaller(registration: ApplicationRegistration, actor: Actor, scope
     const entry: HistoryEntry = { id: executionId, scope, actorId: actor.id, kind, operation: name, status: 'running', startedAt: new Date(startedAt).toISOString() };
     const context = await registration.createAppContext({ scope, actor });
     try {
-      const result = await executeWithDeadline(signal, options.operationTimeoutMs ?? 30_000, (executionSignal) => def.handler({ ctx: createExecutionContext(scope, actor, correlationId, context, options.services, executionSignal), input: validInput, operations: createCaller(registration, actor, scope, correlationId, options, apps, executionSignal, codec, causationId, triggerDepth, currentExecutionId) }));
+      const result = await executeWithDeadline(signal, options.operationTimeoutMs ?? 30_000, (executionSignal) => def.handler({ ctx: createExecutionContext(scope, actor, correlationId, context, options.services, executionSignal, undefined, request), input: validInput, operations: createCaller(registration, actor, scope, correlationId, options, apps, executionSignal, codec, causationId, triggerDepth, currentExecutionId, request) }));
       const validOutput = await validateOutput(def.output, result);
       let deliveryFailed = false;
       if (kind === 'mutation') {

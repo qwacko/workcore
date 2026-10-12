@@ -56,7 +56,7 @@ const worker = platform.worker();
 worker.start(); // Run this in the separate worker process, not the request server.
 ```
 
-Mount `platform.httpHandler()` in the host server. Start `platform.worker()` in a separate process using the same application registrations, authorization resolvers, codec allow-list, pool and queue service configuration. The local tracker demo intentionally runs both in one host and its file adapters are not suitable for a multi-process deployment.
+Mount `platform.httpHandler()` in the host server. Start `platform.worker()` in a separate process using the same application registrations, authorization resolvers, codec allow-list, pool and queue service configuration. The tracker example is a local single-process composition: it demonstrates Better Auth + Drizzle/SQLite for identity and application data, while retaining file adapters for Workcore services. It is not suitable for a multi-process deployment.
 
 ## Guarantees and limits
 
@@ -68,7 +68,7 @@ Mount `platform.httpHandler()` in the host server. Start `platform.worker()` in 
 - History stores metadata and sanitised errors; task results are persisted for inspection. Do not put secrets in task inputs/results. Workcore currently provides no per-field redaction or age-based retention policy; apply additional database retention controls when required.
 - Workspace membership is stored as `(applicationId, workspaceId, actorId)`. Your application remains responsible for managing membership changes and authorisation context. `pg` and `redis` are optional peer dependencies: consumers that use these entry points must install their drivers.
 - The file adapter's `taskDedupe` IDs are retained indefinitely so pruning old run/result rows cannot re-enable an old enqueue. This local JSON adapter is single-process and its state file can still grow; use the PostgreSQL adapter for shared production state.
-- Authentication remains host-owned. This release does not ship a Better Auth integration; adapt your trusted session/auth library to `AuthAdapter` and re-resolve actors for queued work.
+- Authentication remains host-owned. The core does not ship a Better Auth adapter package; the tracker demonstrates the host integration. See [Better Auth and identity management](/authentication). Adapt your trusted session/auth library to `AuthAdapter` and re-resolve actors for queued work.
 
 The adapter integration suite runs against real services when `WORKCORE_POSTGRES_URL` and `WORKCORE_REDIS_URL` are set. CI supplies PostgreSQL 16 and Redis 7. Locally, point those variables at disposable test instances and run `pnpm --filter @workcore/adapters test:integration`.
 

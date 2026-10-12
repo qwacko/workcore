@@ -14,11 +14,11 @@ pnpm build
 pnpm dev
 ```
 
-Open <http://127.100.0.10:3000>, then choose **Alice** or **Bob**. By default the demo binds to `127.100.0.10:3000`; configure the bind address with `HOST` and port with `PORT` (for example, `HOST=127.0.0.1 PORT=4173 pnpm dev`). For reverse proxies, set `WORKCORE_TRUSTED_ORIGINS` to a comma-separated list of public origins (for example, `https://workcore.dev.jmcdowall.com`). The default includes that demo origin. The demo shows personal and shared workspace isolation, a live activity table, generated edit forms, a task triggered by mutations, schedules, history, and a second application with a differently shaped context.
+Open <http://127.100.0.10:3000> and sign in with one of the local accounts shown on the page: `alice / alice-demo-pass`, `bob / bob-demo-pass`, or `admin / admin-demo-pass`. The server binds to `HOST` (`127.100.0.10` by default) and `PORT` (`3000` by default). The tracker loads `examples/tracker/.env` first, then the repo-root `.env`; values already exported in the shell take precedence. For example: `HOST=127.0.0.1 PORT=4173 BETTER_AUTH_URL=http://127.0.0.1:4173 pnpm dev`. Set `BETTER_AUTH_URL` to the browser-facing public URL behind a proxy (for example, `https://workcore.dev.jmcdowall.com`); both Better Auth and Workcore derive their default trusted origin from that URL. Override them independently with comma-separated `BETTER_AUTH_TRUSTED_ORIGINS` and `WORKCORE_TRUSTED_ORIGINS`. Set `BETTER_AUTH_SECRET` to a private random secret. The demo shows username/password authentication, an admin-only identity workspace for listing users and changing names/roles, SQLite-backed users, membership and activity data, personal and shared workspace isolation, live updates, tasks, schedules, history, and a second application with a differently shaped context.
 
 Browse the [Workcore documentation site](https://qwacko.github.io/workcore/) or run it locally with `pnpm docs:dev`.
 
-The demo's `/login/alice` and `/login/bob` routes and file-backed adapters are for local development only—not production authentication or multi-process infrastructure.
+The tracker example uses Better Auth with its username plugin and Drizzle on SQLite. The user, account, session, workspace membership, and activity tables live in `data/workcore.sqlite` (override with `WORKCORE_DATABASE`). User registration is disabled at the host route; the three accounts are seeded for local demonstration. Workcore's task, schedule, history, KV, logger, and event services remain file-backed in `data/workcore-state.json`. This composition is a realistic single-process example, not a production deployment recipe; change the demo passwords and secret before exposing it.
 
 ## Packages
 
@@ -30,13 +30,13 @@ The demo's `/login/alice` and `/login/bob` routes and file-backed adapters are f
 | `@workcore/codec-superjson` | Optional SuperJSON wire codec for rich values such as `Date` |
 | `@workcore/codec-devalue` | Optional devalue wire codec for its supported rich-value set |
 | `@workcore/admin` | Prebuilt Svelte admin assets and host-route handler |
-| `examples/tracker` | Hono host, example workspace definitions and local durable adapter composition |
+| `examples/tracker` | Hono host, Better Auth + Drizzle/SQLite identity and domain data, plus file-backed Workcore services |
 
 For a shared multi-process deployment, `@workcore/adapters/postgres` provides durable workspace, KV, history, task and schedule state, and `@workcore/adapters/redis` provides scoped transient events. See the [production deployment guide](docs/production-deployment.md) for setup, migrations, retention and delivery guarantees. These entry points use optional peer drivers rather than bundling database clients.
 
 The core has no database, queue, auth-provider or UI framework dependency. The supplied admin is optional; applications can use only the runtime/client or provide their own frontend.
 
-The wire protocol defaults to strict JSON. To preserve rich values, install a codec package, pass the same codec to the typed client and allow-list it on the platform. The tracker example uses `superjsonCodec()` and has a `Date` query to demonstrate that schema types remain `Date` end-to-end; its local JSON database separately stores ISO strings explicitly.
+The wire protocol defaults to strict JSON. To preserve rich values, install a codec package, pass the same codec to the typed client and allow-list it on the platform. The tracker example uses `superjsonCodec()` and has a `Date` query to demonstrate that schema types remain `Date` end-to-end; its SQLite database stores activity timestamps as integer dates.
 
 ```ts
 const codec = superjsonCodec();

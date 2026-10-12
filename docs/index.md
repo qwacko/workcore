@@ -26,6 +26,7 @@ Workcore keeps domain data and repositories in your application while supplying 
 
 - **[Getting started](/getting-started)** — run the demo or add Workcore to an existing application.
 - **[Authoring](/authoring)** — define operations, validation, permissions, and presentation metadata.
+- **[Authentication](/authentication)** — integrate Better Auth, mount auth routes, and provide identity management.
 - **[Production deployment](/production-deployment)** — configure PostgreSQL state, Redis events, and a separate worker.
 - **[Architecture and security](/architecture)** — understand runtime contracts and limitations.
 
