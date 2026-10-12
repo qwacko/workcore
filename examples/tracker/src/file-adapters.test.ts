@@ -100,4 +100,22 @@ describe('local durable adapter', () => {
     expect(disabledRecovery?.pendingRunId).toBe('stable-run');
     expect(await restarted.schedules.reserveRun(disabledRecovery!, 'worker-c', 'stable-run')).toBe(true);
   });
+
+  it('bounds retained history and completed task-run records', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'workcore-retention-'));
+    const scope = { applicationId: 'app', workspaceId: 'one' };
+    const services = createFileState({ path: join(directory, 'state.json'), workspaces: [{ ...scope, id: 'one', name: 'One', actors: ['alice'] }], retention: { historyLimit: 2, taskRunLimit: 2 }, maxKVValueBytes: 32 });
+    await expect(services.kv.set(scope, 'large', 'x'.repeat(100))).rejects.toThrow(/byte limit/);
+    for (let index = 0; index < 3; index++) {
+      await services.history.append({ id: `history-${index}`, scope, actorId: 'alice', kind: 'query', operation: 'read', status: 'succeeded', startedAt: new Date().toISOString() });
+      const payload = { id: `task-${index}`, ...scope, operation: 'run', input: {}, actorId: 'alice', correlationId: 'corr', createdAt: new Date().toISOString() };
+      await services.tasks.enqueue(payload);
+      await services.tasks.claim();
+      await services.tasks.complete(payload.id, { ok: true });
+    }
+    expect((await services.history.list(scope, 10)).map((entry) => entry.id)).toEqual(['history-2', 'history-1']);
+    expect((await services.tasks.list(scope, 10)).map((run) => run.runId)).toEqual(['task-2', 'task-1']);
+    await services.tasks.enqueue({ id: 'task-0', ...scope, operation: 'run', input: {}, actorId: 'alice', correlationId: 'corr', createdAt: new Date().toISOString() });
+    expect(await services.tasks.claim()).toBeUndefined();
+  });
 });

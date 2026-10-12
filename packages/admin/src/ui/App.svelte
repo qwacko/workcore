@@ -27,6 +27,7 @@
   let queryRefreshInFlight = false;
   let queryRefreshPending = false;
   let queryGeneration = 0;
+  let submissionGeneration = 0;
   let workspaceRequestGeneration = 0;
   let sectionRequestGeneration = 0;
   let scheduleDialogOpen = $state(false);
@@ -73,6 +74,7 @@
     workspaceRequestGeneration++;
     sectionRequestGeneration++;
     queryGeneration++;
+    submissionGeneration++;
     queryRefreshPending = false;
     loading = false;
     workspaceId = '';
@@ -84,6 +86,7 @@
   async function selectWorkspace() {
     const generation = ++workspaceRequestGeneration;
     queryGeneration++;
+    submissionGeneration++;
     sectionRequestGeneration++;
     queryRefreshPending = false;
     loading = false;
@@ -110,6 +113,7 @@
           } else void loadSection();
         },
         onReady: () => { if (generation === workspaceRequestGeneration && currentOperation?.kind === 'query') void runSelectedQuery(false); },
+        onReconnect: () => { if (generation === workspaceRequestGeneration && currentOperation?.kind === 'query') void runSelectedQuery(false); else if (generation === workspaceRequestGeneration) void loadSection(); },
         onError: (cause) => { if (generation === workspaceRequestGeneration && !cause.message.includes('reconnecting')) error = cause.message; },
       });
       await loadSection();
@@ -122,6 +126,7 @@
 
   function chooseOperation(name: string) {
     queryGeneration++;
+    submissionGeneration++;
     queryRefreshPending = false;
     loading = false;
     selectedOperation = name;
@@ -206,15 +211,21 @@
     const operation = currentOperation;
     if (!operation) return;
     if (operation.kind === 'query') return runSelectedQuery(showPending);
+    const generation = ++submissionGeneration;
+    const submittedApplicationId = applicationId;
+    const submittedWorkspaceId = workspaceId;
+    const submittedOperation = operation.name;
+    const isCurrent = () => generation === submissionGeneration && applicationId === submittedApplicationId && workspaceId === submittedWorkspaceId && selectedOperation === submittedOperation;
     error = '';
     if (showPending) loading = true;
     try {
       const input = parseOperationInput(operation);
-      if (operation.kind === 'mutation') result = await transport.request({ path: 'mutate', applicationId, workspaceId, operation: operation.name, input });
-      else result = await transport.request({ path: 'enqueue', applicationId, workspaceId, operation: operation.name, input });
-      await loadSection();
-    } catch (cause) { error = message(cause); }
-    finally { loading = false; }
+      const value = operation.kind === 'mutation'
+        ? await transport.request({ path: 'mutate', applicationId: submittedApplicationId, workspaceId: submittedWorkspaceId, operation: submittedOperation, input })
+        : await transport.request({ path: 'enqueue', applicationId: submittedApplicationId, workspaceId: submittedWorkspaceId, operation: submittedOperation, input });
+      if (isCurrent()) { result = value; await loadSection(); }
+    } catch (cause) { if (isCurrent()) error = message(cause); }
+    finally { if (generation === submissionGeneration) loading = false; }
   }
 
   async function runSelectedQuery(showPending: boolean) {
@@ -320,6 +331,16 @@
       await loadSection();
     } catch (cause) { error = message(cause); }
   }
+  async function saveSchedule(schedule: Record<string, unknown>) {
+    try {
+      const query = `applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`;
+      const patch = { ...(schedule.kind === 'recurring' ? { cron: schedule.cron } : {}), timezone: schedule.timezone };
+      const response = await fetch(`${config.apiBasePath ?? '/workcore/api'}/schedules/${encodeURIComponent(String(schedule.id))}?${query}`, { method: 'PATCH', credentials: 'same-origin', headers: apiHeaders(true), body: encodeBody(patch) });
+      const data = await decodeResponse(response) as { error?: { message?: string } };
+      if (!response.ok) throw new Error(data.error?.message ?? 'Could not save schedule');
+      await loadSection();
+    } catch (cause) { error = message(cause); }
+  }
 
   function useVariant(name: string) { selectedVariant = name; }
   function isPage(value: unknown): value is { rows: Array<Record<string, unknown>>; nextCursor: string | null; totalCount?: number } {
@@ -331,6 +352,15 @@
   function setField(key: string, value: unknown) {
     try { const parsed = (parseEditableJson(inputText || '{}') ?? {}) as Record<string, unknown>; parsed[key] = value; inputText = editableJson(parsed); }
     catch { inputText = JSON.stringify({ [key]: value }, null, 2); }
+  }
+  function clearField(key: string) {
+    const input = currentInput();
+    delete input[key];
+    inputText = editableJson(input);
+  }
+  function enumValue(schema: Record<string, unknown>, value: string) {
+    const option = (schema.enum as unknown[] | undefined)?.find((candidate) => String(candidate) === value);
+    return option;
   }
   function currentInput() {
     try { return parseEditableJson(inputText) as Record<string, unknown>; } catch { return {}; }
@@ -446,15 +476,18 @@
                         {@const required = ((currentOperation.input.required as string[] | undefined) ?? []).includes(key)}
                         <label class="field-label">{key}<span>{required ? 'Required' : 'Optional'}</span>
                           {#if Array.isArray(schema.enum)}
-                            <select value={String(value ?? (((currentOperation.input.required as string[] | undefined) ?? []).includes(key) ? schema.enum[0] : ''))} onchange={(event) => { if (event.currentTarget.value) setField(key, event.currentTarget.value); else { const input = currentInput(); delete input[key]; inputText = JSON.stringify(input, null, 2); } }}>
+                             <select value={value === undefined ? (((currentOperation.input.required as string[] | undefined) ?? []).includes(key) ? String(schema.enum[0]) : '') : String(value)} onchange={(event) => { if (event.currentTarget.value) setField(key, enumValue(schema, event.currentTarget.value)); else clearField(key); }}>
                               {#if !required}<option value="">Any</option>{/if}
                               {#each schema.enum as choice}<option value={String(choice)}>{String(choice)}</option>{/each}
                             </select>
-                          {:else if schema.type === 'boolean'}
-                            <span class="checkbox-field"><input type="checkbox" checked={Boolean(value)} onchange={(event) => setField(key, event.currentTarget.checked)} /> Enabled</span>
-                          {:else}
-                             <input type={schema.type === 'number' || schema.type === 'integer' ? 'number' : 'text'} value={editableFieldValue(value)} required={required} oninput={(event) => setField(key, schema.type === 'number' || schema.type === 'integer' ? Number(event.currentTarget.value) : event.currentTarget.value)} />
-                          {/if}
+                           {:else if schema.type === 'boolean' && !required}
+                             <select value={value === undefined ? '' : String(value)} onchange={(event) => { if (event.currentTarget.value === '') clearField(key); else setField(key, event.currentTarget.value === 'true'); }}><option value="">Any</option><option value="true">True</option><option value="false">False</option></select>
+                           {:else if schema.type === 'boolean'}
+                             <span class="checkbox-field"><input type="checkbox" checked={Boolean(value)} onchange={(event) => setField(key, event.currentTarget.checked)} /> Enabled</span>
+                           {:else}
+                             <input type={schema.type === 'number' || schema.type === 'integer' ? 'number' : 'text'} value={editableFieldValue(value)} required={required} oninput={(event) => { const raw = event.currentTarget.value; if (!required && raw === '') clearField(key); else setField(key, schema.type === 'number' || schema.type === 'integer' ? Number(raw) : raw); }} />
+                           {/if}
+                           {#if !required && schema.type !== 'boolean' && !Array.isArray(schema.enum)}<button type="button" class="text-button" onclick={() => clearField(key)}>Unset</button>{/if}
                         </label>
                       {/each}
                       <div class="schema-hint">Validated by the operation schema on the server.</div>
@@ -481,7 +514,7 @@
          <div class="panel data-panel">{#if runs.length}<div class="data-table"><div class="data-header"><span>Task</span><span>Status</span><span>Progress</span><span>Started</span></div>{#each runs as run}<div class="data-row"><strong>{String(run.operation)}</strong><span class="status" class:success={run.status === 'succeeded'}>{String(run.status)}</span><span>{run.progress == null ? '—' : `${run.progress}%`}</span><span>{String(run.startedAt ?? '')}</span></div>{#if run.result !== undefined || run.error}<details class="run-details"><summary>View result / error</summary><pre>{richJson(run.result ?? run.error)}</pre></details>{/if}{/each}</div>{:else}<div class="empty"><h2>No task runs yet</h2><p>Launch a task from Operations to see its run here.</p></div>{/if}</div>
       {:else if section === 'schedules'}
         <div class="page-heading"><div><div class="eyebrow">AUTOMATION</div><h1>Schedules</h1><p>Manage recurring and one-off task schedules.</p></div><button class="secondary" onclick={() => void loadSection()}>Refresh</button></div>
-        <div class="panel data-panel">{#if schedules.length}<div class="data-table"><div class="data-header schedule-cols"><span>Task</span><span>Pattern</span><span>Timezone</span><span>Next run</span><span>Manage</span></div>{#each schedules as schedule}<div class="data-row schedule-cols"><strong>{String(schedule.operation)}</strong><span>{String(schedule.cron ?? schedule.runAt)}</span><span>{String(schedule.timezone)}</span><span>{String(schedule.nextRunAt ?? '—')}</span><span class="schedule-actions"><button class="text-button" onclick={() => void toggleSchedule(schedule)}>{schedule.enabled ? 'Disable' : 'Enable'}</button><button class="text-button" onclick={() => void deleteSchedule(schedule.id)}>Remove</button></span></div>{#if schedule.lastSkipReason}<div class="skip-reason">{String(schedule.lastSkipReason)}</div>{/if}{/each}</div>{:else}<div class="empty"><h2>No schedules</h2><p>Choose a task operation and schedule it from the operations console.</p></div>{/if}</div>
+         <div class="panel data-panel">{#if schedules.length}<div class="data-table"><div class="data-header schedule-cols"><span>Task</span><span>Pattern</span><span>Timezone</span><span>Next run</span><span>Manage</span></div>{#each schedules as schedule}<div class="data-row schedule-cols"><strong>{String(schedule.operation)}</strong>{#if schedule.kind === 'recurring'}<input aria-label={`Cron for ${schedule.operation}`} bind:value={schedule.cron} />{:else}<span>{String(schedule.runAt)}</span>{/if}<input aria-label={`Timezone for ${schedule.operation}`} bind:value={schedule.timezone} /><span>{String(schedule.nextRunAt ?? '—')}</span><span class="schedule-actions"><button class="text-button" onclick={() => void saveSchedule(schedule)}>Save</button><button class="text-button" onclick={() => void toggleSchedule(schedule)}>{schedule.enabled ? 'Disable' : 'Enable'}</button><button class="text-button" onclick={() => void deleteSchedule(schedule.id)}>Remove</button></span></div>{#if schedule.lastSkipReason}<div class="skip-reason">{String(schedule.lastSkipReason)}</div>{/if}{/each}</div>{:else}<div class="empty"><h2>No schedules</h2><p>Choose a task operation and schedule it from the operations console.</p></div>{/if}</div>
       {:else}
         <div class="page-heading"><div><div class="eyebrow">AUDIT</div><h1>Operation history</h1><p>Recent execution outcomes for this workspace.</p></div><button class="secondary" onclick={() => void loadSection()}>Refresh</button></div>
         <div class="panel data-panel">{#if history.length}<div class="data-table"><div class="data-header"><span>Operation</span><span>Kind</span><span>Status</span><span>Actor</span><span>Duration</span></div>{#each history as entry}<div class="data-row"><strong>{String(entry.operation)}</strong><span>{String(entry.kind)}</span><span class="status" class:success={entry.status === 'succeeded'}>{String(entry.status)}</span><span>{String(entry.actorId)}</span><span>{entry.durationMs == null ? '—' : `${entry.durationMs} ms`}</span></div>{/each}</div>{:else}<div class="empty"><h2>No operation history</h2><p>Successful and failed operations will appear here.</p></div>{/if}</div>

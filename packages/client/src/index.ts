@@ -79,7 +79,10 @@ export function createFetchTransport(options: { baseUrl?: string; fetch?: typeof
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: operationBody({ applicationId, workspaceId, operation, input }),
       });
-      if (typeof response.deliveryWarning === 'string') options.onWarning?.(response.deliveryWarning);
+      const warnings = Array.isArray(response.deliveryWarnings)
+        ? response.deliveryWarnings.filter((warning): warning is string => typeof warning === 'string')
+        : typeof response.deliveryWarning === 'string' ? [response.deliveryWarning] : [];
+      for (const warning of warnings) options.onWarning?.(warning);
       return ('result' in response ? response.result : response) as never;
     },
     manifest: async (applicationId, workspaceId) => json(`${baseUrl}/manifest?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`),

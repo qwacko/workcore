@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createFetchTransport } from './index.js';
 import type { JsonValue, WireCodec } from '@workcore/core';
 
 describe('fetch transport', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it('uses JSON operation endpoints and unwraps validated results', async () => {
     let received: RequestInit | undefined;
     const transport = createFetchTransport({
@@ -57,5 +59,26 @@ describe('fetch transport', () => {
     expect(codec.decode(sentEnvelope.payload)).toMatchObject({ input: { at: sentDate } });
     expect(result).toBeInstanceOf(Date);
     expect(result.toISOString()).toBe(returnedDate.toISOString());
+  });
+
+  it('distinguishes the initial SSE connection from reconnections', () => {
+    class EventSourceStub {
+      static current!: EventSourceStub;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(_url: string, _options: EventSourceInit) { EventSourceStub.current = this; }
+      close() {}
+    }
+    vi.stubGlobal('EventSource', EventSourceStub);
+    const transport = createFetchTransport({});
+    const onReady = vi.fn();
+    const onReconnect = vi.fn();
+    const stop = transport.subscribe('app', 'workspace', { onInvalidate: vi.fn(), onReady, onReconnect, onError: vi.fn() });
+    EventSourceStub.current.onopen?.();
+    EventSourceStub.current.onopen?.();
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+    stop();
   });
 });

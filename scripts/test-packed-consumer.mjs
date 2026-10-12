@@ -40,6 +40,8 @@ try {
   await writeFile(join(consumer, 'index.ts'), `
 import { defineWorkspace } from '@workcore/core';
 import { createFileState, createFileWorkspaces } from '@workcore/adapters/file';
+import { createPostgresState, migratePostgres } from '@workcore/adapters/postgres';
+import { createRedisEvents } from '@workcore/adapters/redis';
 import { createMemoryState, createMemoryHistory } from '@workcore/adapters/memory';
 import { createClient, createFetchTransport } from '@workcore/client';
 import { createAdminHandler } from '@workcore/admin/server';
@@ -51,6 +53,9 @@ const schema = z.object({ value: z.number() });
 const app = defineWorkspace<{ add(value: number): number }>()({ id: 'consumer', queries: { read: { input: schema, output: schema, api: true, permission: 'read', handler: ({ ctx, input }) => ({ value: ctx.app.add(input.value) }) } } });
 const client = createClient<typeof app>({ transport: createFetchTransport({}), applicationId: 'consumer', workspaceId: 'one' });
 void client.query('read', { value: 2 });
+const services = createPostgresState({ pool: {} as never });
+void services.tasks;
+void createRedisEvents({ publisher: {} as never, subscriber: {} as never });
 // @ts-expect-error Schema-inferred client inputs are enforced after packing.
 void client.query('read', { value: 'bad' });
 createAdminHandler({ basePath: '/admin' });
@@ -60,6 +65,9 @@ const memory = createMemoryState();
 void createMemoryHistory(memory);
 const file = createFileState({ path: 'workcore-state.json', workspaces: [] });
 void createFileWorkspaces(file);
+void createPostgresState;
+void migratePostgres;
+void createRedisEvents;
 `);
   run('pnpm', ['install', '--no-frozen-lockfile'], consumer);
   run('pnpm', ['exec', 'tsc', '-p', 'tsconfig.json'], consumer);

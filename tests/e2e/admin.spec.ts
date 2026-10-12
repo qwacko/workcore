@@ -87,7 +87,11 @@ test('tasks run once in the worker and schedules can be managed', async ({ page,
   await page.getByRole('button', { name: 'Schedule task' }).click();
   await page.getByRole('button', { name: 'Create schedule' }).click();
   await expect(page.getByRole('heading', { name: 'Schedules', exact: true })).toBeVisible();
-  await expect(page.getByText('0 9 * * *')).toBeVisible();
+  const cron = page.getByLabel('Cron for refreshSummary');
+  await expect(cron).toHaveValue('0 9 * * *');
+  await cron.fill('30 8 * * *');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByLabel('Cron for refreshSummary')).toHaveValue('30 8 * * *');
   await page.getByRole('button', { name: 'Disable' }).click();
   await expect(page.getByRole('button', { name: 'Enable' })).toBeVisible();
   await page.getByRole('button', { name: 'Remove' }).click();

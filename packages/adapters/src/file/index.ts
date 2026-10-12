@@ -1,9 +1,10 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { nextScheduleOccurrence, type EventAdapter, type HistoryEntry, type PlatformServices, type ScheduleEntry, type Scope, type TaskPayload, type TaskRun, type WorkcoreEvent } from '@workcore/core';
+import { jsonWireCodec, nextScheduleOccurrence, type EventAdapter, type HistoryEntry, type PlatformServices, type ScheduleEntry, type Scope, type TaskPayload, type TaskRun, type WorkcoreEvent } from '@workcore/core';
 
 type DurableFileState = {
   tasks: TaskPayload[];
+  taskDedupe: string[];
   processing: TaskPayload[];
   runs: TaskRun[];
   history: HistoryEntry[];
@@ -11,25 +12,53 @@ type DurableFileState = {
   kv: Record<string, unknown>;
 };
 
-const emptyState = (): DurableFileState => ({ tasks: [], processing: [], runs: [], history: [], schedules: [], kv: {} });
+export type FileRetentionOptions = {
+  /** Retain at most this many newest history records. Defaults to 5,000. */
+  historyLimit?: number;
+  /** Retain at most this many task-run records, preserving queued/running runs. Defaults to 1,000. */
+  taskRunLimit?: number;
+};
+
+const emptyState = (): DurableFileState => ({ tasks: [], taskDedupe: [], processing: [], runs: [], history: [], schedules: [], kv: {} });
 const scopeKey = (scope: Scope) => JSON.stringify([scope.applicationId, scope.workspaceId]);
 const kvKey = (scope: Scope, key: string) => JSON.stringify([scope.applicationId, scope.workspaceId, key]);
 const sameScope = (left: Scope, right: Scope) => left.applicationId === right.applicationId && left.workspaceId === right.workspaceId;
 
-/** Single-process local/demo adapter. Production multi-process deployments should use shared database/queue adapters. */
+/**
+ * Single-process local/demo adapter. Production multi-process deployments should use shared adapters.
+ * Enqueue deduplication IDs are retained indefinitely, independently of taskRunLimit.
+ */
 function createFileAdapterState(options: {
   path: string;
   workspaces: Array<{ applicationId: string; id: string; name: string; actors: string[] }>;
+  retention?: FileRetentionOptions;
+  maxKVValueBytes?: number;
 }): PlatformServices {
   let serial: Promise<void> = Promise.resolve();
   let recovered = false;
   const listeners = new Map<string, Set<(event: WorkcoreEvent) => void>>();
   const waiters = new Set<() => void>();
+  const historyLimit = options.retention?.historyLimit ?? 5_000;
+  const taskRunLimit = options.retention?.taskRunLimit ?? 1_000;
+  const maxKVValueBytes = options.maxKVValueBytes ?? 1_048_576;
+  if (!Number.isInteger(maxKVValueBytes) || maxKVValueBytes < 1) throw new TypeError('maxKVValueBytes must be a positive integer');
+  for (const [name, limit] of [['historyLimit', historyLimit], ['taskRunLimit', taskRunLimit]] as const) {
+    if (!Number.isInteger(limit) || limit < 1) throw new TypeError(`${name} must be a positive integer`);
+  }
+  const pruneTaskRuns = (state: DurableFileState) => {
+    if (state.runs.length <= taskRunLimit) return;
+    const keep = new Set(state.runs.filter((run) => run.status === 'queued' || run.status === 'running').map((run) => run.runId));
+    for (const run of state.runs) {
+      if (keep.size >= taskRunLimit) break;
+      if (run.status !== 'queued' && run.status !== 'running') keep.add(run.runId);
+    }
+    state.runs = state.runs.filter((run) => keep.has(run.runId));
+  };
 
   async function read(): Promise<DurableFileState> {
     try {
       const parsed = JSON.parse(await readFile(options.path, 'utf8')) as Partial<DurableFileState>;
-      return { ...emptyState(), ...parsed, processing: parsed.processing ?? [] };
+      return { ...emptyState(), ...parsed, taskDedupe: parsed.taskDedupe ?? parsed.runs?.map((run) => run.runId) ?? [], processing: parsed.processing ?? [] };
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return emptyState();
       throw error;
@@ -76,15 +105,17 @@ function createFileAdapterState(options: {
     },
     events: eventAdapter,
     history: {
-      append: (entry) => update((state) => { state.history.unshift(entry); }),
+      append: (entry) => update((state) => { state.history.unshift(entry); state.history.length = Math.min(state.history.length, historyLimit); }),
       list: async (scope, limit) => (await read()).history.filter((entry) => sameScope(entry.scope, scope)).slice(0, limit),
     },
     tasks: {
       enqueue: async (payload) => {
         await update((state) => {
-          if (state.runs.some((run) => run.runId === payload.id)) return;
+          if (state.taskDedupe.includes(payload.id)) return;
+          state.taskDedupe.push(payload.id);
           state.tasks.push(payload);
           state.runs.unshift({ id: payload.id, runId: payload.id, scope: { applicationId: payload.applicationId, workspaceId: payload.workspaceId }, actorId: payload.actorId, kind: 'task', operation: payload.operation, status: 'queued', startedAt: payload.createdAt, ...(payload.codecId ? { codecId: payload.codecId } : {}) });
+          pruneTaskRuns(state);
         });
         for (const wake of waiters) wake();
       },
@@ -211,7 +242,11 @@ function createFileAdapterState(options: {
         if (matchingScopes.length === 1 && matchingScopes[0]?.applicationId === scope.applicationId && matchingScopes[0]?.id === scope.workspaceId) return values[legacyKey];
         return undefined;
       },
-      set: (scope, key, value) => update((state) => { state.kv[kvKey(scope, key)] = value; }),
+      set: async (scope, key, value) => {
+        const encoded = jsonWireCodec.encode(value);
+        if (new TextEncoder().encode(JSON.stringify(encoded)).byteLength > maxKVValueBytes) throw new RangeError(`KV value exceeds the ${maxKVValueBytes}-byte limit`);
+        await update((state) => { state.kv[kvKey(scope, key)] = encoded; });
+      },
       delete: (scope, key) => update((state) => { delete state.kv[kvKey(scope, key)]; }),
     },
     logger: {

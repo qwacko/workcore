@@ -597,4 +597,59 @@ describe('Workcore HTTP runtime', () => {
     const untrustedPreflight = await trusted(new Request('http://127.100.0.10:3000/api/query', { method: 'OPTIONS', headers: { origin: 'https://attacker.invalid' } }));
     expect(untrustedPreflight.headers.get('access-control-allow-origin')).toBeNull();
   });
+
+  it('distinguishes invalid handler output and reports history delivery failure without hiding committed results', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'outcomes', id: 'one', name: 'One', actors: ['alice'] }] });
+    const app = defineWorkspace()({ id: 'outcomes', mutations: {
+      invalid: { input: objectSchema, output: numberSchema, permission: [], api: true, handler: () => 'not a number' as never },
+      valid: { input: objectSchema, output: numberSchema, permission: [], api: true, handler: () => 42 },
+    } });
+    const handler = createPlatform({
+      applications: [app.registerApplication({ createAppContext: async () => ({}) })],
+      auth: { authenticate: () => ({ id: 'alice' }) }, services,
+    }).httpHandler({ apiBasePath: '/api' });
+    const invoke = (operation: string) => handler(new Request(`http://localhost/api/mutate`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ applicationId: 'outcomes', workspaceId: 'one', operation, input: {} }),
+    }));
+    const invalid = await invoke('invalid');
+    expect(invalid.status).toBe(500);
+    expect(await invalid.json()).toMatchObject({ error: { code: 'OUTPUT_VALIDATION_FAILED', message: expect.stringContaining('side effects may already have occurred') } });
+    services.history.append = async () => { throw new Error('private storage detail'); };
+    const valid = await invoke('valid');
+    expect(valid.status).toBe(200);
+    expect(await valid.json()).toMatchObject({ result: 42, deliveryWarning: 'HISTORY_PERSISTENCE_FAILED', deliveryWarnings: ['HISTORY_PERSISTENCE_FAILED'] });
+  });
+
+  it('aborts timed-out handlers and lets worker shutdown finish promptly', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'deadlines', id: 'one', name: 'One', actors: ['alice'] }] });
+    const app = defineWorkspace()({ id: 'deadlines', queries: {
+      tooLong: { input: objectSchema, output: numberSchema, permission: [], api: true, handler: () => new Promise<number>(() => {}) },
+    }, tasks: {
+      stuck: { input: objectSchema, output: numberSchema, permission: [], api: true, handler: ({ ctx }) => new Promise<number>((_resolve, reject) => ctx.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) },
+    } });
+    const platform = createPlatform({
+      applications: [app.registerApplication({ createAppContext: async () => ({}) })],
+      auth: { authenticate: () => ({ id: 'alice' }), resolveActor: (id) => ({ id }) },
+      services, operationTimeoutMs: 50, shutdownTimeoutMs: 25,
+    });
+    const handler = platform.httpHandler({ apiBasePath: '/api' });
+    const timedOut = await handler(new Request('http://localhost/api/query', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ applicationId: 'deadlines', workspaceId: 'one', operation: 'tooLong', input: {} }),
+    }));
+    expect(timedOut.status).toBe(504);
+    expect(await timedOut.json()).toMatchObject({ error: { code: 'OPERATION_TIMEOUT' } });
+    const queued = await handler(new Request('http://localhost/api/enqueue', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ applicationId: 'deadlines', workspaceId: 'one', operation: 'stuck', input: {} }),
+    }));
+    expect(queued.status).toBe(202);
+    const worker = platform.worker();
+    worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const started = Date.now();
+    await worker.stop();
+    expect(Date.now() - started).toBeLessThan(250);
+  });
 });

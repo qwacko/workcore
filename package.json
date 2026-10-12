@@ -12,17 +12,22 @@
     "test:e2e": "pnpm exec playwright test",
     "typecheck": "pnpm -r typecheck",
     "changeset": "changeset",
-    "version-packages": "changeset version",
+    "version-packages": "changeset version && pnpm docs:version",
     "release": "pnpm build && changeset publish",
     "dev": "pnpm --filter @workcore/example dev",
     "dev:admin": "pnpm --filter @workcore/admin dev",
-    "test:packages": "pnpm build && node scripts/test-packed-consumer.mjs"
+    "test:packages": "pnpm build && node scripts/test-packed-consumer.mjs",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "docs:version": "node scripts/version-docs.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.3",
     "@playwright/test": "^1.56.0",
     "@types/node": "^24.7.0",
     "typescript": "7.0.2",
+    "vitepress": "^1.6.4",
     "vitest": "^3.2.4"
   }
 }

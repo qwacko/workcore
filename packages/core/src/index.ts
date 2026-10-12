@@ -437,6 +437,8 @@ export interface TaskAdapter {
   /** Idempotent by payload.id, including completed runs retained for schedule recovery. */
   enqueue(payload: TaskPayload): Promise<void>;
   claim(): Promise<TaskPayload | undefined>;
+  /** Extend a claimed task lease while its handler is executing, when the adapter uses expiring claims. */
+  heartbeat?(runId: string): Promise<void>;
   /** Return a claimed run to the queue after a transient worker/adapter failure. */
   release(runId: string): Promise<void>;
   complete(runId: string, result: JsonValue): Promise<void>;
@@ -518,6 +520,10 @@ export type PlatformOptions = {
   admin?: { basePath: string; handle?: (request: Request) => Promise<Response> | Response };
   maxRequestBytes?: number;
   maxResultBytes?: number;
+  /** Maximum handler runtime. Defaults to 30 seconds for HTTP/internal calls and 5 minutes for worker tasks. */
+  operationTimeoutMs?: number;
+  /** Maximum time worker.stop() waits after aborting work. Defaults to 10 seconds. */
+  shutdownTimeoutMs?: number;
   liveRefreshMs?: number;
   workerRetryDelayMs?: number;
   /** Additional allow-listed codecs for request/response values and encoded queue/schedule inputs. */
@@ -748,33 +754,33 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
     let context: unknown;
     try {
       context = await registration.createAppContext({ scope, actor });
-      const result = await def.handler({
-        ctx: createExecutionContext(scope, actor, correlationId, context, options.services, request.signal),
+      const result = await executeWithDeadline(request.signal, options.operationTimeoutMs ?? 30_000, (signal) => def.handler({
+        ctx: createExecutionContext(scope, actor, correlationId, context, options.services, signal),
         input: validatedInput,
-        operations: createCaller(registration, actor, scope, correlationId, options, apps, request.signal, codec),
-      });
-      const validatedResult = await validate(def.output, result);
+        operations: createCaller(registration, actor, scope, correlationId, options, apps, signal, codec),
+      }));
+      const validatedResult = await validateOutput(def.output, result);
       const encodedResult = encodeWithCodec(codec, validatedResult);
       if (new TextEncoder().encode(JSON.stringify(encodedResult)).byteLength > (options.maxResultBytes ?? 2_097_152)) throw new WorkcoreError('RESULT_TOO_LARGE', 'Operation result exceeds configured limit', 413);
-      let deliveryFailed = false;
+      const deliveryWarnings: string[] = [];
       if (kind === 'mutation') {
         const event: WorkcoreEvent = { id: randomId(), type: 'mutation.succeeded', applicationId, workspaceId, operation: operationName, executionId, actorId: actor.id, correlationId, createdAt: new Date().toISOString() };
         let published = false;
         try { await options.services.events.publish(event); published = true; } catch (error) {
-          deliveryFailed = true;
+          deliveryWarnings.push('EVENT_DELIVERY_FAILED');
           options.services.logger?.error('Mutation committed but success event publication failed', { executionId, detail: error instanceof Error ? error.message : String(error) });
         }
         try { if (published) await enqueueTriggeredTasks(registration, actor, scope, correlationId, event, options, codec); }
         catch (error) {
-          deliveryFailed = true;
+          deliveryWarnings.push('TRIGGER_DELIVERY_FAILED');
           options.services.logger?.error('Mutation committed but triggered task enqueue failed', { executionId, detail: safeMessage(error) });
         }
       }
-      entry.status = deliveryFailed ? 'delivery_failed' : 'succeeded';
+      entry.status = deliveryWarnings.length ? 'delivery_failed' : 'succeeded';
       entry.finishedAt = new Date().toISOString();
       entry.durationMs = Date.now() - startedAt;
-      await safeHistory(options, entry);
-      return json({ result: validatedResult, executionId, ...(deliveryFailed ? { deliveryWarning: 'EVENT_DELIVERY_FAILED' } : {}) }, 200, {}, codec);
+      if (!await safeHistory(options, entry)) deliveryWarnings.push('HISTORY_PERSISTENCE_FAILED');
+      return json({ result: validatedResult, executionId, ...(deliveryWarnings.length ? { deliveryWarning: deliveryWarnings[0], deliveryWarnings } : {}) }, 200, {}, codec);
     } catch (error) {
       entry.status = 'failed';
       entry.finishedAt = new Date().toISOString();
@@ -833,6 +839,44 @@ async function validate(schema: AnySchema, value: unknown): Promise<unknown> {
   return result.value;
 }
 
+async function validateOutput(schema: AnySchema, value: unknown): Promise<unknown> {
+  try { return await validate(schema, value); }
+  catch (error) {
+    if (error instanceof WorkcoreError && error.code === 'VALIDATION_FAILED') {
+      throw new WorkcoreError('OUTPUT_VALIDATION_FAILED', 'Handler completed but returned a value that failed output validation; side effects may already have occurred', 500);
+    }
+    throw error;
+  }
+}
+
+async function executeWithDeadline<T>(parent: AbortSignal, timeoutMs: number, execute: (signal: AbortSignal) => T | Promise<T>): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('operationTimeoutMs must be a positive finite number');
+  if (parent.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Operation was aborted; side effects may have occurred', 499);
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(parent.reason);
+  parent.addEventListener('abort', abortFromParent, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const timeoutError = new WorkcoreError('OPERATION_TIMEOUT', 'Operation exceeded its configured time limit; side effects may have occurred', 504);
+  let rejectAbort!: (error: Error) => void;
+  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+  const rejectOnAbort = () => rejectAbort(timedOut ? timeoutError : new WorkcoreError('EXECUTION_ABORTED', 'Operation was aborted; side effects may have occurred', 499));
+  controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error('Operation deadline exceeded'));
+      reject(timeoutError);
+    }, timeoutMs);
+  });
+  try { return await Promise.race([Promise.resolve().then(() => execute(controller.signal)), timeout, aborted]); }
+  finally {
+    if (timer) clearTimeout(timer);
+    controller.signal.removeEventListener('abort', rejectOnAbort);
+    parent.removeEventListener('abort', abortFromParent);
+  }
+}
+
 function createExecutionContext(scope: Scope, actor: Actor, correlationId: string, app: unknown, services: PlatformServices, signal: AbortSignal, runId?: string): ExecutionContext<unknown> {
   return {
     scope, actor, correlationId, signal, app,
@@ -866,8 +910,8 @@ function createCaller(registration: ApplicationRegistration, actor: Actor, scope
     const entry: HistoryEntry = { id: executionId, scope, actorId: actor.id, kind, operation: name, status: 'running', startedAt: new Date(startedAt).toISOString() };
     const context = await registration.createAppContext({ scope, actor });
     try {
-      const result = await def.handler({ ctx: createExecutionContext(scope, actor, correlationId, context, options.services, signal), input: validInput, operations: createCaller(registration, actor, scope, correlationId, options, apps, signal, codec, causationId, triggerDepth, currentExecutionId) });
-      const validOutput = await validate(def.output, result);
+      const result = await executeWithDeadline(signal, options.operationTimeoutMs ?? 30_000, (executionSignal) => def.handler({ ctx: createExecutionContext(scope, actor, correlationId, context, options.services, executionSignal), input: validInput, operations: createCaller(registration, actor, scope, correlationId, options, apps, executionSignal, codec, causationId, triggerDepth, currentExecutionId) }));
+      const validOutput = await validateOutput(def.output, result);
       let deliveryFailed = false;
       if (kind === 'mutation') {
         const event: WorkcoreEvent = { id: randomId(), type: 'mutation.succeeded', applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: name, executionId, actorId: actor.id, correlationId, ...(currentExecutionId ? { causationId: currentExecutionId } : causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt: new Date().toISOString() };
@@ -939,13 +983,13 @@ async function processClaimedTask(payload: TaskPayload, options: PlatformOptions
     const context = await registration.createAppContext({ scope, actor });
     let result: unknown;
     try {
-      result = await def.handler({
-        ctx: createExecutionContext(scope, actor, payload.correlationId, context, options.services, signal, payload.id),
+      result = await executeWithDeadline(signal, options.operationTimeoutMs ?? 5 * 60_000, (executionSignal) => def.handler({
+        ctx: createExecutionContext(scope, actor, payload.correlationId, context, options.services, executionSignal, payload.id),
         input,
-        operations: createCaller(registration, actor, scope, payload.correlationId, options, apps, signal, codec, payload.causationId, payload.triggerDepth ?? 0, payload.id),
-      });
+        operations: createCaller(registration, actor, scope, payload.correlationId, options, apps, executionSignal, codec, payload.causationId, payload.triggerDepth ?? 0, payload.id),
+      }));
     } finally { await cleanupContext(context, options.services.logger); }
-    const validatedResult = await validate(def.output, result);
+    const validatedResult = await validateOutput(def.output, result);
     encodedResult = encodeWithCodec(codec, validatedResult);
     if (new TextEncoder().encode(JSON.stringify(encodedResult)).byteLength > (options.maxResultBytes ?? 2_097_152)) throw new WorkcoreError('RESULT_TOO_LARGE', 'Task result exceeds configured limit', 413);
   } catch (error) {
@@ -981,7 +1025,12 @@ function createWorker(options: PlatformOptions, apps: Map<string, ApplicationReg
       try {
         claimed = await options.services.tasks.claim();
         if (!claimed) { await options.services.tasks.waitForWork(controller.signal); continue; }
-        await processClaimedTask(claimed, options, apps, controller.signal);
+        const activeRunId = claimed.id;
+        const heartbeat = options.services.tasks.heartbeat ? setInterval(() => {
+          void options.services.tasks.heartbeat!(activeRunId).catch((error) => options.services.logger?.warn('Task lease heartbeat failed', { runId: activeRunId, detail: safeMessage(error) }));
+        }, 10_000) : undefined;
+        try { await processClaimedTask(claimed, options, apps, controller.signal); }
+        finally { if (heartbeat) clearInterval(heartbeat); }
         claimed = undefined;
         consecutiveErrors = 0;
       } catch (error) {
@@ -1011,7 +1060,17 @@ function createWorker(options: PlatformOptions, apps: Map<string, ApplicationReg
       }, 1_000);
       controller.signal.addEventListener('abort', () => { if (scheduleTimer) clearInterval(scheduleTimer); }, { once: true });
     },
-    stop: async () => { stopping = true; controller.abort(); if (scheduleTimer) clearInterval(scheduleTimer); await Promise.all([workerPromise, schedulePromise]); },
+    stop: async () => {
+      stopping = true;
+      controller.abort();
+      if (scheduleTimer) clearInterval(scheduleTimer);
+      const pending = Promise.all([workerPromise, schedulePromise]);
+      const graceMs = options.shutdownTimeoutMs ?? 10_000;
+      if (!Number.isFinite(graceMs) || graceMs < 0) throw new Error('shutdownTimeoutMs must be a non-negative finite number');
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try { await Promise.race([pending, new Promise<void>((resolve) => { timer = setTimeout(resolve, graceMs); })]); }
+      finally { if (timer) clearTimeout(timer); }
+    },
     run,
   };
 }
@@ -1238,14 +1297,22 @@ function sameScope(a: Scope, b: Scope) { return a.applicationId === b.applicatio
 function normalizePath(path: string) { return `/${path.split('/').filter(Boolean).join('/')}`; }
 function randomId() { return globalThis.crypto.randomUUID(); }
 function safeMessage(error: unknown) { return error instanceof WorkcoreError ? error.message.slice(0, 300) : 'Operation failed'; }
-async function safeHistory(options: PlatformOptions, entry: HistoryEntry) {
-  try { await options.services.history.append(entry); }
+async function safeHistory(options: PlatformOptions, entry: HistoryEntry): Promise<boolean> {
+  try { await options.services.history.append(entry); return true; }
   catch (error) { options.services.logger?.error('Operation history persistence failed', { executionId: entry.id, detail: safeMessage(error) }); }
+  return false;
 }
 async function cleanupContext(context: unknown, logger?: Logger) {
   if (context && typeof context === 'object' && 'dispose' in context && typeof context.dispose === 'function') {
-    try { await context.dispose(); }
-    catch { logger?.error('Application context cleanup failed', { error: 'Cleanup hook threw' }); }
+    const dispose = context.dispose as () => unknown;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => dispose.call(context)),
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Cleanup deadline exceeded')), 5_000); }),
+      ]);
+    } catch { logger?.error('Application context cleanup failed', { error: 'Cleanup hook failed or exceeded 5 seconds' }); }
+    finally { if (timer) clearTimeout(timer); }
   }
 }
 function corsHeaders(request: Request, trustedOrigins: ReadonlySet<string>): Record<string, string> {
