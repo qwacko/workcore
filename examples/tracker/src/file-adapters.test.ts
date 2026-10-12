@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createFileServices } from './file-services.js';
+import { createFileState } from '@workcore/adapters/file';
 
 let directory = '';
 afterEach(async () => { if (directory) await rm(directory, { recursive: true, force: true }); directory = ''; });
@@ -12,13 +12,13 @@ describe('local durable adapter', () => {
     directory = await mkdtemp(join(tmpdir(), 'workcore-state-'));
     const path = join(directory, 'state.json');
     const configuration = { path, workspaces: [{ applicationId: 'app', id: 'one', name: 'One', actors: ['alice'] }] };
-    const first = createFileServices(configuration);
+    const first = createFileState(configuration);
     const payload = { id: 'run-1', applicationId: 'app', workspaceId: 'one', operation: 'refresh', input: {}, actorId: 'alice', correlationId: 'corr-1', createdAt: new Date().toISOString() };
     await first.tasks.enqueue(payload);
     await first.tasks.claim(); // Simulate a worker dying after claiming but before completing.
     await first.kv.set({ applicationId: 'app', workspaceId: 'one' }, 'value', { count: 1 });
 
-    const restarted = createFileServices(configuration);
+    const restarted = createFileState(configuration);
     const recovered = await restarted.tasks.claim();
     expect(recovered?.id).toBe('run-1');
     expect(await restarted.kv.get({ applicationId: 'app', workspaceId: 'one' }, 'value')).toEqual({ count: 1 });
@@ -29,7 +29,7 @@ describe('local durable adapter', () => {
 
   it('uses collision-free scope tuples for file-backed KV and event routing', async () => {
     directory = await mkdtemp(join(tmpdir(), 'workcore-scope-'));
-    const services = createFileServices({ path: join(directory, 'state.json'), workspaces: [
+    const services = createFileState({ path: join(directory, 'state.json'), workspaces: [
       { applicationId: 'a:b', id: 'c', name: 'First', actors: ['alice'] },
       { applicationId: 'a', id: 'b:c', name: 'Second', actors: ['alice'] },
     ] });
@@ -45,7 +45,7 @@ describe('local durable adapter', () => {
 
   it('keeps due schedule reservations persisted until claimed bookkeeping completes', async () => {
     directory = await mkdtemp(join(tmpdir(), 'workcore-schedule-'));
-    const services = createFileServices({ path: join(directory, 'state.json'), workspaces: [{ applicationId: 'app', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createFileState({ path: join(directory, 'state.json'), workspaces: [{ applicationId: 'app', id: 'one', name: 'One', actors: ['alice'] }] });
     const now = new Date();
     await services.schedules.create({
       id: 'schedule-1', scope: { applicationId: 'app', workspaceId: 'one' }, operation: 'refresh', input: {}, actorId: 'alice', timezone: 'UTC',
@@ -70,7 +70,7 @@ describe('local durable adapter', () => {
     directory = await mkdtemp(join(tmpdir(), 'workcore-recovery-'));
     const configuration = { path: join(directory, 'state.json'), workspaces: [{ applicationId: 'app', id: 'one', name: 'One', actors: ['alice'] }] };
     const scope = { applicationId: 'app', workspaceId: 'one' };
-    const services = createFileServices(configuration);
+    const services = createFileState(configuration);
     const now = new Date();
     await services.schedules.create({ id: 'reserved', scope, operation: 'refresh', input: {}, actorId: 'alice', timezone: 'UTC', kind: 'once', enabled: true, createdAt: now.toISOString(), nextRunAt: now.toISOString() });
     const [claim] = await services.schedules.claimDue(now, 'worker-a', 60_000);
@@ -78,7 +78,7 @@ describe('local durable adapter', () => {
     const payload = { id: 'stable-run', ...scope, operation: 'refresh', input: {}, actorId: 'alice', correlationId: 'c', createdAt: now.toISOString(), scheduleId: 'reserved' };
     await services.tasks.enqueue(payload);
     await services.schedules.releaseClaim('reserved', 'worker-a');
-    const restarted = createFileServices(configuration);
+    const restarted = createFileState(configuration);
     expect((await restarted.schedules.get('reserved'))?.pendingRunId).toBe('stable-run');
     await restarted.tasks.enqueue(payload);
     expect(await restarted.tasks.list(scope, 10)).toHaveLength(1);

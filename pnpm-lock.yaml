@@ -29,6 +29,9 @@ importers:
       '@hono/node-server':
         specifier: ^1.19.2
         version: 1.19.17(hono@4.13.13)
+      '@workcore/adapters':
+        specifier: workspace:*
+        version: link:../../packages/adapters
       '@workcore/admin':
         specifier: workspace:*
         version: link:../../packages/admin
@@ -60,6 +63,16 @@ importers:
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@24.19.2)(tsx@4.23.15)(yaml@2.9.1)
+
+  packages/adapters:
+    dependencies:
+      '@workcore/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^24.7.0
+        version: 24.19.2
 
   packages/admin:
     dependencies:

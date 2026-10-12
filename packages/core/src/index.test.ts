@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createMemoryServices, createPlatform, defineWorkspace, jsonWireCodec, registerApplication, type Actor, type PlatformServices, type TaskPayload, type WireCodec } from './index.js';
+import { createMemoryState, createPlatform, defineWorkspace, jsonWireCodec, type Actor, type PlatformServices, type TaskPayload, type WireCodec } from './index.js';
 
 type AppContext = { value: { current: number } };
 type Schema<T> = {
@@ -50,15 +50,14 @@ const dateSchema: Schema<Date> = { '~standard': {
 } };
 
 function fixture(services: PlatformServices, access?: (actor: Actor, scope: { applicationId: string; workspaceId: string }, permission: string) => boolean, trustedOrigins?: readonly string[], workerRetryDelayMs?: number) {
-  const define = defineWorkspace<AppContext>();
-  const app = define({
+  const app = defineWorkspace<AppContext>()({
     id: 'counter',
-    queries: { value: define.query({ input: objectSchema, output: numberSchema, api: true, permission: 'read', handler: ({ ctx }) => ctx.app.value.current }) },
-    mutations: { increment: define.mutation({ input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: ({ ctx }) => ++ctx.app.value.current }) },
-    tasks: { update: define.task({ input: objectSchema, output: numberSchema, api: true, permission: 'write', triggers: { mutations: ['increment'] }, handler: ({ ctx }) => ctx.app.value.current }) },
+    queries: { value: { input: objectSchema, output: numberSchema, api: true, permission: 'read', handler: ({ ctx }) => ctx.app.value.current } },
+    mutations: { increment: { input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: ({ ctx }) => ++ctx.app.value.current } },
+    tasks: { update: { input: objectSchema, output: numberSchema, api: true, permission: 'write', triggers: { mutations: ['increment'] }, handler: ({ ctx }) => ctx.app.value.current } },
   });
   const platform = createPlatform({
-    applications: [registerApplication({ definition: app, createAppContext: ({ scope }) => ({ value: { current: scope.workspaceId === 'one' ? 1 : 20 } }) })],
+    applications: [app.registerApplication({ createAppContext: ({ scope }) => ({ value: { current: scope.workspaceId === 'one' ? 1 : 20 } }) })],
     auth: { authenticate: (request) => { const id = request.headers.get('x-actor'); return id ? { id } : null; }, resolveActor: (id) => ({ id }) },
     authorise: ({ actor, scope, permission }) => access?.(actor, scope, permission) ?? true,
     ...(trustedOrigins ? { trustedOrigins } : {}),
@@ -75,7 +74,7 @@ const req = (path: string, body?: unknown, actor = 'alice') => new Request(`http
 
 describe('Workcore HTTP runtime', () => {
   it('validates, scopes and authorises requests', async () => {
-    const services = createMemoryServices({ workspaces: [
+    const services = createMemoryState({ workspaces: [
       { applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] },
       { applicationId: 'counter', id: 'two', name: 'Two', actors: ['bob'] },
     ] });
@@ -92,8 +91,95 @@ describe('Workcore HTTP runtime', () => {
     expect(mutationResponse.status).toBe(403);
   });
 
+  it('fails closed for named permissions when no authorizer is configured', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'closed', id: 'one', name: 'One', actors: ['alice'] }] });
+    const definition = defineWorkspace<AppContext>()({
+      id: 'closed',
+      queries: { read: { input: objectSchema, output: numberSchema, api: true, permission: 'read', handler: () => 1 } },
+    });
+    const platform = createPlatform({
+      applications: [definition.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })],
+      auth: { authenticate: (request) => request.headers.get('x-actor') ? { id: 'alice' } : null },
+      services,
+    });
+    const handler = platform.httpHandler({ apiBasePath: '/api' });
+    const query = await handler(req('/query', { applicationId: 'closed', workspaceId: 'one', operation: 'read', input: {} }));
+    const manifest = await handler(req('/manifest?applicationId=closed&workspaceId=one'));
+    expect(query.status).toBe(403);
+    expect((await manifest.json()).operations).toEqual([]);
+  });
+
+  it('keeps dynamic capability policies and empty permission lists consistent with manifest visibility', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'policies', id: 'one', name: 'One', actors: ['alice'] }] });
+    const checked: string[] = [];
+    const definition = defineWorkspace<AppContext>()({
+      id: 'policies',
+      authorization: {
+        context: objectSchema,
+        check: ({ permission }) => { checked.push(permission); return permission === 'read'; },
+      },
+      queries: {
+        dynamic: { input: objectSchema, output: numberSchema, api: true, permission: ({ access }) => access.has('read'), handler: () => 1 },
+        open: { input: objectSchema, output: numberSchema, api: true, permission: [], handler: () => 2 },
+      },
+    });
+    const platform = createPlatform({
+      applications: [definition.registerApplication({ createAppContext: () => ({ value: { current: 0 } }), resolveAuthorization: () => ({}) })],
+      auth: { authenticate: (request) => request.headers.get('x-actor') ? { id: 'alice' } : null },
+      services,
+    });
+    const handler = platform.httpHandler({ apiBasePath: '/api' });
+    const manifest = await handler(req('/manifest?applicationId=policies&workspaceId=one'));
+    expect((await manifest.json()).operations.map((operation: { name: string }) => operation.name)).toEqual(['dynamic', 'open']);
+    expect(checked).toEqual([]);
+
+    const dynamic = await handler(req('/query', { applicationId: 'policies', workspaceId: 'one', operation: 'dynamic', input: {} }));
+    const open = await handler(req('/query', { applicationId: 'policies', workspaceId: 'one', operation: 'open', input: {} }));
+    expect(dynamic.status).toBe(200);
+    expect(open.status).toBe(200);
+    expect(checked).toEqual(['read']);
+  });
+
+  it('returns normalized operation kinds and empty operation maps', () => {
+    const definition = defineWorkspace<AppContext>()({
+      id: 'normalized',
+      queries: { read: { input: objectSchema, output: numberSchema, handler: () => 1 } },
+    });
+    expect(definition.queries.read.kind).toBe('query');
+    expect(definition.mutations).toEqual({});
+    expect(definition.tasks).toEqual({});
+  });
+
+  it('uses workspace authorization for built-in platform capabilities without a platform authorise callback', async () => {
+    const services = createMemoryState({ workspaces: [
+      { applicationId: 'counter', id: 'one', name: 'One', actors: ['alice', 'bob'] },
+    ] });
+    const roleSchema = schema<{ role: 'owner' | 'viewer' }>((value): value is { role: 'owner' | 'viewer' } =>
+      !!value && typeof value === 'object' && 'role' in value && ((value as { role: unknown }).role === 'owner' || (value as { role: unknown }).role === 'viewer'));
+    const definition = defineWorkspace<AppContext>()({
+      id: 'counter',
+      authorization: {
+        context: roleSchema,
+        check: ({ auth, permission }) => permission === 'workcore.history.read' && auth.role === 'owner',
+      },
+    });
+    const platform = createPlatform({
+      applications: [definition.registerApplication({
+        createAppContext: () => ({ value: { current: 0 } }),
+        resolveAuthorization: ({ actor }) => ({ role: actor.id === 'alice' ? 'owner' : 'viewer' }),
+      })],
+      auth: { authenticate: (request) => { const id = request.headers.get('x-actor'); return id ? { id } : null; }, resolveActor: (id) => ({ id }) },
+      services,
+    });
+    const handler = platform.httpHandler({ apiBasePath: '/api' });
+    const allowed = await handler(req('/history?applicationId=counter&workspaceId=one', undefined, 'alice'));
+    const denied = await handler(req('/history?applicationId=counter&workspaceId=one', undefined, 'bob'));
+    expect(allowed.status).toBe(200);
+    expect(denied.status).toBe(403);
+  });
+
   it('publishes success, enqueues task triggers, and records history', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const { handler, platform } = fixture(services);
     const response = await handler(new Request('http://localhost/api/mutate', { method: 'POST', headers: { 'content-type': 'application/json', 'x-actor': 'alice' }, body: JSON.stringify({ applicationId: 'counter', workspaceId: 'one', operation: 'increment', input: {} }) }));
     expect(response.status).toBe(200);
@@ -113,7 +199,7 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('exposes only api-enabled operations in a versioned manifest', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const { handler } = fixture(services);
     const response = await handler(new Request('http://localhost/api/manifest?applicationId=counter&workspaceId=one', { headers: { 'x-actor': 'alice' } }));
     expect(response.status).toBe(200);
@@ -124,16 +210,15 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('distinguishes event delivery failure from a committed mutation and does not trigger work', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     services.events.publish = async () => { throw new Error('private redis connection details'); };
     let sideEffects = 0;
-    const define = defineWorkspace<AppContext>();
-    const definition = define({
+    const definition = defineWorkspace<AppContext>()({
       id: 'counter',
-      mutations: { write: define.mutation({ input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: () => ++sideEffects }) },
-      tasks: { followUp: define.task({ input: objectSchema, output: numberSchema, api: true, permission: 'write', triggers: { mutations: ['write'] }, handler: () => 1 }) },
+      mutations: { write: { input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: () => ++sideEffects } },
+      tasks: { followUp: { input: objectSchema, output: numberSchema, api: true, permission: 'write', triggers: { mutations: ['write'] }, handler: () => 1 } },
     });
-    const platform = createPlatform({ applications: [registerApplication({ definition, createAppContext: () => ({ value: { current: 0 } }) })], auth: { authenticate: () => ({ id: 'alice' }), resolveActor: (id) => ({ id }) }, authorise: () => true, services });
+    const platform = createPlatform({ applications: [definition.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })], auth: { authenticate: () => ({ id: 'alice' }), resolveActor: (id) => ({ id }) }, authorise: () => true, services });
     const response = await platform.httpHandler({ apiBasePath: '/api' })(new Request('http://localhost/api/mutate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ applicationId: 'counter', workspaceId: 'one', operation: 'write', input: {} }) }));
     expect(response.status).toBe(200);
     expect((await response.json()).deliveryWarning).toBe('EVENT_DELIVERY_FAILED');
@@ -143,7 +228,7 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('rechecks workspace access when a queued actor reaches the worker', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const { handler, platform } = fixture(services);
     await handler(new Request('http://localhost/api/enqueue', { method: 'POST', headers: { 'content-type': 'application/json', 'x-actor': 'alice' }, body: JSON.stringify({ applicationId: 'counter', workspaceId: 'one', operation: 'update', input: {} }) }));
     services.workspaces.canAccess = () => false;
@@ -155,7 +240,7 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('releases a claimed task and keeps the worker alive after a transient adapter error', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const { handler, platform } = fixture(services, undefined, undefined, 1);
     await handler(new Request('http://localhost/api/enqueue', { method: 'POST', headers: { 'content-type': 'application/json', 'x-actor': 'alice' }, body: JSON.stringify({ applicationId: 'counter', workspaceId: 'one', operation: 'update', input: {} }) }));
     const canAccess = services.workspaces.canAccess.bind(services.workspaces);
@@ -177,15 +262,14 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('persists validated task input without applying schema transforms a second time', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'transform', id: 'one', name: 'One', actors: ['alice'] }] });
-    const define = defineWorkspace<AppContext>();
-    const definition = define({ id: 'transform', mutations: {
-      trigger: define.mutation({ input: objectSchema, output: numberSchema, api: true, permission: 'run', handler: () => 1 }),
+    const services = createMemoryState({ workspaces: [{ applicationId: 'transform', id: 'one', name: 'One', actors: ['alice'] }] });
+    const definition = defineWorkspace<AppContext>()({ id: 'transform', mutations: {
+      trigger: { input: objectSchema, output: numberSchema, api: true, permission: 'run', handler: () => 1 },
     }, tasks: {
-      convert: define.task({ input: numericStringSchema, output: numberSchema, api: true, permission: 'run', triggers: { mutations: ['trigger'], mapInput: () => '43' }, handler: ({ input }) => input }),
+      convert: { input: numericStringSchema, output: numberSchema, api: true, permission: 'run', triggers: { mutations: ['trigger'], mapInput: () => '43' }, handler: ({ input }) => input },
     } });
     const platform = createPlatform({
-      applications: [registerApplication({ definition, createAppContext: () => ({ value: { current: 0 } }) })],
+      applications: [definition.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })],
       auth: { authenticate: () => ({ id: 'alice' }), resolveActor: (id) => ({ id }) }, authorise: () => true, services, workerRetryDelayMs: 1,
     });
     const handler = platform.httpHandler({ apiBasePath: '/api' });
@@ -218,13 +302,12 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('keeps a recurring schedule reserved while slow actor resolution is in progress', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'slow-schedule', id: 'one', name: 'One', actors: ['alice'] }] });
-    const define = defineWorkspace<AppContext>();
-    const definition = define({ id: 'slow-schedule', tasks: {
-      run: define.task({ input: objectSchema, output: numberSchema, api: true, permission: 'run', handler: () => 1 }),
+    const services = createMemoryState({ workspaces: [{ applicationId: 'slow-schedule', id: 'one', name: 'One', actors: ['alice'] }] });
+    const definition = defineWorkspace<AppContext>()({ id: 'slow-schedule', tasks: {
+      run: { input: objectSchema, output: numberSchema, api: true, permission: 'run', handler: () => 1 },
     } });
     const platform = createPlatform({
-      applications: [registerApplication({ definition, createAppContext: () => ({ value: { current: 0 } }) })],
+      applications: [definition.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })],
       auth: {
         authenticate: () => ({ id: 'alice' }),
         resolveActor: async (id) => { await new Promise((resolve) => setTimeout(resolve, 1_300)); return { id }; },
@@ -247,18 +330,17 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('rechecks workspace access on every internal sibling call', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     let access = true;
     let writes = 0;
-    const define = defineWorkspace<AppContext>();
-    const definition = define({ id: 'counter', mutations: {
-      parent: define.mutation({ input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: async ({ operations }) => {
+    const definition = defineWorkspace<AppContext>()({ id: 'counter', mutations: {
+      parent: { input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: async ({ operations }) => {
         access = false;
         return await operations.mutate('child', {} as never) as number;
-      } }),
-      child: define.mutation({ input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: () => ++writes }),
+      } },
+      child: { input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: () => ++writes },
     } });
-    const platform = createPlatform({ applications: [registerApplication({ definition, createAppContext: () => ({ value: { current: 0 } }) })], auth: { authenticate: () => ({ id: 'alice' }) }, authorise: () => true, services });
+    const platform = createPlatform({ applications: [definition.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })], auth: { authenticate: () => ({ id: 'alice' }) }, authorise: () => true, services });
     services.workspaces.canAccess = async (actor, scope) => access && scope.applicationId === 'counter' && scope.workspaceId === 'one' && actor.id === 'alice';
     const response = await platform.httpHandler({ apiBasePath: '/api' })(new Request('http://localhost/api/mutate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ applicationId: 'counter', workspaceId: 'one', operation: 'parent', input: {} }) }));
     expect(response.status).toBe(403);
@@ -266,16 +348,15 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('preserves provenance and stops chains created with internal task enqueue', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'chain', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'chain', id: 'one', name: 'One', actors: ['alice'] }] });
     const observedPayloads: TaskPayload[] = [];
     const enqueue = services.tasks.enqueue;
     services.tasks.enqueue = async (payload) => { observedPayloads.push(payload); await enqueue(payload); };
-    const define = defineWorkspace<AppContext>();
-    const definition = define({ id: 'chain', tasks: {
-      chain: define.task({ input: objectSchema, output: objectSchema, api: true, permission: 'run', handler: async ({ operations }) => { await operations.enqueue('chain', {}); return {}; } }),
+    const definition = defineWorkspace<AppContext>()({ id: 'chain', tasks: {
+      chain: { input: objectSchema, output: objectSchema, api: true, permission: 'run', handler: async ({ operations }) => { await operations.enqueue('chain', {}); return {}; } },
     } });
     const platform = createPlatform({
-      applications: [registerApplication({ definition, createAppContext: () => ({ value: { current: 0 } }) })],
+      applications: [definition.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })],
       auth: { authenticate: () => ({ id: 'alice' }), resolveActor: (id) => ({ id }) }, authorise: () => true, services,
     });
     const response = await platform.httpHandler({ apiBasePath: '/api' })(new Request('http://localhost/api/enqueue', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ applicationId: 'chain', workspaceId: 'one', operation: 'chain', input: {} }) }));
@@ -296,7 +377,7 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('does not turn a completed task into a failure when schedule cleanup fails', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const { platform } = fixture(services);
     await services.tasks.enqueue({ id: 'scheduled-run', applicationId: 'counter', workspaceId: 'one', operation: 'update', input: {}, actorId: 'alice', correlationId: 'c1', createdAt: new Date().toISOString(), scheduleId: 'broken-schedule' });
     services.schedules.clearActiveRun = async () => { throw new Error('schedule store unavailable after task completion'); };
@@ -313,7 +394,7 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('keeps delimiter-containing scopes isolated for KV and event delivery', async () => {
-    const services = createMemoryServices({ workspaces: [
+    const services = createMemoryState({ workspaces: [
       { applicationId: 'a:b', id: 'c', name: 'First', actors: ['alice'] },
       { applicationId: 'a', id: 'b:c', name: 'Second', actors: ['alice'] },
     ] });
@@ -330,13 +411,13 @@ describe('Workcore HTTP runtime', () => {
   it.each(['disable', 'edit'] as const)('preserves a concurrent schedule %s before dispatch', async (change) => {
     vi.useFakeTimers();
     const scope = { applicationId: 'counter', workspaceId: 'one' };
-    const services = createMemoryServices({ workspaces: [{ ...scope, id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ ...scope, id: 'one', name: 'One', actors: ['alice'] }] });
     const { app } = fixture(services);
     let resume!: () => void;
     const gate = new Promise<void>((resolve) => { resume = resolve; });
     let resolving!: () => void;
     const started = new Promise<void>((resolve) => { resolving = resolve; });
-    const platform = createPlatform({ applications: [registerApplication({ definition: app, createAppContext: () => ({ value: { current: 1 } }) })],
+    const platform = createPlatform({ applications: [app.registerApplication({ createAppContext: () => ({ value: { current: 1 } }) })],
       auth: { authenticate: () => ({ id: 'alice' }), resolveActor: async () => { resolving(); await gate; return { id: 'alice' }; } }, authorise: () => true, services });
     await services.schedules.create({ id: 'concurrent', scope, operation: 'update', input: {}, actorId: 'alice', timezone: 'UTC', kind: 'recurring', cron: '* * * * *', enabled: true, createdAt: new Date().toISOString(), nextRunAt: new Date().toISOString() });
     const worker = platform.worker();
@@ -357,7 +438,7 @@ describe('Workcore HTTP runtime', () => {
   it.each(['enqueue', 'bookkeeping'] as const)('recovers uncertain schedule %s using the same occurrence ID', async (failure) => {
     vi.useFakeTimers();
     const scope = { applicationId: 'counter', workspaceId: 'one' };
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const { platform } = fixture(services);
     const enqueue = services.tasks.enqueue;
     const attemptedIds: string[] = [];
@@ -389,7 +470,7 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('rejects stale schedule edits and clears active runs without overwriting edits', async () => {
-    const services = createMemoryServices();
+    const services = createMemoryState();
     await services.schedules.create({ id: 'revision', scope: { applicationId: 'counter', workspaceId: 'one' }, operation: 'update', input: {}, actorId: 'alice', timezone: 'UTC', kind: 'recurring', cron: '* * * * *', enabled: true, activeRunId: 'run', createdAt: new Date().toISOString() });
     const original = (await services.schedules.get('revision'))!;
     expect(await services.schedules.update({ ...original, enabled: false })).toBe(true);
@@ -403,7 +484,7 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('closes a revoked SSE stream once without leaking async listener errors', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const { platform } = fixture(services);
     let access = true;
     services.workspaces.canAccess = async () => access;
@@ -420,16 +501,15 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('negotiates a registered wire codec per request and preserves rich values', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'dates', id: 'one', name: 'One', actors: ['alice'] }] });
-    const define = defineWorkspace<AppContext>();
+    const services = createMemoryState({ workspaces: [{ applicationId: 'dates', id: 'one', name: 'One', actors: ['alice'] }] });
     const requested = new Date('2026-10-12T12:00:00.000Z');
-    const definition = define({ id: 'dates', queries: {
-      echo: define.query({ input: dateSchema, output: dateSchema, api: true, permission: 'read', handler: ({ input }) => input }),
-      now: define.query({ input: objectSchema, output: dateSchema, api: true, permission: 'read', handler: () => requested }),
+    const definition = defineWorkspace<AppContext>()({ id: 'dates', queries: {
+      echo: { input: dateSchema, output: dateSchema, api: true, permission: 'read', handler: ({ input }) => input },
+      now: { input: objectSchema, output: dateSchema, api: true, permission: 'read', handler: () => requested },
     }, tasks: {
-      later: define.task({ input: dateSchema, output: dateSchema, api: true, permission: 'run', handler: ({ input }) => input }),
+      later: { input: dateSchema, output: dateSchema, api: true, permission: 'run', handler: ({ input }) => input },
     } });
-    const platform = createPlatform({ applications: [registerApplication({ definition, createAppContext: () => ({ value: { current: 0 } }) })], auth: { authenticate: () => ({ id: 'alice' }), resolveActor: (id) => ({ id }) }, authorise: () => true, services, wireCodecs: [dateCodec] });
+    const platform = createPlatform({ applications: [definition.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })], auth: { authenticate: () => ({ id: 'alice' }), resolveActor: (id) => ({ id }) }, authorise: () => true, services, wireCodecs: [dateCodec] });
     const payload = dateCodec.encode({ applicationId: 'dates', workspaceId: 'one', operation: 'echo', input: requested });
     const response = await platform.httpHandler({ apiBasePath: '/api' })(new Request('http://localhost/api/query', {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-workcore-codec': dateCodec.id },
@@ -481,7 +561,7 @@ describe('Workcore HTTP runtime', () => {
   });
 
   it('defaults missing permissions to deny and omits statically denied manifest entries', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const { handler } = fixture(services, () => false);
     const manifestResponse = await handler(new Request('http://localhost/api/manifest?applicationId=counter&workspaceId=one', { headers: { 'x-actor': 'alice' } }));
     expect((await manifestResponse.json()).operations).toEqual([]);
@@ -491,13 +571,12 @@ describe('Workcore HTTP runtime', () => {
 
   it('requires JSON Schema conversion before exposing schemas in the manifest', () => {
     const validationOnly = { '~standard': { validate: (value: unknown) => ({ value }) } } as never;
-    const define = defineWorkspace<AppContext>();
-    expect(() => define({ id: 'bad', queries: { read: define.query({ input: validationOnly, output: validationOnly, api: true, permission: 'read', handler: () => 1 }) } }))
+    expect(() => defineWorkspace<AppContext>()({ id: 'bad', queries: { read: { input: validationOnly, output: validationOnly, api: true, permission: 'read', handler: () => 1 } } }))
       .toThrow(/Standard JSON Schema/);
   });
 
   it('accepts only explicitly trusted reverse-proxy origins for state-changing calls', async () => {
-    const services = createMemoryServices({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
+    const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const origin = 'https://workcore.dev.jmcdowall.com';
     const unconfigured = fixture(services).handler;
     const blocked = await unconfigured(new Request('http://127.100.0.10:3000/api/query', {

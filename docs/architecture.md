@@ -6,7 +6,7 @@
 - `applicationId` identifies a definition; `workspaceId` selects its scoped data.
 - Query, mutation and task handlers receive an actor, scope, correlation ID, abort signal, scoped services and a per-execution application context.
 - `api: true` is required to expose an operation to HTTP clients. Internal operation calls use the same input/output validation and permission checks.
-- Missing permissions default to deny. Workspace membership is always checked separately. String and string-array policies require one/all capabilities; callback policies can make input-aware decisions. The authorised manifest hides statically denied operations, but execution checks are authoritative.
+- Missing permissions default to deny. Workspace membership is always checked separately. Named string/array capabilities require an affirmative workspace or global authorizer (and all configured gates must allow); an explicit empty array requires no capability. Callback policies are evaluated at execution and use `access.has()` for capability checks, so the manifest includes them without pretending to evaluate input-dependent policy. The manifest hides statically denied operations, but execution checks are authoritative.
 - Standard Schema is the validation contract. Standard JSON Schema draft 2020-12 is required for exposed operations so the versioned manifest and generic UI can represent inputs/results.
 
 ## HTTP and live queries
@@ -43,6 +43,8 @@ The console consumes the same authorised manifest and API as custom clients. It 
 
 ## Local demo adapters
 
+The reusable `@workcore/adapters` package exposes the local implementations as individual adapters. Applications compose them into `PlatformServices`; the tracker uses a shared file state for KV, tasks, schedules and history, while selecting its event adapter explicitly.
+
 The tracker example intentionally needs no database or Redis to run:
 
 - Domain activities are stored in `data/tracker.json`.
@@ -64,7 +66,8 @@ These adapters are single-process local/demo implementations. File serialization
 - Validate before handler execution and recheck workspace/operation access for every HTTP, sibling, queued-task, live-refetch and scheduled invocation.
 - Scope application-owned repositories themselves; passing scope alongside an unrestricted database does not isolate it.
 - Query handlers must be read-only. Mutations are not automatically transactional. Output validation or wire-encoding failures can occur after application side effects; errors do not mean rollback. Task completion is terminal before schedule/event/history follow-up, so bookkeeping failures do not rewrite a successful run as failed.
-- To get compile-time checked sibling calls inside handlers, define the query/mutation base first, then create a bound builder with `defineWorkspace<App>().withOperations<typeof base>()` for the operations/tasks that call it. These calls still execute through runtime validation and authorization. The typed browser client infers query/mutation/task inputs and outputs directly from the finished definition.
+- Applications may define an `authorization` context schema and checker on their workspace definition. The host registration resolves the trusted, execution-specific authorization context; the platform validates it and invokes the checker for application operations and built-in capabilities such as history, task inspection and schedule management. The optional platform `authorise` hook can add a global policy gate, but workspace authorization does not depend on it.
+- A workspace is authored in one `defineWorkspace<App>()({ ... })` call. Schema maps infer each operation's inputs/results; `NoInfer` makes handlers consume those types, including typed sibling query/mutation/task calls. Task triggers and UI actions are checked against declared mutations, and UI bindings against mutation input fields. Calls still execute through runtime validation and authorization. The typed browser client infers query/mutation/task inputs and outputs from the finished definition.
 - Success events contain provenance, not input/output. Event publication failure is recorded separately and surfaced as a response warning. Lost transient trigger events are not recovered.
 - History is metadata-first: actor/scope, operation, timing, status and sanitised errors. Task adapters may retain results for authorized task inspection; define retention/size policy for production data.
 - Schedule timezone is explicit. Missed recurring executions are skipped; overlap is tracked per schedule, not per workspace. Queue delivery/recovery may repeat work.

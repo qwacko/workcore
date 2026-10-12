@@ -1,127 +1,45 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { setCookie } from 'hono/cookie';
 import { createAdminHandler } from '@workcore/admin/server';
 import { superjsonCodec } from '@workcore/codec-superjson';
-import { createPlatform, registerApplication, type Actor } from '@workcore/core';
-import type { Activity, ActivityStore, TrackerContext } from './app.js';
+import { createPlatform, type Actor, type PlatformServices } from '@workcore/core';
+import { createFileEvents, createFileHistory, createFileKV, createFileLogger, createFileSchedules, createFileState, createFileTasks, createFileWorkspaces } from '@workcore/adapters/file';
 import { tracker } from './app.js';
 import { notes } from './second-app.js';
-import { actorCapabilities, createFileServices } from './file-services.js';
+import { activityStore, seedData } from './tracker-data.js';
+import { isKnownActor, workspaceRole, workspaceServiceConfig } from './demo-workspaces.js';
 
-const databasePath = resolve(process.env.WORKCORE_DATA ?? 'data/tracker.json');
-type DataFile = Record<string, Activity[]>;
-type PersistedDataFile = Record<string, Array<Omit<Activity, 'updatedAt'> & { updatedAt: string }>>;
-const scopeStorageKey = (applicationId: string, workspaceId: string) => JSON.stringify([applicationId, workspaceId]);
-let activityWrite: Promise<void> = Promise.resolve();
-
-async function readDatabase(): Promise<DataFile> {
-  try {
-    const stored = JSON.parse(await readFile(databasePath, 'utf8')) as Record<string, Array<Omit<Activity, 'updatedAt'> & { updatedAt: string }>>;
-    return Object.fromEntries(Object.entries(stored).map(([key, rows]) => [key, rows.map((row) => ({ ...row, updatedAt: new Date(row.updatedAt) }))]));
-  }
-  catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return {};
-    throw error;
-  }
-}
-async function writeDatabase(data: DataFile) {
-  await mkdir(dirname(databasePath), { recursive: true });
-  const temporary = `${databasePath}.${process.pid}.tmp`;
-  const persisted: PersistedDataFile = Object.fromEntries(Object.entries(data).map(([key, rows]) => [
-    key,
-    rows.map(({ updatedAt, ...row }) => ({ ...row, updatedAt: updatedAt.toISOString() })),
-  ]));
-  await writeFile(temporary, JSON.stringify(persisted, null, 2));
-  await rename(temporary, databasePath);
-}
-
-const activityStore: ActivityStore = {
-  async list(scope, input) {
-      const data = await readDatabase();
-      const allRows = data[scopeStorageKey(scope.applicationId, scope.workspaceId)] ?? [];
-      const search = input.search?.trim().toLocaleLowerCase();
-      const rows = allRows.filter((row) => (!input.status || row.status === input.status) && (!search || row.title.toLocaleLowerCase().includes(search)));
-      const start = input.cursor ? Math.max(0, Number.parseInt(input.cursor, 10) || 0) : 0;
-      const page = rows.slice(start, start + input.limit);
-    const next = start + page.length;
-    return { rows: page, nextCursor: next < rows.length ? String(next) : null, totalCount: rows.length };
-  },
-  async update(scope, input) {
-    let updated!: Activity;
-    const operation = activityWrite.then(async () => {
-      const data = await readDatabase();
-      const key = scopeStorageKey(scope.applicationId, scope.workspaceId);
-      const rows = data[key] ?? [];
-      const index = rows.findIndex((row) => row.id === input.id);
-      if (index < 0) throw new Error('Activity not found in this workspace');
-      updated = { ...rows[index]!, ...input, updatedAt: new Date() };
-      rows[index] = updated;
-      data[key] = rows;
-      await writeDatabase(data);
-    });
-    activityWrite = operation.catch(() => undefined);
-    await operation;
-    return updated;
-  },
+const fileState = createFileState({ path: resolve(process.env.WORKCORE_STATE ?? 'data/workcore-state.json'), workspaces: workspaceServiceConfig() });
+const services: PlatformServices = {
+  workspaces: createFileWorkspaces(fileState),
+  events: createFileEvents(fileState),
+  history: createFileHistory(fileState),
+  tasks: createFileTasks(fileState),
+  schedules: createFileSchedules(fileState),
+  kv: createFileKV(fileState),
+  logger: createFileLogger(fileState),
 };
-
-const workspaceRecords = [
-  { applicationId: 'tracker', id: 'personal-alice', name: 'Alice · Personal', actors: ['alice'], activities: [
-    { id: 'run-001', title: 'Morning interval run', status: 'planned' as const, updatedAt: new Date('2026-10-10T08:00:00.000Z') },
-    { id: 'ride-002', title: 'Coastal bike ride', status: 'complete' as const, updatedAt: new Date('2026-10-09T17:30:00.000Z') },
-  ] },
-  { applicationId: 'tracker', id: 'team', name: 'Weekend group', actors: ['alice', 'bob'], activities: [
-    { id: 'team-001', title: 'Plan group hike', status: 'planned' as const, updatedAt: new Date('2026-10-10T09:15:00.000Z') },
-    { id: 'team-002', title: 'Shared trail cleanup', status: 'complete' as const, updatedAt: new Date('2026-10-08T12:30:00.000Z') },
-  ] },
-  { applicationId: 'tracker', id: 'personal-bob', name: 'Bob · Personal', actors: ['bob'], activities: [
-    { id: 'swim-100', title: 'Pool technique session', status: 'planned' as const, updatedAt: new Date('2026-10-10T07:20:00.000Z') },
-  ] },
-];
-const noteWorkspaces = [{ applicationId: 'notes', id: 'notebook', name: 'Demo notebook', actors: ['alice', 'bob'] }];
-
-async function seedData() {
-  const data = await readDatabase();
-  let changed = false;
-  for (const workspace of workspaceRecords) {
-    const key = scopeStorageKey(workspace.applicationId, workspace.id);
-    if (data[key]) continue;
-    const legacyKey = `${workspace.applicationId}:${workspace.id}`;
-    const legacyMatches = workspaceRecords.filter((candidate) => `${candidate.applicationId}:${candidate.id}` === legacyKey);
-    if (legacyMatches.length === 1 && data[legacyKey]) {
-      data[key] = data[legacyKey];
-      delete data[legacyKey];
-    } else data[key] = workspace.activities;
-    changed = true;
-  }
-  if (changed) await writeDatabase(data);
-}
-
-const capabilities: Record<string, string[]> = {
-  alice: ['activities.read', 'activities.write', 'summary.refresh', 'notes.read', 'workcore.history.read', 'workcore.tasks.read', 'workcore.schedules.read', 'workcore.schedules.manage'],
-  bob: ['activities.read', 'notes.read', 'workcore.history.read', 'workcore.tasks.read', 'workcore.schedules.read'],
-};
-const services = createFileServices({ path: resolve(process.env.WORKCORE_STATE ?? 'data/workcore-state.json'), workspaces: [...workspaceRecords, ...noteWorkspaces] });
 const workcoreCodec = superjsonCodec();
 const admin = createAdminHandler({ basePath: '/workcore/admin', apiBasePath: '/workcore/api', wireCodecId: workcoreCodec.id });
-const trackerApplication = registerApplication({
-  definition: tracker,
-  createAppContext: async (): Promise<TrackerContext> => ({ activities: activityStore }),
+const trackerApplication = tracker.registerApplication({
+  createAppContext: async () => ({ activities: activityStore }),
+  resolveAuthorization: async ({ actor, scope }) => {
+    return { userId: actor.id, role: workspaceRole(actor.id, scope.applicationId, scope.workspaceId) ?? 'viewer', isAdmin: false };
+  },
 });
-const notesApplication = registerApplication({
-  definition: notes,
+const notesApplication = notes.registerApplication({
   createAppContext: async () => ({ notebook: { list: async () => [{ id: 'n1', text: 'Write the second app example' }, { id: 'n2', text: 'Use a differently shaped context' }] } }),
+  resolveAuthorization: async ({ actor, scope }) => ({ role: workspaceRole(actor.id, scope.applicationId, scope.workspaceId) ?? 'viewer' }),
 });
+
 const platform = createPlatform({
   applications: [trackerApplication, notesApplication],
   auth: {
     authenticate: (request) => actorFromCookie(request),
     resolveActor: (actorId) => actorFromId(actorId),
   },
-  authorise: ({ actor, permission }) => actorCapabilities(capabilities, actor, permission),
   trustedOrigins: (process.env.WORKCORE_TRUSTED_ORIGINS ?? 'https://workcore.dev.jmcdowall.com').split(',').map((origin) => origin.trim()).filter(Boolean),
   wireCodecs: [workcoreCodec],
   services,
@@ -135,7 +53,7 @@ function actorFromCookie(request: Request): Actor | null {
   return match?.[1] ? actorFromId(decodeURIComponent(match[1])) : null;
 }
 function actorFromId(id: string): Actor | null {
-  if (!capabilities[id]) return null;
+  if (!isKnownActor(id)) return null;
   return { id, name: id === 'alice' ? 'Alice Example' : 'Bob Example' };
 }
 
@@ -162,4 +80,4 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => { void worker.stop().finally(() => server.close()); });
 }
 
-export { app, platform, services };
+export { app, platform};

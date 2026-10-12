@@ -96,6 +96,24 @@ export type OperationCallContext<App, Input, Tools = OperationCaller> = {
   operations: Tools;
 };
 
+export type AuthorizationCheck<Auth = unknown> = (args: {
+  auth: Auth;
+  actor: Actor;
+  scope: Scope;
+  permission: string;
+  input: unknown;
+}) => boolean | Promise<boolean>;
+
+export type AuthorizationDefinition<Auth = unknown> = {
+  context: AnySchema;
+  check: AuthorizationCheck<Auth>;
+};
+
+type AuthorizationConfiguration<ContextSchema extends AnySchema> = {
+  context: ContextSchema;
+  check: AuthorizationCheck<OutputOf<NoInfer<ContextSchema>>>;
+};
+
 export interface OperationCaller {
   query(name: string, input: unknown): Promise<unknown>;
   mutate(name: string, input: unknown): Promise<unknown>;
@@ -147,47 +165,128 @@ export type DefinitionMap<App> = {
   tasks?: Record<string, TaskDefinition<App>>;
 };
 
-export type WorkspaceDefinition<App, D extends object = object> = D & { readonly __appContext?: App };
+export type WorkspaceDefinition<App, D extends { id: string } = { id: string }> = D & {
+  readonly __appContext?: App;
+  registerApplication(options: ApplicationRegistrationOptions<WorkspaceDefinition<App, D>>): ApplicationRegistration;
+};
 
 type SchemaArg<S extends AnySchema, O extends AnySchema> = { input: S; output: O };
 type QueryOptions<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller> = SchemaArg<S, O> & Omit<CommonDefinition<App, S, O, 'query', Tools>, 'input' | 'output' | 'kind'>;
 type MutationOptions<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller> = SchemaArg<S, O> & Omit<CommonDefinition<App, S, O, 'mutation', Tools>, 'input' | 'output' | 'kind'>;
 type TaskOptions<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller> = SchemaArg<S, O> & Omit<CommonDefinition<App, S, O, 'task', Tools>, 'input' | 'output' | 'kind'> & { triggers?: { mutations?: readonly string[]; mapInput?: (event: WorkcoreEvent) => InputOf<S> } };
 
-type OperationCallerFor<D> = {
-  query<N extends QueryNames<D>>(name: N, input: InputFor<DefinitionAt<D, 'query', N>>): Promise<OutputFor<DefinitionAt<D, 'query', N>>>;
-  mutate<N extends MutationNames<D>>(name: N, input: InputFor<DefinitionAt<D, 'mutation', N>>): Promise<OutputFor<DefinitionAt<D, 'mutation', N>>>;
-  enqueue<N extends TaskNames<D>>(name: N, input: InputFor<DefinitionAt<D, 'task', N>>): Promise<{ runId: string }>;
-};
-
-type OperationDefinitionBuilder<App, D> = {
-  query<S extends AnySchema, O extends AnySchema>(options: QueryOptions<App, S, O, OperationCallerFor<D>>): QueryDefinition<App, S, O, OperationCallerFor<D>>;
-  tableQuery<S extends AnySchema, O extends AnySchema>(options: QueryOptions<App, S, O, OperationCallerFor<D>>): QueryDefinition<App, S, O, OperationCallerFor<D>>;
-  mutation<S extends AnySchema, O extends AnySchema>(options: MutationOptions<App, S, O, OperationCallerFor<D>>): MutationDefinition<App, S, O, OperationCallerFor<D>>;
-  task<S extends AnySchema, O extends AnySchema>(options: TaskOptions<App, S, O, OperationCallerFor<D>>): TaskDefinition<App, S, O, OperationCallerFor<D>>;
-};
-
-function createOperationBuilder<App, D>(): OperationDefinitionBuilder<App, D> {
-  return {
-    query: <S extends AnySchema, O extends AnySchema>(options: QueryOptions<App, S, O, OperationCallerFor<D>>) => query<App, S, O, OperationCallerFor<D>>(options),
-    tableQuery: <S extends AnySchema, O extends AnySchema>(options: QueryOptions<App, S, O, OperationCallerFor<D>>) => tableQuery<App, S, O, OperationCallerFor<D>>(options),
-    mutation: <S extends AnySchema, O extends AnySchema>(options: MutationOptions<App, S, O, OperationCallerFor<D>>) => mutation<App, S, O, OperationCallerFor<D>>(options),
-    task: <S extends AnySchema, O extends AnySchema>(options: TaskOptions<App, S, O, OperationCallerFor<D>>) => task<App, S, O, OperationCallerFor<D>>(options),
+type SchemaInput<S> = S extends AnySchema ? InputOf<S> : never;
+type SchemaOutput<S> = S extends AnySchema ? OutputOf<S> : never;
+type MutationSuccessEvent<Names extends string> = Omit<WorkcoreEvent, 'operation' | 'type'> & { type: 'mutation.succeeded'; operation: Names };
+type UiActionFor<Mutations extends object> = {
+  [Name in keyof Mutations & string]: Omit<NonNullable<UiVariant['actions']>[number], 'mutation' | 'bind'> & {
+    mutation: Name;
+    bind?: SchemaInput<Mutations[Name]> extends object
+      ? Partial<Record<keyof SchemaInput<Mutations[Name]> & string, { fromRow: string }>>
+      : never;
   };
+}[keyof Mutations & string];
+type UiMetadataFor<Mutations extends object> = Omit<UiMetadata, 'variants'> & {
+  variants: Record<string, Omit<UiVariant, 'actions'> & { actions?: readonly UiActionFor<Mutations>[] }>;
+};
+
+type DefinitionOperationCaller<
+  Queries extends object, QueryOutputs extends Record<keyof Queries, unknown>,
+  Mutations extends object, MutationOutputs extends Record<keyof Mutations, unknown>,
+  Tasks extends object, TaskOutputs extends Record<keyof Tasks, unknown>,
+> = {
+  query<N extends keyof Queries & string>(name: N, input: SchemaInput<Queries[N]>): Promise<QueryOutputs[N]>;
+  mutate<N extends keyof Mutations & string>(name: N, input: SchemaInput<Mutations[N]>): Promise<MutationOutputs[N]>;
+  enqueue<N extends keyof Tasks & string>(name: N, input: SchemaInput<Tasks[N]>): Promise<{ runId: string }>;
+};
+
+type DefinitionOperationMap<
+  App, Inputs extends object, Outputs extends Record<keyof Inputs, unknown>, Tools, Kind extends OperationKind, Mutations extends object,
+> = {
+  [K in keyof Inputs]: {
+    input: Inputs[K];
+    output: ValidationSchema<unknown, Outputs[K]>;
+    permission?: Permission<App, SchemaOutput<NoInfer<Inputs[K]>>>;
+    api?: boolean;
+    ui?: UiMetadataFor<Mutations>;
+    handler: (args: OperationCallContext<App, SchemaOutput<NoInfer<Inputs[K]>>, Tools>) => NoInfer<Outputs[K]> | Promise<NoInfer<Outputs[K]>>;
+    readonly kind?: Kind;
+  } & (Kind extends 'task' ? { triggers?: { mutations?: readonly (keyof Mutations & string)[]; mapInput?: (event: MutationSuccessEvent<keyof Mutations & string>) => SchemaInput<NoInfer<Inputs[K]>> } } : {});
+} & {
+  [K in keyof Outputs]: { output: ValidationSchema<unknown, Outputs[K]> };
+};
+
+type DefinedOperationMap<
+  App, Inputs extends object, Outputs extends Record<keyof Inputs, unknown>, Tools, Kind extends OperationKind, Mutations extends object,
+> = {
+  [K in keyof Inputs]: {
+    input: Inputs[K];
+    output: ValidationSchema<unknown, Outputs[K]>;
+    permission?: Permission<App, SchemaOutput<Inputs[K]>>;
+    api?: boolean;
+    ui?: UiMetadataFor<Mutations>;
+    handler: (args: OperationCallContext<App, SchemaOutput<Inputs[K]>, Tools>) => Outputs[K] | Promise<Outputs[K]>;
+    readonly kind: Kind;
+  } & (Kind extends 'task' ? { triggers?: { mutations?: readonly (keyof Mutations & string)[]; mapInput?: (event: MutationSuccessEvent<keyof Mutations & string>) => SchemaInput<Inputs[K]> } } : {});
+};
+
+type DefinedWorkspace<App, Id extends string,
+  Queries extends object, QueryOutputs extends Record<keyof Queries, unknown>,
+  Mutations extends object, MutationOutputs extends Record<keyof Mutations, unknown>,
+  Tasks extends object, TaskOutputs extends Record<keyof Tasks, unknown>,
+  AuthSchema extends AnySchema | undefined,
+> = {
+  id: Id;
+  queries: DefinedOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs>, 'query', Mutations>;
+  mutations: DefinedOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs>, 'mutation', Mutations>;
+  tasks: DefinedOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs>, 'task', Mutations>;
+} & ([AuthSchema] extends [undefined]
+  ? { authorization?: undefined }
+  : AuthSchema extends AnySchema ? { authorization: AuthorizationConfiguration<AuthSchema> } : never);
+
+type WorkspaceConfiguration<App, Id extends string,
+  Queries extends object, QueryOutputs extends Record<keyof Queries, unknown>,
+  Mutations extends object, MutationOutputs extends Record<keyof Mutations, unknown>,
+  Tasks extends object, TaskOutputs extends Record<keyof Tasks, unknown>,
+  AuthSchema extends AnySchema | undefined,
+> = {
+  id: Id;
+  authorization?: AuthSchema extends AnySchema ? AuthorizationConfiguration<AuthSchema> : undefined;
+  queries?: DefinitionOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>>, 'query', NoInfer<Mutations>>;
+  mutations?: DefinitionOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>>, 'mutation', NoInfer<Mutations>>;
+  tasks?: DefinitionOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>>, 'task', NoInfer<Mutations>>;
+};
+
+function withOperationKind(operations: object | undefined, kind: OperationKind): Record<string, RuntimeOperation> {
+  return Object.fromEntries(Object.entries(operations ?? {}).map(([name, operation]) => [name, { ...(operation as object), kind }])) as Record<string, RuntimeOperation>;
 }
 
 export function defineWorkspace<App>() {
-  const define = <const D extends { id: string }>(definition: D): WorkspaceDefinition<App, D> => {
-    validateDefinition(definition as unknown as RuntimeDefinition);
-    return definition as WorkspaceDefinition<App, D>;
+  return <
+    const Id extends string,
+    const Queries extends object = {}, QueryOutputs extends Record<keyof Queries, unknown> = { [K in keyof Queries]: never },
+    const Mutations extends object = {}, MutationOutputs extends Record<keyof Mutations, unknown> = { [K in keyof Mutations]: never },
+    const Tasks extends object = {}, TaskOutputs extends Record<keyof Tasks, unknown> = { [K in keyof Tasks]: never },
+    const AuthSchema extends AnySchema | undefined = undefined,
+  >(definition: WorkspaceConfiguration<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>): WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>> => {
+    const queries = withOperationKind(definition.queries, 'query');
+    const mutations = withOperationKind(definition.mutations, 'mutation');
+    const tasks = withOperationKind(definition.tasks, 'task');
+    const runtimeDefinition: RuntimeDefinition = {
+      id: definition.id,
+      ...(definition.authorization === undefined ? {} : { authorization: definition.authorization as AuthorizationDefinition }),
+      queries,
+      mutations,
+      tasks: tasks as NonNullable<RuntimeDefinition['tasks']>,
+    };
+    validateDefinition(runtimeDefinition);
+    const workspace = { ...definition, queries, mutations, tasks };
+    Object.defineProperty(workspace, 'registerApplication', {
+      enumerable: false,
+      value: (options: ApplicationRegistrationOptions<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>>>) => registerApplicationInternal<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>>>(runtimeDefinition, options),
+    });
+    return workspace as unknown as WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>>;
   };
-  return Object.assign(define, {
-    query: <S extends AnySchema, O extends AnySchema>(options: QueryOptions<App, S, O>) => query<App, S, O>(options),
-    tableQuery: <S extends AnySchema, O extends AnySchema>(options: QueryOptions<App, S, O>) => tableQuery<App, S, O>(options),
-    mutation: <S extends AnySchema, O extends AnySchema>(options: MutationOptions<App, S, O>) => mutation<App, S, O>(options),
-    task: <S extends AnySchema, O extends AnySchema>(options: TaskOptions<App, S, O>) => task<App, S, O>(options),
-    withOperations: <D>() => createOperationBuilder<App, D>(),
-  });
 }
 
 export function query<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryOptions<App, S, O, Tools>): QueryDefinition<App, S, O, Tools> {
@@ -218,6 +317,7 @@ export type OutputFor<Def> = Def extends { output: infer S } ? OutputOf<S> : nev
 
 export type RuntimeDefinition = {
   id: string;
+  authorization?: AuthorizationDefinition;
   queries?: Record<string, RuntimeOperation>;
   mutations?: Record<string, RuntimeOperation>;
   tasks?: Record<string, RuntimeOperation & { triggers?: { mutations?: readonly string[]; mapInput?: (event: WorkcoreEvent) => unknown } }>;
@@ -235,27 +335,36 @@ export type RuntimeOperation = {
 
 declare const registeredApplicationBrand: unique symbol;
 
-/** Context-erased application value accepted by createPlatform. Construct it with registerApplication(). */
+/** Context-erased application value accepted by createPlatform. Construct it with definition.registerApplication(). */
 export type ApplicationRegistration = {
   readonly [registeredApplicationBrand]: true;
   readonly definition: RuntimeDefinition;
   readonly createAppContext: (args: { scope: Scope; actor: Actor }) => unknown | Promise<unknown>;
+  readonly resolveAuthorization?: (args: { scope: Scope; actor: Actor }) => unknown | Promise<unknown>;
 };
 
 type DefinitionWithContext = { id: string; readonly __appContext?: unknown };
 type ContextFromDefinition<D> = D extends { readonly __appContext?: infer App } ? Exclude<App, undefined> : never;
+type AuthorizationFromDefinition<D> = D extends { authorization?: { context: infer S } }
+  ? S extends AnySchema ? OutputOf<S> : never
+  : never;
+type AuthorizationRegistrationOption<D extends DefinitionWithContext> = D extends { authorization: { context: infer S } }
+  ? { resolveAuthorization: (args: { scope: Scope; actor: Actor }) => (S extends AnySchema ? OutputOf<S> : never) | Promise<S extends AnySchema ? OutputOf<S> : never> }
+  : { resolveAuthorization?: (args: { scope: Scope; actor: Actor }) => unknown | Promise<unknown> };
+
+export type ApplicationRegistrationOptions<D extends DefinitionWithContext> = {
+  createAppContext: (args: { scope: Scope; actor: Actor }) => ContextFromDefinition<D> | Promise<ContextFromDefinition<D>>;
+} & AuthorizationRegistrationOption<D>;
 
 /**
  * Bind an application's definition to its context factory. The context type is inferred from
  * defineWorkspace<App>() and checked here, then erased at the heterogeneous platform registry.
  */
-export function registerApplication<const D extends DefinitionWithContext>(registration: {
-  definition: D;
-  createAppContext: (args: { scope: Scope; actor: Actor }) => ContextFromDefinition<D> | Promise<ContextFromDefinition<D>>;
-}): ApplicationRegistration {
+function registerApplicationInternal<const D extends DefinitionWithContext>(definition: RuntimeDefinition, registration: ApplicationRegistrationOptions<D>): ApplicationRegistration {
   return Object.freeze({
-    definition: registration.definition as unknown as RuntimeDefinition,
+    definition,
     createAppContext: registration.createAppContext,
+    ...(registration.resolveAuthorization ? { resolveAuthorization: registration.resolveAuthorization } : {}),
   }) as ApplicationRegistration;
 }
 
@@ -549,30 +658,30 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
   if (!workspaceId) throw new WorkcoreError('WORKSPACE_REQUIRED', 'A workspace must be selected', 400);
   if (!await options.services.workspaces.canAccess(actor, scope)) throw new WorkcoreError('FORBIDDEN', 'Workspace access denied', 403);
   const input = (body as Record<string, unknown>).input;
-  if (path === 'manifest' && request.method === 'GET') return json(await makeManifest(registration.definition, actor, scope, options), 200, {}, codec);
+  if (path === 'manifest' && request.method === 'GET') return json(await makeManifest(registration, actor, scope, options), 200, {}, codec);
   if (path === 'events' && request.method === 'GET') return eventStream(request, scope, actor, registration, options, apps, trustedOrigins);
   if (path === 'history' && request.method === 'GET') {
-    if (!await canCapability(options, actor, scope, 'workcore.history.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'History access denied', 403);
+    if (!await canCapability(registration, options, actor, scope, 'workcore.history.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'History access denied', 403);
     return json({ entries: await options.services.history.list(scope, boundedLimit(url.searchParams.get('limit'))) }, 200, {}, codec);
   }
   if (path === 'tasks' && request.method === 'GET') {
-    if (!await canCapability(options, actor, scope, 'workcore.tasks.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'Task access denied', 403);
+    if (!await canCapability(registration, options, actor, scope, 'workcore.tasks.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'Task access denied', 403);
     const runs = await options.services.tasks.list(scope, boundedLimit(url.searchParams.get('limit')));
     return json({ runs: runs.map((run) => ({ ...run, ...(run.result === undefined ? {} : { result: decodeStored(run.result, run.codecId, options) }) })) }, 200, {}, codec);
   }
   if (path === 'schedules' && request.method === 'GET') {
-    if (!await canCapability(options, actor, scope, 'workcore.schedules.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule access denied', 403);
+    if (!await canCapability(registration, options, actor, scope, 'workcore.schedules.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule access denied', 403);
     const schedules = await options.services.schedules.list(scope);
     return json({ schedules: schedules.map((schedule) => publicSchedule(schedule, options)) }, 200, {}, codec);
   }
   if (path === 'schedules' && request.method === 'POST') {
-    if (!await canCapability(options, actor, scope, 'workcore.schedules.manage', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule management denied', 403);
+    if (!await canCapability(registration, options, actor, scope, 'workcore.schedules.manage', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule management denied', 403);
     const item = body as Record<string, unknown>;
     const operation = String(item.operation ?? '');
     const def = operationAt(registration.definition, 'task', operation);
     if (!def || def.api !== true) throw new WorkcoreError('OPERATION_NOT_FOUND', 'Task is not externally exposed', 404);
     const validated = await validate(def.input, item.input ?? {});
-    await authoriseOperation(def, actor, scope, validated, options);
+    await authoriseOperation(registration, def, actor, scope, validated, options);
     const kind = item.kind === 'recurring' ? 'recurring' : 'once';
     const timezone = String(item.timezone ?? 'UTC');
     try { new Intl.DateTimeFormat('en', { timeZone: timezone }); } catch { throw new WorkcoreError('INVALID_TIMEZONE', 'Unknown timezone', 400); }
@@ -584,7 +693,7 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
     return json({ schedule: { ...schedule, input: validated } }, 201, {}, codec);
   }
   if (path.startsWith('schedules/') && request.method === 'DELETE') {
-    if (!await canCapability(options, actor, scope, 'workcore.schedules.manage', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule management denied', 403);
+    if (!await canCapability(registration, options, actor, scope, 'workcore.schedules.manage', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule management denied', 403);
     const id = decodeURIComponent(path.slice('schedules/'.length));
     const schedule = await options.services.schedules.get(id);
     if (!schedule || !sameScope(schedule.scope, scope)) throw new WorkcoreError('NOT_FOUND', 'Schedule not found', 404);
@@ -592,7 +701,7 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
     return json({ ok: true }, 200, {}, codec);
   }
   if (path.startsWith('schedules/') && request.method === 'PATCH') {
-    if (!await canCapability(options, actor, scope, 'workcore.schedules.manage', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule management denied', 403);
+    if (!await canCapability(registration, options, actor, scope, 'workcore.schedules.manage', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule management denied', 403);
     const id = decodeURIComponent(path.slice('schedules/'.length));
     const schedule = await options.services.schedules.get(id);
     if (!schedule || !sameScope(schedule.scope, scope)) throw new WorkcoreError('NOT_FOUND', 'Schedule not found', 404);
@@ -625,7 +734,7 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
     const def = operationAt(registration.definition, kind, operationName);
     if (!def || def.api !== true) throw new WorkcoreError('OPERATION_NOT_FOUND', 'Operation is not externally exposed', 404);
     const validatedInput = await validate(def.input, input);
-    await authoriseOperation(def, actor, scope, validatedInput, options);
+     await authoriseOperation(registration, def, actor, scope, validatedInput, options);
     if (kind === 'task') {
       const runId = randomId();
       const correlationId = request.headers.get('x-correlation-id') ?? randomId();
@@ -681,20 +790,41 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
   throw new WorkcoreError('NOT_FOUND', 'Endpoint not found', 404);
 }
 
-async function authoriseOperation(def: RuntimeOperation, actor: Actor, scope: Scope, input: unknown, options: PlatformOptions) {
+async function authoriseOperation(registration: ApplicationRegistration, def: RuntimeOperation, actor: Actor, scope: Scope, input: unknown, options: PlatformOptions) {
   const policy = def.permission;
   if (policy === undefined) throw new WorkcoreError('FORBIDDEN', 'Operation has no permission policy', 403);
   if (typeof policy === 'function') {
-    const allowed = await policy({ actor, scope, input, access: { has: (capability) => options.authorise?.({ actor, scope, permission: capability, input }) ?? false } });
+    const allowed = await policy({ actor, scope, input, access: { has: (capability) => canCapability(registration, options, actor, scope, capability, input) } });
     if (!allowed) throw new WorkcoreError('FORBIDDEN', 'Operation permission denied', 403);
     return;
   }
-  const permissions = typeof policy === 'string' ? [policy] : policy ?? [];
-  for (const permission of permissions) if (!await options.authorise?.({ actor, scope, permission, input })) throw new WorkcoreError('FORBIDDEN', 'Operation permission denied', 403);
+  // An empty list explicitly requires no capability; workspace membership is still checked at the request boundary.
+  const permissions = typeof policy === 'string' ? [policy] : policy;
+  for (const permission of permissions) {
+    if (!await canCapability(registration, options, actor, scope, permission, input)) throw new WorkcoreError('FORBIDDEN', 'Operation permission denied', 403);
+  }
 }
 
-async function canCapability(options: PlatformOptions, actor: Actor, scope: Scope, permission: string, input: unknown) {
-  return options.authorise?.({ actor, scope, permission, input }) ?? false;
+async function workspacePermissionAllowed(registration: ApplicationRegistration, actor: Actor, scope: Scope, permission: string, input: unknown): Promise<boolean | undefined> {
+  const authorization = registration.definition.authorization;
+  if (!authorization) return undefined;
+  if (!registration.resolveAuthorization) return false;
+  const auth = await validate(authorization.context, await registration.resolveAuthorization({ actor, scope }));
+  return authorization.check({ auth, actor, scope, permission, input });
+}
+
+async function canCapability(registration: ApplicationRegistration, options: PlatformOptions, actor: Actor, scope: Scope, permission: string, input: unknown) {
+  let hasAuthorizer = false;
+  if (options.authorise) {
+    hasAuthorizer = true;
+    if (!await options.authorise({ actor, scope, permission, input })) return false;
+  }
+  const workspaceAllowed = await workspacePermissionAllowed(registration, actor, scope, permission, input);
+  if (workspaceAllowed !== undefined) {
+    hasAuthorizer = true;
+    if (!workspaceAllowed) return false;
+  }
+  return hasAuthorizer;
 }
 
 async function validate(schema: AnySchema, value: unknown): Promise<unknown> {
@@ -724,7 +854,7 @@ function createCaller(registration: ApplicationRegistration, actor: Actor, scope
     const def = operationAt(registration.definition, kind, name);
     if (!def) throw new WorkcoreError('OPERATION_NOT_FOUND', `Unknown ${kind}: ${name}`, 404);
     const validInput = await validate(def.input, input);
-    await authoriseOperation(def, actor, scope, validInput, options);
+    await authoriseOperation(registration, def, actor, scope, validInput, options);
     if (kind === 'task') {
       if (triggerDepth >= 8) throw new WorkcoreError('TRIGGER_DEPTH_EXCEEDED', 'Background operation trigger depth limit exceeded', 409);
       const id = randomId();
@@ -774,7 +904,7 @@ async function enqueueTriggeredTasks(registration: ApplicationRegistration, acto
     if (!definition.triggers?.mutations?.includes(event.operation ?? '')) continue;
     const rawInput = definition.triggers.mapInput ? definition.triggers.mapInput(event) : {};
     const input = await validate(definition.input, rawInput);
-    await authoriseOperation(definition, actor, scope, input, options);
+    await authoriseOperation(registration, definition, actor, scope, input, options);
     const runId = randomId();
     await options.services.tasks.enqueue({
       id: runId, applicationId: scope.applicationId, workspaceId: scope.workspaceId,
@@ -805,7 +935,7 @@ async function processClaimedTask(payload: TaskPayload, options: PlatformOptions
   try {
     codec = resolveWireCodec(options, payload.codecId ?? 'json');
     const input = decodeStored(payload.input, payload.codecId, options);
-    await authoriseOperation(def, actor, scope, input, options);
+    await authoriseOperation(registration, def, actor, scope, input, options);
     const context = await registration.createAppContext({ scope, actor });
     let result: unknown;
     try {
@@ -977,15 +1107,16 @@ async function eventStream(request: Request, scope: Scope, actor: Actor, registr
   return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', ...corsHeaders(request, trustedOrigins) } });
 }
 
-async function makeManifest(definition: RuntimeDefinition, actor: Actor, scope: Scope, options: PlatformOptions) {
+async function makeManifest(registration: ApplicationRegistration, actor: Actor, scope: Scope, options: PlatformOptions) {
+  const definition = registration.definition;
   const operations: Array<Record<string, unknown>> = [];
   const visibleMutations = new Set<string>();
   for (const [name, def] of Object.entries(definition.mutations ?? {})) {
-    if (def.api === true && await permissionVisible(def, actor, scope, options)) visibleMutations.add(name);
+    if (def.api === true && await permissionVisible(registration, def, actor, scope, options)) visibleMutations.add(name);
   }
   for (const [kind, map] of [['query', definition.queries], ['mutation', definition.mutations], ['task', definition.tasks]] as const) {
     for (const [name, def] of Object.entries(map ?? {})) {
-      if (def.api !== true || !await permissionVisible(def, actor, scope, options)) continue;
+      if (def.api !== true || !await permissionVisible(registration, def, actor, scope, options)) continue;
       const inputSchema = getJsonSchema(def.input, 'input');
       const outputSchema = getJsonSchema(def.output, 'output');
       const ui = def.ui ? {
@@ -1001,21 +1132,27 @@ async function makeManifest(definition: RuntimeDefinition, actor: Actor, scope: 
   return { protocolVersion: 1, schemaDialect: 'https://json-schema.org/draft/2020-12/schema', applicationId: definition.id, operations };
 }
 
-async function permissionVisible(definition: RuntimeOperation, actor: Actor, scope: Scope, options: PlatformOptions) {
+async function permissionVisible(registration: ApplicationRegistration, definition: RuntimeOperation, actor: Actor, scope: Scope, options: PlatformOptions) {
   if (definition.permission === undefined) return false;
-  if (typeof definition.permission === 'function') return true;
+  // Input-aware policies are decided at execution; an empty list explicitly requires no capability.
+  if (typeof definition.permission === 'function' || (Array.isArray(definition.permission) && definition.permission.length === 0)) return true;
   const permissions = typeof definition.permission === 'string' ? [definition.permission] : definition.permission;
-  for (const permission of permissions) if (!await canCapability(options, actor, scope, permission, undefined)) return false;
+  for (const permission of permissions) if (!await canCapability(registration, options, actor, scope, permission, undefined)) return false;
   return true;
 }
 
 function getJsonSchema(schema: AnySchema, direction: 'input' | 'output'): JsonSchema {
   const provider = schema as unknown as JsonSchemaProvider;
   if (!provider['~standard'].jsonSchema) throw new WorkcoreError('SCHEMA_CONVERSION_MISSING', 'Operation schema must implement Standard JSON Schema to appear in the admin manifest', 500);
-  return provider['~standard'].jsonSchema[direction]({ target: 'draft-2020-12' });
+  const options = {
+    target: 'draft-2020-12',
+    ...(provider['~standard'].vendor === 'zod' ? { libraryOptions: { unrepresentable: 'any' } } : {}),
+  };
+  return provider['~standard'].jsonSchema[direction](options);
 }
 
 export function validateDefinition(definition: RuntimeDefinition) {
+  if (definition.authorization && (!definition.authorization.context?.['~standard']?.validate || typeof definition.authorization.check !== 'function')) throw new Error('Application authorization must provide a Standard Schema context and check function');
   const mutationNames = new Set(Object.keys(definition.mutations ?? {}));
   for (const [kind, operations] of [['query', definition.queries], ['mutation', definition.mutations], ['task', definition.tasks]] as const) {
     for (const [name, operation] of Object.entries(operations ?? {})) {
@@ -1226,7 +1363,7 @@ async function handleScheduleDue(options: PlatformOptions, apps: Map<string, App
         }
         const codec = resolveWireCodec(options, schedule.codecId ?? 'json');
         const input = decodeStored(schedule.input, schedule.codecId, options);
-        await authoriseOperation(def, actor, schedule.scope, input, options);
+      await authoriseOperation(registration, def, actor, schedule.scope, input, options);
         if (!await options.services.schedules.renewClaim(schedule.id, claimToken, new Date(Date.now() + leaseMs).toISOString())) {
           throw new WorkcoreError('SCHEDULE_CLAIM_LOST', 'Schedule reservation expired before task enqueue', 409);
         }
@@ -1276,7 +1413,8 @@ async function handleScheduleDue(options: PlatformOptions, apps: Map<string, App
 }
 
 // In-memory adapters are intended for tests and local demos, not durable production storage.
-export function createMemoryServices(options: { workspaces?: Array<{ applicationId: string; id: string; name: string; actors: string[] }> } = {}): PlatformServices {
+/** Shared in-memory adapter state. Compose its individual services when building PlatformServices. */
+export function createMemoryState(options: { workspaces?: Array<{ applicationId: string; id: string; name: string; actors: string[] }> } = {}): PlatformServices {
   const workspaceRows = options.workspaces ?? [];
   const eventListeners = new Map<string, Set<(event: WorkcoreEvent) => void>>();
   const taskQueue: TaskPayload[] = [];

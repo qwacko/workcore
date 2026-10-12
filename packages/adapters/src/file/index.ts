@@ -1,8 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { nextScheduleOccurrence, type Actor, type EventAdapter, type HistoryEntry, type PlatformServices, type ScheduleEntry, type Scope, type TaskPayload, type TaskRun, type WorkcoreEvent } from '@workcore/core';
+import { nextScheduleOccurrence, type EventAdapter, type HistoryEntry, type PlatformServices, type ScheduleEntry, type Scope, type TaskPayload, type TaskRun, type WorkcoreEvent } from '@workcore/core';
 
-type FileState = {
+type DurableFileState = {
   tasks: TaskPayload[];
   processing: TaskPayload[];
   runs: TaskRun[];
@@ -11,13 +11,13 @@ type FileState = {
   kv: Record<string, unknown>;
 };
 
-const emptyState = (): FileState => ({ tasks: [], processing: [], runs: [], history: [], schedules: [], kv: {} });
+const emptyState = (): DurableFileState => ({ tasks: [], processing: [], runs: [], history: [], schedules: [], kv: {} });
 const scopeKey = (scope: Scope) => JSON.stringify([scope.applicationId, scope.workspaceId]);
 const kvKey = (scope: Scope, key: string) => JSON.stringify([scope.applicationId, scope.workspaceId, key]);
 const sameScope = (left: Scope, right: Scope) => left.applicationId === right.applicationId && left.workspaceId === right.workspaceId;
 
 /** Single-process local/demo adapter. Production multi-process deployments should use shared database/queue adapters. */
-export function createFileServices(options: {
+function createFileAdapterState(options: {
   path: string;
   workspaces: Array<{ applicationId: string; id: string; name: string; actors: string[] }>;
 }): PlatformServices {
@@ -26,16 +26,16 @@ export function createFileServices(options: {
   const listeners = new Map<string, Set<(event: WorkcoreEvent) => void>>();
   const waiters = new Set<() => void>();
 
-  async function read(): Promise<FileState> {
+  async function read(): Promise<DurableFileState> {
     try {
-      const parsed = JSON.parse(await readFile(options.path, 'utf8')) as Partial<FileState>;
+      const parsed = JSON.parse(await readFile(options.path, 'utf8')) as Partial<DurableFileState>;
       return { ...emptyState(), ...parsed, processing: parsed.processing ?? [] };
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return emptyState();
       throw error;
     }
   }
-  async function update<T>(fn: (state: FileState) => T | Promise<T>): Promise<T> {
+  async function update<T>(fn: (state: DurableFileState) => T | Promise<T>): Promise<T> {
     let result!: T;
     const operation = serial.then(async () => {
       const state = await read();
@@ -221,6 +221,16 @@ export function createFileServices(options: {
   };
 }
 
-export function actorCapabilities(capabilities: Record<string, string[]>, actor: Actor, capability: string) {
-  return capabilities[actor.id]?.includes(capability) ?? false;
+export type FileAdapterState = ReturnType<typeof createFileAdapterState>;
+
+export function createFileState(options: Parameters<typeof createFileAdapterState>[0]): FileAdapterState {
+  return createFileAdapterState(options);
 }
+
+export const createFileWorkspaces = (state: FileAdapterState) => state.workspaces;
+export const createFileEvents = (state: FileAdapterState) => state.events;
+export const createFileHistory = (state: FileAdapterState) => state.history;
+export const createFileTasks = (state: FileAdapterState) => state.tasks;
+export const createFileSchedules = (state: FileAdapterState) => state.schedules;
+export const createFileKV = (state: FileAdapterState) => state.kv;
+export const createFileLogger = (state: FileAdapterState): NonNullable<FileAdapterState['logger']> => state.logger!;

@@ -28,7 +28,7 @@ The developer can build a custom frontend using the same typed client. The suppl
 
 Illustrative TypeScript: refine exact syntax with the coding agent, retaining these boundaries. Schema names below represent application-defined validation schemas, with inferred input/output types.
 
-Use a curried builder so the application context type can be supplied while operation definitions remain inferred. Before implementing the runtime, prove handler context types, client inputs/results and checked sibling-operation calls with compile-time tests. Avoid `any`, repeated user-written operation types and unnecessarily complex recursive types. The following syntax is proposed, not an already implemented API.
+Use a curried definition so the application context type can be supplied while operation schemas and outputs remain inferred. Handler types must consume (not infer) the peer operation catalog so queries, mutations, and tasks can call one another with checked names and inputs. The implementation uses `NoInfer` for this separation.
 
 ```ts
 type TrackerContext = {
@@ -36,13 +36,11 @@ type TrackerContext = {
   garmin: GarminClient;
 };
 
-const defineTracker = defineWorkspace<TrackerContext>();
-
-const trackerBase = defineTracker({
+const tracker = defineWorkspace<TrackerContext>()({
   id: 'tracker',
 
   queries: {
-    activities: defineTracker.tableQuery({
+    activities: {
       input: activityListInput,
       output: activityPageSchema,
       permission: 'activities.read',
@@ -73,11 +71,11 @@ const trackerBase = defineTracker({
         },
       },
       handler: ({ ctx, input }) => ctx.app.activities.list(input),
-    }),
+    },
   },
 
   mutations: {
-    editActivity: defineTracker.mutation({
+    editActivity: {
       input: editActivitySchema,
       output: activitySchema,
       permission: 'activities.write',
@@ -90,16 +88,10 @@ const trackerBase = defineTracker({
       },
       handler: ({ ctx, input }) => ctx.app.activities.update(input),
       // Runtime emits mutation.succeeded automatically.
-    }),
+    },
   },
-
-});
-
-const defineTrackerOperations = defineTracker.withOperations<typeof trackerBase>();
-const tracker = defineTracker({
-  ...trackerBase,
   tasks: {
-    refreshSummary: defineTrackerOperations.task({
+    refreshSummary: {
       input: emptyObjectSchema,
       output: summarySchema,
       permission: 'summary.refresh',
@@ -123,7 +115,7 @@ const tracker = defineTracker({
         await ctx.services.kv.set('summary', summary);
         return summary;
       },
-    }),
+    },
   },
 });
 ```
@@ -150,8 +142,7 @@ Initially support object forms with strings, numbers, booleans, enums, optional 
 
 ```ts
 const platform = createPlatform({
-  applications: [registerApplication({
-    definition: tracker,
+  applications: [tracker.registerApplication({
     createAppContext: async ({ scope, actor }) => ({
       activities: scopedActivityRepository(pool, scope, actor),
       garmin: garminClient,

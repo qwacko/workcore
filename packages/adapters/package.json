@@ -1,0 +1,13 @@
+{
+  "name": "@workcore/adapters",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./file": { "types": "./dist/file/index.d.ts", "import": "./dist/file/index.js" },
+    "./memory": { "types": "./dist/memory/index.d.ts", "import": "./dist/memory/index.js" }
+  },
+  "files": ["dist"],
+  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "@workcore/core": "workspace:*" },
+  "devDependencies": { "@types/node": "^24.7.0" }
+}

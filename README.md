@@ -23,11 +23,12 @@ The demo's `/login/alice` and `/login/bob` routes and file-backed adapters are f
 | Package | Purpose |
 | --- | --- |
 | `@workcore/core` | Definitions, checked runtime, HTTP/SSE endpoints and adapter contracts |
+| `@workcore/adapters` | Explicit memory and local file implementations for the core adapter contracts |
 | `@workcore/client` | Browser-safe typed client and fetch/SSE transport |
 | `@workcore/codec-superjson` | Optional SuperJSON wire codec for rich values such as `Date` |
 | `@workcore/codec-devalue` | Optional devalue wire codec for its supported rich-value set |
 | `@workcore/admin` | Prebuilt Svelte admin assets and host-route handler |
-| `examples/tracker` | Hono host, example workspace definitions and local durable adapters |
+| `examples/tracker` | Hono host, example workspace definitions and local durable adapter composition |
 
 The core has no database, queue, auth-provider or UI framework dependency. The supplied admin is optional; applications can use only the runtime/client or provide their own frontend.
 
@@ -46,12 +47,10 @@ Published packages use ESM `exports` maps and include declarations. Changesets m
 ## Authoring shape
 
 ```ts
-const defineTracker = defineWorkspace<TrackerContext>();
-
-export const tracker = defineTracker({
+export const tracker = defineWorkspace<TrackerContext>()({
   id: 'tracker',
   queries: {
-    activities: defineTracker.tableQuery({
+    activities: {
       input: activityListSchema,
       output: activityPageSchema,
       permission: 'activities.read',
@@ -64,20 +63,22 @@ export const tracker = defineTracker({
         },
       },
       handler: ({ ctx, input }) => ctx.app.activities.list(ctx.scope, input),
-    }),
+    },
   },
   mutations: {
-    editActivity: defineTracker.mutation({
+    editActivity: {
       input: editActivitySchema,
       output: activitySchema,
       permission: 'activities.write',
       api: true,
       ui: { default: 'basic', variants: { basic: { title: 'Edit activity', renderer: 'form' } } },
       handler: ({ ctx, input }) => ctx.app.activities.update(ctx.scope, input),
-    }),
+    },
   },
 });
 ```
+
+Tasks use the same inline shape. Their handlers receive a typed `operations` caller inferred from every query, mutation, and task in this definition, so tasks can safely call peer tasks without a separate operation builder. Task mutation triggers and UI mutation actions are also checked against the declared mutations, including action bindings against mutation input fields.
 
 Core accepts Standard Schema. Generated forms/manifests require schemas to also provide Standard JSON Schema; Zod 4 is used in the example. Browser input is validated again on the server. See the [implementation brief](workspace-framework-implementation-brief.md) and [architecture notes](docs/architecture.md) for contracts, security expectations and limits.
 

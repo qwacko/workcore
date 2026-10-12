@@ -9,6 +9,7 @@ const temporary = await mkdtemp(join(tmpdir(), 'workcore-packed-consumer-'));
 try {
   const run = (command, args, cwd = root) => execFileSync(command, args, { cwd, stdio: 'inherit' });
   run('pnpm', ['--filter', '@workcore/core', 'pack', '--pack-destination', temporary]);
+  run('pnpm', ['--filter', '@workcore/adapters', 'pack', '--pack-destination', temporary]);
   run('pnpm', ['--filter', '@workcore/client', 'pack', '--pack-destination', temporary]);
   run('pnpm', ['--filter', '@workcore/codec-superjson', 'pack', '--pack-destination', temporary]);
   run('pnpm', ['--filter', '@workcore/codec-devalue', 'pack', '--pack-destination', temporary]);
@@ -17,14 +18,16 @@ try {
   await (await import('node:fs/promises')).mkdir(consumer);
   const tar = (name) => pathToFileURL(join(temporary, name)).href;
   const coreTar = tar('workcore-core-0.1.0.tgz');
+  const adaptersTar = tar('workcore-adapters-0.1.0.tgz');
   const clientTar = tar('workcore-client-0.1.0.tgz');
   const superjsonCodecTar = tar('workcore-codec-superjson-0.1.0.tgz');
   const devalueCodecTar = tar('workcore-codec-devalue-0.1.0.tgz');
   await writeFile(join(consumer, 'package.json'), JSON.stringify({
     name: 'workcore-packed-consumer', private: true, type: 'module',
-    pnpm: { overrides: { '@workcore/core': coreTar, '@workcore/client': clientTar, '@workcore/codec-superjson': superjsonCodecTar, '@workcore/codec-devalue': devalueCodecTar } },
+    pnpm: { overrides: { '@workcore/core': coreTar, '@workcore/adapters': adaptersTar, '@workcore/client': clientTar, '@workcore/codec-superjson': superjsonCodecTar, '@workcore/codec-devalue': devalueCodecTar } },
     dependencies: {
       '@workcore/core': coreTar,
+      '@workcore/adapters': adaptersTar,
       '@workcore/client': clientTar,
       '@workcore/codec-superjson': superjsonCodecTar,
       '@workcore/codec-devalue': devalueCodecTar,
@@ -36,6 +39,8 @@ try {
   await writeFile(join(consumer, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, skipLibCheck: true }, include: ['index.ts'] }, null, 2));
   await writeFile(join(consumer, 'index.ts'), `
 import { defineWorkspace } from '@workcore/core';
+import { createFileState, createFileWorkspaces } from '@workcore/adapters/file';
+import { createMemoryState, createMemoryHistory } from '@workcore/adapters/memory';
 import { createClient, createFetchTransport } from '@workcore/client';
 import { createAdminHandler } from '@workcore/admin/server';
 import { superjsonCodec } from '@workcore/codec-superjson';
@@ -43,8 +48,7 @@ import { devalueCodec } from '@workcore/codec-devalue';
 import { z } from 'zod';
 
 const schema = z.object({ value: z.number() });
-const define = defineWorkspace<{ add(value: number): number }>();
-const app = define({ id: 'consumer', queries: { read: define.query({ input: schema, output: schema, api: true, permission: 'read', handler: ({ ctx, input }) => ({ value: ctx.app.add(input.value) }) }) } });
+const app = defineWorkspace<{ add(value: number): number }>()({ id: 'consumer', queries: { read: { input: schema, output: schema, api: true, permission: 'read', handler: ({ ctx, input }) => ({ value: ctx.app.add(input.value) }) } } });
 const client = createClient<typeof app>({ transport: createFetchTransport({}), applicationId: 'consumer', workspaceId: 'one' });
 void client.query('read', { value: 2 });
 // @ts-expect-error Schema-inferred client inputs are enforced after packing.
@@ -52,6 +56,10 @@ void client.query('read', { value: 'bad' });
 createAdminHandler({ basePath: '/admin' });
 void superjsonCodec();
 void devalueCodec();
+const memory = createMemoryState();
+void createMemoryHistory(memory);
+const file = createFileState({ path: 'workcore-state.json', workspaces: [] });
+void createFileWorkspaces(file);
 `);
   run('pnpm', ['install', '--no-frozen-lockfile'], consumer);
   run('pnpm', ['exec', 'tsc', '-p', 'tsconfig.json'], consumer);
