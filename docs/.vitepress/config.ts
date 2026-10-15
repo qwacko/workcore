@@ -44,6 +44,12 @@ export default defineConfig({
           { text: 'Production deployment', link: '/production-deployment' },
         ],
       },
+      {
+        text: 'Design proposals',
+        items: [
+          { text: 'Semantic UI implementation brief', link: '/ui-rendering-implementation-brief' },
+        ],
+      },
     ],
     socialLinks: [{ icon: 'github', link: 'https://github.com/qwacko/workcore' }],
     footer: { message: 'Released under the MIT License.', copyright: 'Copyright © Workcore contributors' },

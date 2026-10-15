@@ -45,6 +45,8 @@ The console consumes the same authorised manifest and API as custom clients. It 
 
 Workspace definitions can optionally declare `admin.pages` and built-in page flags. The manifest includes those declarative page/block descriptions only after filtering references against the current actor's visible operations and system capabilities. Built-in Operations, Tasks, Schedules and History entries are represented by the same page metadata; their resource endpoints remain capability-checked independently. Pages compose queries, mutation forms, task launchers and platform resources, not arbitrary HTML or executable templates. See [authoring operations](/authoring#configurable-admin-pages) for the supported contract and current limits.
 
+For the proposed next iteration—not currently supported functionality—see the [semantic UI implementation brief](/ui-rendering-implementation-brief). It covers callback-based authoring, reusable semantic views, collection editing, scoped state, renderer independence, migration, and verification.
+
 ## Local demo adapters
 
 The reusable `@workcore/adapters` package exposes the local implementations as individual adapters. Applications compose them into `PlatformServices`; the tracker uses a shared file state for KV, tasks, schedules and history, while selecting its event adapter explicitly.
