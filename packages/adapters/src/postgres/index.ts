@@ -1,4 +1,4 @@
-import { jsonWireCodec, type HistoryEntry, type KeyValueAdapter, type PlatformServices, type ScheduleAdapter, type ScheduleEntry, type Scope, type TaskAdapter, type TaskPayload, type TaskRun, type WorkspaceAdapter } from '@workcore/core';
+import { jsonWireCodec, type AgentRun, type AgentRunAdapter, type AgentTraceEvent, type HistoryEntry, type KeyValueAdapter, type PlatformServices, type ScheduleAdapter, type ScheduleEntry, type Scope, type TaskAdapter, type TaskPayload, type TaskRun, type WorkspaceAdapter } from '@workcore/core';
 
 /** Minimal pg Pool/PoolClient shape; pass a `pg.Pool` without adding pg to Workcore's dependency tree. */
 export interface PostgresPool {
@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS workcore_tasks (
 );
 CREATE INDEX IF NOT EXISTS workcore_tasks_claim_idx ON workcore_tasks(status, lease_until, created_at);
 CREATE INDEX IF NOT EXISTS workcore_tasks_scope_idx ON workcore_tasks(application_id, workspace_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS workcore_agent_runs (
+  id text PRIMARY KEY, application_id text NOT NULL, workspace_id text NOT NULL,
+  actor_id text NOT NULL, agent text NOT NULL, status text NOT NULL, created_at timestamptz NOT NULL,
+  run jsonb NOT NULL
+);
+CREATE INDEX IF NOT EXISTS workcore_agent_runs_scope_idx ON workcore_agent_runs(application_id, workspace_id, created_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS workcore_agent_events (
+  run_id text NOT NULL REFERENCES workcore_agent_runs(id) ON DELETE CASCADE,
+  sequence integer NOT NULL, created_at timestamptz NOT NULL, event jsonb NOT NULL,
+  PRIMARY KEY (run_id, sequence)
+);
 -- Retain enqueue idempotency markers independently from inspectable run/result retention.
 CREATE TABLE IF NOT EXISTS workcore_task_dedupe (
   id text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now()
@@ -51,10 +62,11 @@ CREATE TABLE IF NOT EXISTS workcore_kv (
 
 export async function migratePostgres(pool: PostgresPool): Promise<void> { await pool.query(POSTGRES_SCHEMA_SQL); }
 
-export function createPostgresState(options: { pool: PostgresPool; historyLimit?: number; taskRunLimit?: number; taskLeaseMs?: number; maxKVValueBytes?: number }): Omit<PlatformServices, 'events'> {
+export function createPostgresState(options: { pool: PostgresPool; historyLimit?: number; taskRunLimit?: number; agentRunLimit?: number; taskLeaseMs?: number; maxKVValueBytes?: number }): Omit<PlatformServices, 'events'> {
   const { pool } = options;
   const historyLimit = positiveInteger(options.historyLimit ?? 5_000, 'historyLimit');
   const taskRunLimit = positiveInteger(options.taskRunLimit ?? 1_000, 'taskRunLimit');
+  const agentRunLimit = positiveInteger(options.agentRunLimit ?? 1_000, 'agentRunLimit');
   const taskLeaseMs = positiveInteger(options.taskLeaseMs ?? 30_000, 'taskLeaseMs');
   const maxKVValueBytes = positiveInteger(options.maxKVValueBytes ?? 1_048_576, 'maxKVValueBytes');
   if (taskLeaseMs < 30_000) throw new TypeError('taskLeaseMs must be at least 30 seconds to allow worker heartbeats');
@@ -118,6 +130,26 @@ export function createPostgresState(options: { pool: PostgresPool; historyLimit?
       function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); }
       signal.addEventListener('abort', done, { once: true });
     }),
+  };
+  const agentRuns: AgentRunAdapter = {
+    create: async (run) => { await pool.query('INSERT INTO workcore_agent_runs(id,application_id,workspace_id,actor_id,agent,status,created_at,run) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [run.id, run.scope.applicationId, run.scope.workspaceId, run.actorId, run.agent, run.status, run.createdAt, JSON.stringify(run)]); await pruneAgentRuns(pool, agentRunLimit); },
+    get: async (scope, runId) => { const row = (await pool.query<{ run: AgentRun }>('SELECT run FROM workcore_agent_runs WHERE application_id=$1 AND workspace_id=$2 AND id=$3', [scope.applicationId, scope.workspaceId, runId])).rows[0]; return row ? jsonValue<AgentRun>(row.run) : undefined; },
+    list: async (scope, filter) => {
+      const clauses = ['application_id=$1', 'workspace_id=$2']; const values: unknown[] = [scope.applicationId, scope.workspaceId];
+      const add = (sql: (index: number) => string, value: unknown) => { values.push(value); clauses.push(sql(values.length)); };
+      if (filter.agent) add((i) => `agent=$${i}`, filter.agent);
+      if (filter.status) add((i) => `status=$${i}`, filter.status);
+      if (filter.actorId) add((i) => `actor_id=$${i}`, filter.actorId);
+      if (filter.conversationId) add((i) => `run->>'conversationId'=$${i}`, filter.conversationId);
+      if (filter.cursor) { const [createdAt, id] = decodeAgentCursor(filter.cursor); add((i) => `(created_at,id)<($${i}::timestamptz,$${i + 1})`, createdAt); values.push(id); }
+      values.push(filter.limit + 1);
+      const rows = (await pool.query<{ run: AgentRun }>(`SELECT run FROM workcore_agent_runs WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT $${values.length}`, values)).rows.map((row) => jsonValue<AgentRun>(row.run));
+      const hasMore = rows.length > filter.limit; const page = rows.slice(0, filter.limit); const last = page.at(-1);
+      return { runs: page, nextCursor: hasMore && last ? encodeAgentCursor(last.createdAt, last.id) : null };
+    },
+    update: async (run) => { const result = await pool.query('UPDATE workcore_agent_runs SET status=$4,run=$5::jsonb WHERE application_id=$1 AND workspace_id=$2 AND id=$3', [run.scope.applicationId, run.scope.workspaceId, run.id, run.status, JSON.stringify(run)]); if (result.rowCount !== 1) throw new Error(`Unknown agent run '${run.id}'`); await pruneAgentRuns(pool, agentRunLimit); },
+    appendEvent: async (event) => { await pool.query('INSERT INTO workcore_agent_events(run_id,sequence,created_at,event) VALUES($1,$2,$3,$4::jsonb) ON CONFLICT(run_id,sequence) DO NOTHING', [event.runId, event.sequence, event.createdAt, JSON.stringify(event)]); },
+    listEvents: async (scope, runId, afterSequence, limit) => (await pool.query<{ event: AgentTraceEvent }>('SELECT event FROM workcore_agent_events e JOIN workcore_agent_runs r ON r.id=e.run_id WHERE r.application_id=$1 AND r.workspace_id=$2 AND e.run_id=$3 AND e.sequence>$4 ORDER BY e.sequence LIMIT $5', [scope.applicationId, scope.workspaceId, runId, afterSequence, limit])).rows.map((row) => jsonValue<AgentTraceEvent>(row.event)),
   };
   const schedules: ScheduleAdapter = {
     create: async (schedule) => { await pool.query('INSERT INTO workcore_schedules(id,application_id,workspace_id,enabled,next_run_at,revision,body) VALUES($1,$2,$3,$4,$5,0,$6::jsonb)', [schedule.id, schedule.scope.applicationId, schedule.scope.workspaceId, schedule.enabled, schedule.nextRunAt ?? null, JSON.stringify(schedule)]); },
@@ -183,11 +215,25 @@ export function createPostgresState(options: { pool: PostgresPool; historyLimit?
     },
     delete: async (scope, key) => { await pool.query('DELETE FROM workcore_kv WHERE application_id=$1 AND workspace_id=$2 AND key=$3', [scope.applicationId, scope.workspaceId, key]); },
   };
-  return { workspaces, history, tasks, schedules, kv };
+  return { workspaces, history, tasks, schedules, kv, agentRuns };
 }
 
 async function pruneTaskRuns(pool: PostgresPool, limit: number) {
   await pool.query("DELETE FROM workcore_tasks WHERE id IN (SELECT id FROM workcore_tasks WHERE status IN ('succeeded','failed') ORDER BY created_at DESC,id DESC OFFSET $1)", [limit]);
 }
+async function pruneAgentRuns(pool: PostgresPool, limit: number) {
+  await pool.query("DELETE FROM workcore_agent_runs WHERE id IN (SELECT id FROM workcore_agent_runs WHERE status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC OFFSET $1)", [limit]);
+}
 function positiveInteger(value: number, name: string) { if (!Number.isInteger(value) || value < 1) throw new TypeError(`${name} must be a positive integer`); return value; }
+function encodeAgentCursor(createdAt: string, id: string) { return `${encodeURIComponent(createdAt)}~${encodeURIComponent(id)}`; }
+function decodeAgentCursor(cursor: string) {
+  try {
+    const parts = cursor.split('~');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) throw new TypeError();
+    const createdAt = decodeURIComponent(parts[0]);
+    const id = decodeURIComponent(parts[1]);
+    if (!Number.isFinite(Date.parse(createdAt)) || !id) throw new TypeError();
+    return [createdAt, id] as const;
+  } catch { throw new TypeError('Invalid agent run cursor'); }
+}
 function jsonValue<T>(value: T | string): T { return typeof value === 'string' ? JSON.parse(value) as T : value; }

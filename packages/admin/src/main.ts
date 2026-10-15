@@ -1,6 +1,7 @@
 import { mount } from 'svelte';
 import App from './ui/App.svelte';
 import './ui/style.css';
+import './ui/responsive.css';
 
 const root = document.getElementById('app');
 if (!root) throw new Error('Missing admin app root');

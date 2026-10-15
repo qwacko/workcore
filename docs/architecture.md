@@ -6,6 +6,7 @@
 - `applicationId` identifies a definition; `workspaceId` selects its scoped data.
 - Query, mutation and task handlers receive an actor, scope, correlation ID, abort signal, scoped services and a per-execution application context.
 - `api: true` is required to expose an operation to HTTP clients. Internal operation calls use the same input/output validation and permission checks.
+- Agents are internal queued workflows, invoked by operations with `operations.enqueueAgent()`. Their declared tools call queries/mutations/tasks through the checked caller; agent invocation itself has no direct HTTP operation endpoint.
 - Missing permissions default to deny. Workspace membership is always checked separately. Named string/array capabilities require an affirmative workspace or global authorizer (and all configured gates must allow); an explicit empty array requires no capability. Callback policies are evaluated at execution and use `access.has()` for capability checks, so the manifest includes them without pretending to evaluate input-dependent policy. The manifest hides statically denied operations, but execution checks are authoritative.
 - Standard Schema is the validation contract. Standard JSON Schema draft 2020-12 is required for exposed operations so the versioned manifest and generic UI can represent inputs/results.
 
@@ -22,6 +23,7 @@
 | `POST /workcore/api/enqueue` | Same envelope; returns a task run ID |
 | `GET /workcore/api/events?applicationId=…&workspaceId=…` | SSE workspace invalidations |
 | `GET /workcore/api/tasks`, `/history`, `/schedules` | Scoped task/history/schedule inspection |
+| `GET /workcore/api/agent-runs`, `/agent-runs/:id`, `/agent-runs/:id/events` | Capability-filtered agent run and trace inspection |
 | `POST /workcore/api/schedules` | Create a one-off or five-field cron schedule |
 | `PATCH /workcore/api/schedules/:id`, `DELETE …` | Enable/disable/update or remove a schedule |
 
@@ -40,6 +42,8 @@ The admin uses `x-workcore-runtimeType: 'date'` JSON Schema metadata only where 
 `@workcore/admin` contains a Svelte 5 + Vite browser application, already compiled into package assets, and a Node host helper `createAdminHandler`. Mount its handler only for the admin route and delegate API routes to the core handler. Asset URLs are rewritten for arbitrary base paths; the admin uses local bundled assets, not a CDN. The host owns authentication, cookie policy and deployment/content-security policy.
 
 The console consumes the same authorised manifest and API as custom clients. It supports JSON and table query results, pagination, named variants, schema-driven primitive/enum forms, row mutation bindings, task launch/results/progress, schedule management and workspace operation history. Complex input shapes use a JSON editor validated by the server.
+
+Workspace definitions can optionally declare `admin.pages` and built-in page flags. The manifest includes those declarative page/block descriptions only after filtering references against the current actor's visible operations and system capabilities. Built-in Operations, Tasks, Schedules and History entries are represented by the same page metadata; their resource endpoints remain capability-checked independently. Pages compose queries, mutation forms, task launchers and platform resources, not arbitrary HTML or executable templates. See [authoring operations](/authoring#configurable-admin-pages) for the supported contract and current limits.
 
 ## Local demo adapters
 
@@ -70,6 +74,7 @@ The file-backed Workcore adapters and demo Better Auth/SQLite composition are lo
 - A workspace is authored in one `defineWorkspace<App>()({ ... })` call. Schema maps infer each operation's inputs/results; `NoInfer` makes handlers consume those types, including typed sibling query/mutation/task calls. Task triggers and UI actions are checked against declared mutations, and UI bindings against mutation input fields. Calls still execute through runtime validation and authorization. The typed browser client infers query/mutation/task inputs and outputs from the finished definition.
 - Success events contain provenance, not input/output. Event, trigger-enqueue and history delivery failures are reported separately from committed operation results; a response warning does not mean the handler rolled back. Lost transient trigger events are not recovered.
 - History is metadata-first: actor/scope, operation, timing, status and sanitised errors. Task adapters may retain results for authorized task inspection; define retention/size policy for production data.
+- Agent traces use a separate adapter and granular capabilities for run metadata, model step content, tool metadata/payloads, and final results. Runs are actor-scoped by default; workspace-wide inspection requires `workcore.agents.runs.read.all`. Worker recovery marks an already-running agent interrupted instead of replaying possible tool side effects.
 - Schedule timezone is explicit. Missed recurring executions are skipped; overlap is tracked per schedule, not per workspace. Queue delivery/recovery may repeat work.
 - Task automatic retries are not configurable in v1. A failure can be inspected and explicitly launched again.
 
@@ -82,5 +87,7 @@ The file-backed Workcore adapters and demo Better Auth/SQLite composition are lo
 - Operation handlers have configurable deadlines (`operationTimeoutMs`, default 30 seconds for HTTP/internal work and 5 minutes for background work). Timeout abort is cooperative and does not prove that an uncooperative handler stopped or rolled back. Worker shutdown aborts active work and waits up to `shutdownTimeoutMs` (default 10 seconds); claims recover after lease expiry and may repeat side effects.
 - PostgreSQL adapter retention defaults to 5,000 history records per workspace and 1,000 task runs globally. File adapters default to 5,000 history entries and 1,000 task runs. KV values are JSON-compatible and default to at most 1 MiB. Enqueue deduplication markers are retained independently from task-result pruning. See the production guide for sensitivity and retention caveats.
 - Schedules accept simple five-field cron numeric, wildcard, list and range forms; names, steps/ranges combinations, DST edge-case guarantees and schedule editing of arbitrary task inputs are not promised.
-- No retry policy, task cancellation endpoint, agent runtime, custom composed views, invite/membership UI or external transport.
+- No retry policy, task cancellation endpoint, agent streaming/approval/resume, arbitrary server-rendered custom views, invite/membership UI or external transport. Admin pages may compose the built-in blocks documented in the admin manifest contract.
+
+The manifest remains protocol version 1: configurable `pages` are additive and optional in the client manifest type, so clients tolerate older protocol-v1 servers that do not send them. Servers in this release still emit `pages`.
 - The API and packages are an initial `0.1.0` design. Run packaged-consumer verification as part of release checks.

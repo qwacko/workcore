@@ -41,6 +41,7 @@ function assertJsonValue(value: unknown, seen = new Set<object>()): asserts valu
   seen.delete(value);
 }
 export type OperationKind = 'query' | 'mutation' | 'task';
+export type AgentToolKind = 'query' | 'mutation' | 'task';
 export type ValidationSchema<I = unknown, O = I> = StandardSchemaV1<I, O>;
 export type JsonSchemaProvider<I = unknown, O = I> = StandardJSONSchemaV1<I, O>;
 export type AnySchema = {
@@ -123,13 +124,33 @@ export interface OperationCaller {
   query(name: string, input: unknown): Promise<unknown>;
   mutate(name: string, input: unknown): Promise<unknown>;
   enqueue(name: string, input: unknown): Promise<{ runId: string }>;
+  enqueueAgent(name: string, input: unknown, options?: { conversationId?: string }): Promise<{ runId: string }>;
 }
+
+export type AgentTool = { kind: AgentToolKind; operation: string; description?: string };
+export type AgentCallContext<App, Input> = {
+  ctx: ExecutionContext<App>;
+  input: Input;
+  operations: OperationCaller;
+};
+export type AgentDefinition<App, S extends AnySchema = AnySchema> = {
+  input: S;
+  permission?: Permission<App, OutputOf<S>>;
+  tools: readonly AgentTool[];
+  model: string;
+  instructions: string | ((args: AgentCallContext<App, OutputOf<S>>) => string | Promise<string>);
+  prompt: (args: AgentCallContext<App, OutputOf<S>>) => string | Promise<string>;
+  /** A successful call to this declared tool terminates the run. */
+  finishWhen: { tool: string };
+  maxSteps?: number;
+  maxOutputTokens?: number;
+};
 
 export interface UiVariant {
   title: string;
   subtitle?: string;
   helpText?: string;
-  renderer: 'table' | 'json' | 'form';
+  renderer: 'table' | 'json' | 'form' | 'chat' | 'chat-messages' | 'chat-threads' | 'chat-thread';
   rowKey?: string;
   columns?: readonly string[];
   actions?: readonly {
@@ -139,11 +160,103 @@ export interface UiVariant {
     bind?: Record<string, { fromRow: string }>;
   }[];
   layout?: Record<string, unknown>;
+  chat?: {
+    sendMutation: string;
+    messageInput: string;
+    conversationIdInput?: string;
+    conversationQueryInput?: string;
+    conversationIdPath?: string;
+    conversationIdResultPath?: string;
+    /** Optional mutation mappings for standard chat actions. Execution and authorization remain normal mutations. */
+    actions?: Partial<Record<'editMessage' | 'deleteMessage' | 'createThread' | 'renameThread' | 'archiveThread' | 'retryAgent', ChatActionMapping>>;
+    autoScroll?: 'always' | 'when-near-bottom' | 'never';
+  };
+  /** Mutation mappings usable by message and thread list renderers without a composer. */
+  chatActions?: Partial<Record<'editMessage' | 'deleteMessage' | 'createThread' | 'renameThread' | 'archiveThread' | 'retryAgent', ChatActionMapping>>;
+  chatList?: { searchInput?: string; filterInput?: string; threadIdPath?: string; itemTitlePath?: string };
 }
+
+export type ChatMessageStatus = { delivery?: 'pending' | 'sent' | 'failed'; visibility?: 'visible' | 'deleted' | 'hidden'; activity?: 'queued' | 'running' | 'complete' | 'interrupted' } & Record<string, JsonValue | undefined>;
+export type ChatContentPart =
+  | { id?: string; type: 'text'; text: string }
+  | { id?: string; type: 'image'; url: string; alt?: string; mimeType?: string; data?: JsonValue }
+  | { id?: string; type: 'file'; url: string; name: string; mimeType?: string; size?: number; data?: JsonValue }
+  | { id?: string; type: 'link'; url: string; label?: string; data?: JsonValue }
+  | { id?: string; type: 'tool'; name: string; state: 'input-available' | 'output-available' | 'output-error'; input?: JsonValue; output?: JsonValue }
+  | { id?: string; type: string; [key: string]: JsonValue | undefined };
+export type ChatMessageSection = { id: string; title?: string; parts: ChatContentPart[]; data?: JsonValue };
+export type ChatActor = { id: string; kind: 'person' | 'agent' | 'system' | string; name?: string; avatarUrl?: string; data?: JsonValue };
+export type ChatMessage = {
+  id: string;
+  type?: string;
+  threadId?: string;
+  replyToMessageId?: string;
+  sender?: ChatActor;
+  role?: 'user' | 'assistant' | 'system' | 'tool';
+  createdAt?: string;
+  editedAt?: string;
+  preview?: string;
+  status?: ChatMessageStatus | 'streaming' | 'complete' | 'interrupted' | 'failed';
+  runId?: string;
+  sections?: ChatMessageSection[];
+  parts?: ChatContentPart[];
+  actions?: ChatAction[];
+  data?: JsonValue;
+};
+
+export type ChatAction = { id: string; label: string; mutation: string; variant?: string; input?: JsonValue; disabled?: boolean; disabledReason?: string; confirm?: string };
+export type ChatActionMapping = { mutation: string; variant?: string; bind?: Record<string, { fromAction: string }> };
+export type ChatThread = { id: string; title?: string; description?: string; status?: string; createdAt?: string; updatedAt?: string; participants?: ChatActor[]; lastMessage?: ChatMessage; messageCount?: number; unreadCount?: number; actions?: ChatAction[]; data?: JsonValue };
+export type ChatPage<T, D = JsonValue> = { items: T[]; nextCursor: string | null; previousCursor?: string | null; totalCount?: number; data?: D };
+export type ChatMessagePage<D = JsonValue> = ChatPage<ChatMessage, D> & { messages?: ChatMessage[] };
+export type ChatThreadPage<D = JsonValue> = ChatPage<ChatThread, D> & { threads?: ChatThread[] };
+export type ChatQueryResult = {
+  conversation: { id: string; title?: string; revision?: number; data?: JsonValue } | null;
+  messages: ChatMessage[];
+  activeRuns?: Array<{ runId: string; status: string }>;
+  nextCursor?: string | null;
+  previousCursor?: string | null;
+  data?: JsonValue;
+};
+
 
 export interface UiMetadata {
   default: string;
   variants: Record<string, UiVariant>;
+}
+
+export type AdminBlock =
+  | { id: string; type: 'query'; operation: string; variant?: string; input?: Record<string, unknown> }
+  | { id: string; type: 'mutation-form'; operation: string; variant?: string; title?: string }
+  | { id: string; type: 'task-launcher'; operation: string; title?: string }
+  | { id: string; type: 'resource'; resource: 'tasks' | 'schedules' | 'history' | 'agents'; title?: string };
+
+export interface AdminPage {
+  title: string;
+  description?: string;
+  layout?: 'stacked' | 'two-column' | 'overview';
+  blocks: readonly AdminBlock[];
+}
+
+export interface AdminConfiguration {
+  builtins?: Partial<Record<'operations' | 'tasks' | 'schedules' | 'history' | 'agents', boolean>>;
+  defaultPage?: string;
+  pages?: Record<string, AdminPage>;
+}
+
+type AdminBlockFor<Queries extends string, Mutations extends string, Tasks extends string> =
+  | { id: string; type: 'query'; operation: Queries; variant?: string; input?: Record<string, unknown> }
+  | { id: string; type: 'mutation-form'; operation: Mutations; variant?: string; title?: string }
+  | { id: string; type: 'task-launcher'; operation: Tasks; title?: string }
+  | { id: string; type: 'resource'; resource: 'tasks' | 'schedules' | 'history' | 'agents'; title?: string };
+
+type AdminConfigurationFor<Queries extends string, Mutations extends string, Tasks extends string> = Omit<AdminConfiguration, 'pages'> & {
+  pages?: Record<string, Omit<AdminPage, 'blocks'> & { blocks: readonly AdminBlockFor<Queries, Mutations, Tasks>[] }>;
+};
+
+export interface AdminManifestPage extends AdminPage {
+  id: string;
+  builtin?: boolean;
 }
 
 type CommonDefinition<App, S extends AnySchema, O extends AnySchema, Kind extends OperationKind, Tools = OperationCaller> = {
@@ -165,9 +278,11 @@ export type TaskDefinition<App, S extends AnySchema = AnySchema, O extends AnySc
 
 export type DefinitionMap<App> = {
   id: string;
+  admin?: AdminConfiguration;
   queries?: Record<string, QueryDefinition<App>>;
   mutations?: Record<string, MutationDefinition<App>>;
   tasks?: Record<string, TaskDefinition<App>>;
+  agents?: Record<string, AgentDefinition<App>>;
 };
 
 export type WorkspaceDefinition<App, D extends { id: string } = { id: string }> = D & {
@@ -179,10 +294,25 @@ type SchemaArg<S extends AnySchema, O extends AnySchema> = { input: S; output: O
 type QueryOptions<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller> = SchemaArg<S, O> & Omit<CommonDefinition<App, S, O, 'query', Tools>, 'input' | 'output' | 'kind'>;
 type MutationOptions<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller> = SchemaArg<S, O> & Omit<CommonDefinition<App, S, O, 'mutation', Tools>, 'input' | 'output' | 'kind'>;
 type TaskOptions<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller> = SchemaArg<S, O> & Omit<CommonDefinition<App, S, O, 'task', Tools>, 'input' | 'output' | 'kind'> & { triggers?: { mutations?: readonly string[]; mapInput?: (event: WorkcoreEvent) => InputOf<S> } };
+type AgentOptions<App, S extends AnySchema> = Omit<AgentDefinition<App, S>, 'input'> & { input: S };
 
 type SchemaInput<S> = S extends AnySchema ? InputOf<S> : never;
 type SchemaOutput<S> = S extends AnySchema ? OutputOf<S> : never;
 type MutationSuccessEvent<Names extends string> = Omit<WorkcoreEvent, 'operation' | 'type'> & { type: 'mutation.succeeded'; operation: Names };
+type AgentOperationTool<Queries extends object, Mutations extends object, Tasks extends object> =
+  | { kind: 'query'; operation: keyof Queries & string; description?: string }
+  | { kind: 'mutation'; operation: keyof Mutations & string; description?: string }
+  | { kind: 'task'; operation: keyof Tasks & string; description?: string };
+type AgentOperationToolName<Queries extends object, Mutations extends object, Tasks extends object> =
+  | `query.${keyof Queries & string}`
+  | `mutation.${keyof Mutations & string}`
+  | `task.${keyof Tasks & string}`;
+type AgentMap<App, Inputs extends object, Queries extends object, Mutations extends object, Tasks extends object> = {
+  [K in keyof Inputs]: Omit<AgentDefinition<App, Inputs[K] extends AnySchema ? Inputs[K] : AnySchema>, 'tools' | 'finishWhen'> & {
+    tools: readonly AgentOperationTool<Queries, Mutations, Tasks>[];
+    finishWhen: { tool: AgentOperationToolName<Queries, Mutations, Tasks> };
+  }
+};
 type UiActionFor<Mutations extends object> = {
   [Name in keyof Mutations & string]: Omit<NonNullable<UiVariant['actions']>[number], 'mutation' | 'bind'> & {
     mutation: Name;
@@ -199,10 +329,12 @@ type DefinitionOperationCaller<
   Queries extends object, QueryOutputs extends Record<keyof Queries, unknown>,
   Mutations extends object, MutationOutputs extends Record<keyof Mutations, unknown>,
   Tasks extends object, TaskOutputs extends Record<keyof Tasks, unknown>,
+  Agents extends object,
 > = {
   query<N extends keyof Queries & string>(name: N, input: SchemaInput<Queries[N]>): Promise<QueryOutputs[N]>;
   mutate<N extends keyof Mutations & string>(name: N, input: SchemaInput<Mutations[N]>): Promise<MutationOutputs[N]>;
   enqueue<N extends keyof Tasks & string>(name: N, input: SchemaInput<Tasks[N]>): Promise<{ runId: string }>;
+  enqueueAgent<N extends keyof Agents & string>(name: N, input: SchemaInput<Agents[N]>, options?: { conversationId?: string }): Promise<{ runId: string }>;
 };
 
 type DefinitionOperationMap<
@@ -239,12 +371,15 @@ type DefinedWorkspace<App, Id extends string,
   Queries extends object, QueryOutputs extends Record<keyof Queries, unknown>,
   Mutations extends object, MutationOutputs extends Record<keyof Mutations, unknown>,
   Tasks extends object, TaskOutputs extends Record<keyof Tasks, unknown>,
+  Agents extends object,
   AuthSchema extends AnySchema | undefined,
 > = {
   id: Id;
-  queries: DefinedOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs>, 'query', Mutations>;
-  mutations: DefinedOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs>, 'mutation', Mutations>;
-  tasks: DefinedOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs>, 'task', Mutations>;
+  admin?: AdminConfigurationFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>;
+  queries: DefinedOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents>, 'query', Mutations>;
+  mutations: DefinedOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents>, 'mutation', Mutations>;
+  tasks: DefinedOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents>, 'task', Mutations>;
+  agents: AgentMap<App, Agents, Queries, Mutations, Tasks>;
 } & ([AuthSchema] extends [undefined]
   ? { authorization?: undefined }
   : AuthSchema extends AnySchema ? { authorization: AuthorizationConfiguration<AuthSchema> } : never);
@@ -253,13 +388,16 @@ type WorkspaceConfiguration<App, Id extends string,
   Queries extends object, QueryOutputs extends Record<keyof Queries, unknown>,
   Mutations extends object, MutationOutputs extends Record<keyof Mutations, unknown>,
   Tasks extends object, TaskOutputs extends Record<keyof Tasks, unknown>,
+  Agents extends object,
   AuthSchema extends AnySchema | undefined,
 > = {
   id: Id;
+  admin?: AdminConfigurationFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>;
   authorization?: AuthSchema extends AnySchema ? AuthorizationConfiguration<AuthSchema> : undefined;
-  queries?: DefinitionOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>>, 'query', NoInfer<Mutations>>;
-  mutations?: DefinitionOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>>, 'mutation', NoInfer<Mutations>>;
-  tasks?: DefinitionOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>>, 'task', NoInfer<Mutations>>;
+  queries?: DefinitionOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>, NoInfer<Agents>>, 'query', NoInfer<Mutations>>;
+  mutations?: DefinitionOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>, NoInfer<Agents>>, 'mutation', NoInfer<Mutations>>;
+  tasks?: DefinitionOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>, NoInfer<Agents>>, 'task', NoInfer<Mutations>>;
+  agents?: AgentMap<App, Agents, Queries, Mutations, Tasks>;
 };
 
 function withOperationKind(operations: object | undefined, kind: OperationKind): Record<string, RuntimeOperation> {
@@ -272,40 +410,51 @@ export function defineWorkspace<App>() {
     const Queries extends object = {}, QueryOutputs extends Record<keyof Queries, unknown> = { [K in keyof Queries]: never },
     const Mutations extends object = {}, MutationOutputs extends Record<keyof Mutations, unknown> = { [K in keyof Mutations]: never },
     const Tasks extends object = {}, TaskOutputs extends Record<keyof Tasks, unknown> = { [K in keyof Tasks]: never },
+    const Agents extends object = {},
     const AuthSchema extends AnySchema | undefined = undefined,
-  >(definition: WorkspaceConfiguration<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>): WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>> => {
+  >(definition: WorkspaceConfiguration<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>): WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>> => {
     const queries = withOperationKind(definition.queries, 'query');
     const mutations = withOperationKind(definition.mutations, 'mutation');
     const tasks = withOperationKind(definition.tasks, 'task');
+    const agents = definition.agents ?? {};
     const runtimeDefinition: RuntimeDefinition = {
       id: definition.id,
+      ...(definition.admin === undefined ? {} : { admin: definition.admin }),
       ...(definition.authorization === undefined ? {} : { authorization: definition.authorization as AuthorizationDefinition }),
       queries,
       mutations,
       tasks: tasks as NonNullable<RuntimeDefinition['tasks']>,
+      agents: agents as Record<string, RuntimeAgent>,
     };
     validateDefinition(runtimeDefinition);
-    const workspace = { ...definition, queries, mutations, tasks };
+    const workspace = { ...definition, queries, mutations, tasks, agents };
     Object.defineProperty(workspace, 'registerApplication', {
       enumerable: false,
-      value: (options: ApplicationRegistrationOptions<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>>>) => registerApplicationInternal<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>>>(runtimeDefinition, options),
+      value: (options: ApplicationRegistrationOptions<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>>>) => registerApplicationInternal<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>>>(runtimeDefinition, options),
     });
-    return workspace as unknown as WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, AuthSchema>>;
+     return workspace as unknown as WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>>;
   };
 }
 
 export function query<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryOptions<App, S, O, Tools>): QueryDefinition<App, S, O, Tools> {
   return { ...options, kind: 'query' };
 }
-export function tableQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryOptions<App, S, O, Tools>): QueryDefinition<App, S, O, Tools> {
+type RendererMetadata<R extends UiVariant['renderer']> = { default: string; variants: Record<string, Omit<UiVariant, 'renderer'> & { renderer: R }> };
+type QueryWithOutput<App, S extends AnySchema, O extends AnySchema, Tools, RequiredOutput, Renderer extends UiVariant['renderer']> = Omit<QueryOptions<App, S, O, Tools>, 'ui'> & { ui?: RendererMetadata<Renderer> } & (OutputOf<O> extends RequiredOutput ? unknown : never);
+export function tableQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryWithOutput<App, S, O, Tools, { rows: unknown[]; nextCursor: string | null }, 'table' | 'json'>): QueryDefinition<App, S, O, Tools> {
   return { ...options, kind: 'query' };
 }
+/** Typed query-definition conveniences. They share the ordinary query execution and validation pipeline. */
+export function chatMessageQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryWithOutput<App, S, O, Tools, { items: unknown[]; nextCursor: string | null }, 'chat' | 'chat-messages' | 'json'>): QueryDefinition<App, S, O, Tools> { return { ...options, kind: 'query' }; }
+export function chatThreadQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryWithOutput<App, S, O, Tools, { items: unknown[]; nextCursor: string | null }, 'chat-threads' | 'json'>): QueryDefinition<App, S, O, Tools> { return { ...options, kind: 'query' }; }
+export function chatThreadDetailQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryWithOutput<App, S, O, Tools, { thread: unknown; messages: unknown[] }, 'chat-thread' | 'chat' | 'json'>): QueryDefinition<App, S, O, Tools> { return { ...options, kind: 'query' }; }
 export function mutation<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: MutationOptions<App, S, O, Tools>): MutationDefinition<App, S, O, Tools> {
   return { ...options, kind: 'mutation' };
 }
 export function task<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: TaskOptions<App, S, O, Tools>): TaskDefinition<App, S, O, Tools> {
   return { ...options, kind: 'task' };
 }
+export function agent<App, S extends AnySchema>(options: AgentOptions<App, S>): AgentDefinition<App, S> { return options; }
 
 type OperationsFor<D, K extends OperationKind> = K extends 'query'
   ? D extends { queries?: infer Q } ? NonNullable<Q> : {}
@@ -322,10 +471,18 @@ export type OutputFor<Def> = Def extends { output: infer S } ? OutputOf<S> : nev
 
 export type RuntimeDefinition = {
   id: string;
+  admin?: AdminConfiguration;
   authorization?: AuthorizationDefinition;
   queries?: Record<string, RuntimeOperation>;
   mutations?: Record<string, RuntimeOperation>;
   tasks?: Record<string, RuntimeOperation & { triggers?: { mutations?: readonly string[]; mapInput?: (event: WorkcoreEvent) => unknown } }>;
+  agents?: Record<string, RuntimeAgent>;
+};
+
+export type RuntimeAgent = Omit<AgentDefinition<unknown, AnySchema>, 'permission' | 'instructions' | 'prompt'> & {
+  permission?: Permission<unknown, unknown>;
+  instructions: string | ((args: AgentCallContext<unknown, unknown>) => string | Promise<string>);
+  prompt: (args: AgentCallContext<unknown, unknown>) => string | Promise<string>;
 };
 
 export type RuntimeOperation = {
@@ -437,6 +594,55 @@ export type TaskPayload = {
   createdAt: string;
 };
 
+export type AgentRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'interrupted';
+export type AgentRun = {
+  id: string;
+  scope: Scope;
+  actorId: string;
+  agent: string;
+  status: AgentRunStatus;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  finishReason?: string;
+  result?: JsonValue;
+  error?: { code: string; message: string };
+  correlationId: string;
+  conversationId?: string;
+  codecId?: string;
+};
+export type AgentTraceEvent = {
+  id: string;
+  runId: string;
+  sequence: number;
+  createdAt: string;
+  type: 'run.started' | 'step.started' | 'step.completed' | 'tool.started' | 'tool.completed' | 'tool.failed' | 'run.completed' | 'run.failed';
+  data?: JsonValue;
+};
+export interface AgentRunAdapter {
+  create(run: AgentRun): Promise<void>;
+  get(scope: Scope, runId: string): Promise<AgentRun | undefined>;
+  list(scope: Scope, filter: { limit: number; cursor?: string; agent?: string; status?: AgentRunStatus; actorId?: string; conversationId?: string }): Promise<{ runs: AgentRun[]; nextCursor: string | null }>;
+  update(run: AgentRun): Promise<void>;
+  appendEvent(event: AgentTraceEvent): Promise<void>;
+  listEvents(scope: Scope, runId: string, afterSequence: number, limit: number): Promise<AgentTraceEvent[]>;
+}
+
+export type AgentToolExecutor = (input: unknown, signal?: AbortSignal) => Promise<unknown>;
+export type AgentEngine = {
+  run(args: {
+    model: string;
+    instructions: string;
+    prompt: string;
+    maxSteps: number;
+    maxOutputTokens?: number;
+    tools: Record<string, { description?: string; inputSchema: JsonSchema; execute: AgentToolExecutor }>;
+    finishTool: string;
+    signal: AbortSignal;
+    onEvent: (event: Omit<AgentTraceEvent, 'id' | 'runId' | 'sequence' | 'createdAt'>) => Promise<void>;
+  }): Promise<{ finishReason: string; finishTool?: string }>;
+};
+
 export type TaskRun = HistoryEntry & { kind: 'task'; runId: string; progress?: number; result?: JsonValue; codecId?: string };
 export interface TaskAdapter {
   /** Idempotent by payload.id, including completed runs retained for schedule recovery. */
@@ -512,6 +718,8 @@ export type PlatformServices = {
   tasks: TaskAdapter;
   schedules: ScheduleAdapter;
   kv: KeyValueAdapter;
+  agentRuns?: AgentRunAdapter;
+  agentEngine?: AgentEngine;
   logger?: Logger;
 };
 
@@ -678,7 +886,42 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
   if (path === 'tasks' && request.method === 'GET') {
     if (!await canCapability(registration, options, actor, scope, 'workcore.tasks.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'Task access denied', 403);
     const runs = await options.services.tasks.list(scope, boundedLimit(url.searchParams.get('limit')));
-    return json({ runs: runs.map((run) => ({ ...run, ...(run.result === undefined ? {} : { result: decodeStored(run.result, run.codecId, options) }) })) }, 200, {}, codec);
+    return json({ runs: runs.filter((run) => !run.operation.startsWith('@workcore/agent/')).map((run) => ({ ...run, ...(run.result === undefined ? {} : { result: decodeStored(run.result, run.codecId, options) }) })) }, 200, {}, codec);
+  }
+  if ((path === 'agent-runs' || path.startsWith('agent-runs/')) && request.method === 'GET') {
+    if (!options.services.agentRuns) throw new WorkcoreError('AGENT_STORAGE_UNAVAILABLE', 'Agent run storage is not configured', 503);
+    if (!await canCapability(registration, options, actor, scope, 'workcore.agents.runs.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'Agent run access denied', 403);
+    if (path === 'agent-runs') {
+      const status = url.searchParams.get('status') ?? undefined;
+      if (status && !isAgentRunStatus(status)) throw new WorkcoreError('INVALID_FILTER', 'Unknown agent run status', 400);
+      const filter = {
+        limit: boundedLimit(url.searchParams.get('limit')),
+        ...(url.searchParams.get('cursor') ? { cursor: url.searchParams.get('cursor')! } : {}),
+        ...(url.searchParams.get('agent') ? { agent: url.searchParams.get('agent')! } : {}),
+        ...(isAgentRunStatus(status) ? { status } : {}),
+        ...(url.searchParams.get('actorId') ? { actorId: url.searchParams.get('actorId')! } : {}),
+        ...(url.searchParams.get('conversationId') ? { conversationId: url.searchParams.get('conversationId')! } : {}),
+      };
+      const canReadAll = await canCapability(registration, options, actor, scope, 'workcore.agents.runs.read.all', undefined);
+      if (!canReadAll) filter.actorId = actor.id;
+      let result: Awaited<ReturnType<AgentRunAdapter['list']>>;
+      try { result = await options.services.agentRuns.list(scope, filter); }
+      catch (error) { if (error instanceof TypeError) throw new WorkcoreError('INVALID_CURSOR', 'Agent run cursor is invalid', 400); throw error; }
+      return json({ ...result, runs: await Promise.all(result.runs.map((run) => projectAgentRun(run, registration, actor, scope, options))) }, 200, {}, codec);
+    }
+    const [runId, resource] = path.slice('agent-runs/'.length).split('/');
+    const run = await options.services.agentRuns.get(scope, decodeURIComponent(runId ?? ''));
+    if (!run) throw new WorkcoreError('NOT_FOUND', 'Agent run not found', 404);
+    const canReadAll = await canCapability(registration, options, actor, scope, 'workcore.agents.runs.read.all', undefined);
+    if (!canReadAll && run.actorId !== actor.id) throw new WorkcoreError('NOT_FOUND', 'Agent run not found', 404);
+    const projected = await projectAgentRun(run, registration, actor, scope, options);
+    if (!resource) return json({ run: projected }, 200, {}, codec);
+    if (resource !== 'events') throw new WorkcoreError('NOT_FOUND', 'Agent run resource not found', 404);
+    const events = await options.services.agentRuns.listEvents(scope, run.id, Math.max(0, Number(url.searchParams.get('after') ?? 0) || 0), boundedLimit(url.searchParams.get('limit')));
+    const canReadTools = await canCapability(registration, options, actor, scope, 'workcore.agents.tools.read', undefined);
+    const canReadPayloads = await canCapability(registration, options, actor, scope, 'workcore.agents.toolPayloads.read', undefined);
+    const canReadMessages = await canCapability(registration, options, actor, scope, 'workcore.agents.messages.read', undefined);
+    return json({ events: events.map((event) => projectAgentEvent(event, { canReadTools, canReadPayloads, canReadMessages })), nextCursor: events.length === boundedLimit(url.searchParams.get('limit')) ? String(events.at(-1)!.sequence) : null }, 200, {}, codec);
   }
   if (path === 'schedules' && request.method === 'GET') {
     if (!await canCapability(registration, options, actor, scope, 'workcore.schedules.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule access denied', 403);
@@ -714,28 +957,20 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
   if (path.startsWith('schedules/') && request.method === 'PATCH') {
     if (!await canCapability(registration, options, actor, scope, 'workcore.schedules.manage', undefined)) throw new WorkcoreError('FORBIDDEN', 'Schedule management denied', 403);
     const id = decodeURIComponent(path.slice('schedules/'.length));
-    const schedule = await options.services.schedules.get(id);
+    let schedule = await options.services.schedules.get(id);
     if (!schedule || !sameScope(schedule.scope, scope)) throw new WorkcoreError('NOT_FOUND', 'Schedule not found', 404);
     const patch = body as Record<string, unknown>;
-    if (typeof patch.enabled === 'boolean') {
-      if (patch.enabled && !schedule.enabled) {
-        if (schedule.kind === 'once' && schedule.runAt && Date.parse(schedule.runAt) <= Date.now()) throw new WorkcoreError('INVALID_SCHEDULE', 'A past one-off schedule cannot be re-enabled', 400);
-        if (schedule.kind === 'recurring') schedule.nextRunAt = nextScheduleOccurrence(schedule.cron!, new Date(), schedule.timezone).toISOString();
-      }
-      schedule.enabled = patch.enabled;
+    applySchedulePatch(schedule, patch);
+    if (!await options.services.schedules.update(schedule)) {
+      // A worker may reserve/update the schedule between GET and PATCH. Reapply
+      // this narrow patch once to the latest revision rather than failing a
+      // user action that is still valid against the current schedule.
+      const latest = await options.services.schedules.get(id);
+      if (!latest || !sameScope(latest.scope, scope)) throw new WorkcoreError('NOT_FOUND', 'Schedule not found', 404);
+      schedule = latest;
+      applySchedulePatch(schedule, patch);
+      if (!await options.services.schedules.update(schedule)) throw new WorkcoreError('SCHEDULE_CONFLICT', 'Schedule changed concurrently; reload and retry', 409);
     }
-    if (patch.cron !== undefined) {
-      if (schedule.kind !== 'recurring' || !isSupportedCron(String(patch.cron))) throw new WorkcoreError('INVALID_SCHEDULE', 'Invalid recurring cron expression', 400);
-      schedule.cron = String(patch.cron);
-      schedule.nextRunAt = nextScheduleOccurrence(schedule.cron, new Date(), schedule.timezone).toISOString();
-    }
-    if (patch.timezone !== undefined) {
-      const timezone = String(patch.timezone);
-      try { new Intl.DateTimeFormat('en', { timeZone: timezone }); } catch { throw new WorkcoreError('INVALID_TIMEZONE', 'Unknown timezone', 400); }
-      schedule.timezone = timezone;
-      if (schedule.kind === 'recurring') schedule.nextRunAt = nextScheduleOccurrence(schedule.cron!, new Date(), timezone).toISOString();
-    }
-    if (!await options.services.schedules.update(schedule)) throw new WorkcoreError('SCHEDULE_CONFLICT', 'Schedule changed concurrently; reload and retry', 409);
     return json({ schedule: publicSchedule(await options.services.schedules.get(id) ?? schedule, options) }, 200, {}, codec);
   }
   if (path === 'query' || path === 'mutate' || path === 'enqueue') {
@@ -815,6 +1050,10 @@ async function authoriseOperation(registration: ApplicationRegistration, def: Ru
   for (const permission of permissions) {
     if (!await canCapability(registration, options, actor, scope, permission, input)) throw new WorkcoreError('FORBIDDEN', 'Operation permission denied', 403);
   }
+}
+
+async function authoriseAgent(registration: ApplicationRegistration, def: RuntimeAgent, actor: Actor, scope: Scope, input: unknown, options: PlatformOptions) {
+  return authoriseOperation(registration, { kind: 'task', input: def.input, output: def.input, ...(def.permission ? { permission: def.permission as Permission<unknown, unknown> } : {}), handler: async () => undefined }, actor, scope, input, options);
 }
 
 async function workspacePermissionAllowed(registration: ApplicationRegistration, actor: Actor, scope: Scope, permission: string, input: unknown): Promise<boolean | undefined> {
@@ -905,6 +1144,7 @@ function createExecutionContext(scope: Scope, actor: Actor, correlationId: strin
 
 function createCaller(registration: ApplicationRegistration, actor: Actor, scope: Scope, correlationId: string, options: PlatformOptions, apps: Map<string, ApplicationRegistration>, signal: AbortSignal, codec: WireCodec = jsonWireCodec, causationId?: string, triggerDepth = 0, currentExecutionId?: string, request?: RequestContext): OperationCaller {
   const invoke = async (kind: 'query' | 'mutation' | 'task', name: string, input: unknown) => {
+    if (signal.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Operation call was aborted', 499);
     if (!await options.services.workspaces.canAccess(actor, scope)) throw new WorkcoreError('FORBIDDEN', 'Workspace access denied', 403);
     const def = operationAt(registration.definition, kind, name);
     if (!def) throw new WorkcoreError('OPERATION_NOT_FOUND', `Unknown ${kind}: ${name}`, 404);
@@ -912,6 +1152,7 @@ function createCaller(registration: ApplicationRegistration, actor: Actor, scope
     await authoriseOperation(registration, def, actor, scope, validInput, options);
     if (kind === 'task') {
       if (triggerDepth >= 8) throw new WorkcoreError('TRIGGER_DEPTH_EXCEEDED', 'Background operation trigger depth limit exceeded', 409);
+      if (signal.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Task enqueue was aborted', 499);
       const id = randomId();
       await options.services.tasks.enqueue({ id, applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: name, input: encodeWithCodec(codec, validInput), codecId: codec.id, actorId: actor.id, correlationId, ...(currentExecutionId ? { causationId: currentExecutionId } : causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt: new Date().toISOString() });
       return { runId: id };
@@ -948,7 +1189,39 @@ function createCaller(registration: ApplicationRegistration, actor: Actor, scope
       throw error;
     } finally { await cleanupContext(context, options.services.logger); }
   };
-  return { query: (name, input) => invoke('query', name, input), mutate: (name, input) => invoke('mutation', name, input), enqueue: (name, input) => invoke('task', name, input) as Promise<{ runId: string }> };
+  return {
+    query: (name, input) => invoke('query', name, input),
+    mutate: (name, input) => invoke('mutation', name, input),
+    enqueue: (name, input) => invoke('task', name, input) as Promise<{ runId: string }>,
+    enqueueAgent: (name, input, agentOptions) => {
+      if (signal.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Agent enqueue was aborted', 499);
+      return enqueueAgentRun(registration, actor, scope, correlationId, options, codec, name, input, agentOptions?.conversationId, currentExecutionId, triggerDepth, signal);
+    },
+  };
+}
+
+async function enqueueAgentRun(registration: ApplicationRegistration, actor: Actor, scope: Scope, correlationId: string, options: PlatformOptions, codec: WireCodec, name: string, rawInput: unknown, conversationId?: string, causationId?: string, triggerDepth = 0, signal?: AbortSignal) {
+  if (triggerDepth >= 8) throw new WorkcoreError('TRIGGER_DEPTH_EXCEEDED', 'Background operation trigger depth limit exceeded', 409);
+  const definition = registration.definition.agents?.[name];
+  if (!definition) throw new WorkcoreError('OPERATION_NOT_FOUND', `Unknown agent: ${name}`, 404);
+  if (!options.services.agentRuns) throw new WorkcoreError('AGENT_STORAGE_UNAVAILABLE', 'Agent run storage is not configured', 503);
+  const input = await validate(definition.input, rawInput);
+  await authoriseAgent(registration, definition, actor, scope, input, options);
+  if (!await options.services.workspaces.canAccess(actor, scope)) throw new WorkcoreError('FORBIDDEN', 'Workspace access denied', 403);
+  if (signal?.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Agent enqueue was aborted', 499);
+  const id = randomId();
+  const createdAt = new Date().toISOString();
+  const run: AgentRun = { id, scope, actorId: actor.id, agent: name, status: 'queued', createdAt, correlationId, codecId: codec.id, ...(conversationId ? { conversationId } : {}) };
+  await options.services.agentRuns.create(run);
+  try {
+    if (signal?.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Agent enqueue was aborted', 499);
+    await options.services.tasks.enqueue({ id, applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: `@workcore/agent/${name}`, input: codec.encode(input), codecId: codec.id, actorId: actor.id, correlationId, ...(causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt });
+  } catch (error) {
+    run.status = 'failed'; run.finishedAt = new Date().toISOString(); run.error = { code: 'AGENT_ENQUEUE_FAILED', message: safeMessage(error) };
+    await options.services.agentRuns.update(run);
+    throw error;
+  }
+  return { runId: id };
 }
 
 async function enqueueTriggeredTasks(registration: ApplicationRegistration, actor: Actor, scope: Scope, correlationId: string, event: WorkcoreEvent, options: PlatformOptions, codec: WireCodec) {
@@ -971,16 +1244,25 @@ async function enqueueTriggeredTasks(registration: ApplicationRegistration, acto
 async function processClaimedTask(payload: TaskPayload, options: PlatformOptions, apps: Map<string, ApplicationRegistration>, signal: AbortSignal) {
   const registration = apps.get(payload.applicationId);
   if (!registration || !options.auth.resolveActor) {
-    await recordTaskFailure(options, payload, { code: 'ACTOR_UNAVAILABLE', message: 'Task actor cannot be resolved by configured auth adapter' });
+    const error = { code: 'ACTOR_UNAVAILABLE', message: 'Task actor cannot be resolved by configured auth adapter' };
+    await recordAgentPreflightFailure(payload, options, error);
+    await recordTaskFailure(options, payload, error);
     return;
   }
   const actor = await options.auth.resolveActor(payload.actorId);
   const scope = { applicationId: payload.applicationId, workspaceId: payload.workspaceId };
   if (!actor || !await options.services.workspaces.canAccess(actor, scope)) {
-    await recordTaskFailure(options, payload, { code: 'ACCESS_REVOKED', message: 'Task actor no longer has workspace access' });
+    const error = { code: 'ACCESS_REVOKED', message: 'Task actor no longer has workspace access' };
+    await recordAgentPreflightFailure(payload, options, error);
+    await recordTaskFailure(options, payload, error);
     return;
   }
   const def = operationAt(registration.definition, 'task', payload.operation);
+  if (payload.operation.startsWith('@workcore/agent/')) {
+    await processClaimedAgent(payload, registration, actor, scope, options, apps, signal);
+    await publishAgentInvalidation(payload, scope, options);
+    return;
+  }
   if (!def) {
     await recordTaskFailure(options, payload, { code: 'OPERATION_NOT_FOUND', message: 'Registered task not found' });
     return;
@@ -1021,6 +1303,184 @@ async function processClaimedTask(payload: TaskPayload, options: PlatformOptions
   try { await options.services.events.publish(event); }
   catch (error) { options.services.logger?.error('Task completed but event publication failed', { runId: payload.id, detail: safeMessage(error) }); }
   await safeHistory(options, { id: payload.id, runId: payload.id, scope, actorId: actor.id, kind: 'task', operation: payload.operation, status: 'succeeded', startedAt: payload.createdAt, finishedAt: new Date().toISOString() });
+}
+
+async function publishAgentInvalidation(payload: TaskPayload, scope: Scope, options: PlatformOptions) {
+  const run = await options.services.agentRuns?.get(scope, payload.id);
+  if (!run || (run.status !== 'succeeded' && run.status !== 'failed' && run.status !== 'interrupted')) return;
+  try {
+    await options.services.events.publish({
+      id: randomId(),
+      type: 'workspace.invalidated',
+      applicationId: scope.applicationId,
+      workspaceId: scope.workspaceId,
+      operation: payload.operation,
+      executionId: payload.id,
+      actorId: payload.actorId,
+      correlationId: payload.correlationId,
+      ...(payload.causationId ? { causationId: payload.causationId } : {}),
+      triggerDepth: payload.triggerDepth ?? 0,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    options.services.logger?.error('Agent reached a terminal state but live invalidation could not be published', { runId: payload.id, detail: safeMessage(error) });
+  }
+}
+
+async function recordAgentPreflightFailure(payload: TaskPayload, options: PlatformOptions, error: { code: string; message: string }) {
+  if (!payload.operation.startsWith('@workcore/agent/')) return;
+  const store = options.services.agentRuns;
+  if (!store) return;
+  const run = await store.get({ applicationId: payload.applicationId, workspaceId: payload.workspaceId }, payload.id);
+  if (!run || run.status !== 'queued') return;
+  run.status = 'failed'; run.finishedAt = new Date().toISOString(); run.error = error; run.finishReason = error.code;
+  await store.update(run);
+}
+
+async function processClaimedAgent(payload: TaskPayload, registration: ApplicationRegistration, actor: Actor, scope: Scope, options: PlatformOptions, apps: Map<string, ApplicationRegistration>, signal: AbortSignal) {
+  const agentName = payload.operation.slice('@workcore/agent/'.length);
+  const definition = registration.definition.agents?.[agentName];
+  const store = options.services.agentRuns;
+  if (!definition || !store) {
+    if (store) {
+      const missingRun = await store.get(scope, payload.id);
+      if (missingRun) { missingRun.status = 'failed'; missingRun.finishedAt = new Date().toISOString(); missingRun.error = { code: 'AGENT_UNAVAILABLE', message: 'Agent definition is unavailable' }; await store.update(missingRun); }
+    }
+    await options.services.tasks.fail(payload.id, { code: 'AGENT_UNAVAILABLE', message: 'Agent definition or run storage is unavailable' });
+    return;
+  }
+  const run = await store.get(scope, payload.id);
+  if (!run) {
+    await options.services.tasks.fail(payload.id, { code: 'AGENT_RUN_NOT_FOUND', message: 'Agent run metadata was not found' });
+    return;
+  }
+  if (run.status === 'succeeded') {
+    await options.services.tasks.complete(payload.id, run.result ?? null);
+    return;
+  }
+  if (run.status === 'failed' || run.status === 'interrupted') {
+    await options.services.tasks.fail(payload.id, run.error ?? { code: 'AGENT_INTERRUPTED', message: 'Agent run did not complete' });
+    return;
+  }
+  if (run.status !== 'queued') {
+    // A worker recovered an in-flight agent. Never replay model/tool effects automatically.
+    if (run && run.status === 'running') {
+      run.status = 'interrupted'; run.finishedAt = new Date().toISOString(); run.finishReason = 'worker_recovery';
+      await store.update(run);
+      await options.services.tasks.fail(payload.id, { code: 'AGENT_INTERRUPTED', message: 'Agent run was interrupted and was not automatically resumed' });
+    }
+    return;
+  }
+  if (!options.services.agentEngine) {
+    run.status = 'failed'; run.finishedAt = new Date().toISOString(); run.error = { code: 'AGENT_ENGINE_UNAVAILABLE', message: 'No agent engine is configured' };
+    await store.update(run);
+    await options.services.tasks.fail(payload.id, run.error);
+    return;
+  }
+  const input = decodeStored(payload.input, payload.codecId, options);
+  try {
+    await authoriseAgent(registration, definition, actor, scope, input, options);
+  } catch (error) {
+    run.status = 'failed'; run.finishedAt = new Date().toISOString(); run.error = { code: error instanceof WorkcoreError ? error.code : 'FORBIDDEN', message: safeMessage(error) };
+    await store.update(run); await options.services.tasks.fail(payload.id, run.error); return;
+  }
+  run.status = 'running'; run.startedAt = new Date().toISOString();
+  await store.update(run);
+  let sequence = 0;
+  const append = async (event: Omit<AgentTraceEvent, 'id' | 'runId' | 'sequence' | 'createdAt'>) => store.appendEvent({ ...event, id: randomId(), runId: run.id, sequence: ++sequence, createdAt: new Date().toISOString() });
+  let context: unknown;
+  let toolsEnabled = true;
+  const agentAbortController = new AbortController();
+  try {
+    context = await registration.createAppContext({ scope, actor });
+    await append({ type: 'run.started', data: { agent: agentName, model: definition.model } });
+    const toolMap: Record<string, { description?: string; inputSchema: JsonSchema; execute: AgentToolExecutor }> = {};
+    let toolExecutionQueue: Promise<void> = Promise.resolve();
+    let finishToolSucceeded = false;
+    let finishToolResult: unknown;
+    let agentSignal = signal;
+    for (const toolDefinition of definition.tools) {
+      const toolName = `${toolDefinition.kind}.${toolDefinition.operation}`;
+      if (toolMap[toolName]) throw new WorkcoreError('INVALID_AGENT', `Agent '${agentName}' declares duplicate tool '${toolName}'`, 500);
+      const execute: AgentToolExecutor = (toolInput, toolSignal) => {
+        const execution = toolExecutionQueue.then(async () => {
+          if (!toolsEnabled || agentSignal.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Agent run is no longer accepting tool calls', 499);
+          if (finishToolSucceeded) throw new WorkcoreError('AGENT_ALREADY_FINISHED', 'The agent already called its terminating tool', 409);
+          await append({ type: 'tool.started', data: { name: toolName, input: safeTraceValue(toolInput) } });
+          try {
+            if (!toolsEnabled || agentSignal.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Agent run is no longer accepting tool calls', 499);
+            let result: unknown;
+            const signals = [agentSignal, agentAbortController.signal, ...(toolSignal ? [toolSignal] : [])];
+            const executionSignal = AbortSignal.any(signals);
+            const toolCaller = createCaller(registration, actor, scope, payload.correlationId, options, apps, executionSignal, resolveWireCodec(options, payload.codecId ?? 'json'), payload.causationId, payload.triggerDepth ?? 0, payload.id);
+            if (toolDefinition.kind === 'query') result = await toolCaller.query(toolDefinition.operation, toolInput);
+            else if (toolDefinition.kind === 'mutation') result = await toolCaller.mutate(toolDefinition.operation, toolInput);
+            else result = await toolCaller.enqueue(toolDefinition.operation, toolInput);
+            if (toolName === definition.finishWhen.tool) { finishToolSucceeded = true; finishToolResult = result; }
+            try { await append({ type: 'tool.completed', data: { name: toolName, result: safeTraceValue(result) } }); }
+            catch (traceError) { options.services.logger?.error('Agent tool succeeded but its trace event could not be persisted', { runId: run.id, tool: toolName, detail: safeMessage(traceError) }); }
+            return result;
+          } catch (error) {
+            try { await append({ type: 'tool.failed', data: { name: toolName, error: safeMessage(error) } }); }
+            catch (traceError) { options.services.logger?.error('Agent tool failed and its trace event could not be persisted', { runId: run.id, tool: toolName, detail: safeMessage(traceError) }); }
+            throw error;
+          }
+        });
+        toolExecutionQueue = execution.then(() => undefined, () => undefined);
+        return execution;
+      };
+      const toolOperation = operationAt(registration.definition, toolDefinition.kind, toolDefinition.operation)!;
+      toolMap[toolName] = { ...(toolDefinition.description ? { description: toolDefinition.description } : {}), inputSchema: getJsonSchema(toolOperation.input, 'input'), execute };
+    }
+    if (!definition.tools.some((tool) => `${tool.kind}.${tool.operation}` === definition.finishWhen.tool)) throw new WorkcoreError('INVALID_AGENT', `Agent '${agentName}' finish tool '${definition.finishWhen.tool}' is not declared`, 500);
+    let result: Awaited<ReturnType<AgentEngine['run']>>;
+    try {
+      result = await executeWithDeadline(signal, options.operationTimeoutMs ?? 5 * 60_000, async (deadlineSignal) => {
+        agentSignal = AbortSignal.any([deadlineSignal, agentAbortController.signal]);
+        const callContext = {
+          ctx: createExecutionContext(scope, actor, payload.correlationId, context, options.services, agentSignal, payload.id),
+          input,
+          operations: createCaller(registration, actor, scope, payload.correlationId, options, apps, agentSignal, resolveWireCodec(options, payload.codecId ?? 'json'), payload.causationId, payload.triggerDepth ?? 0, payload.id),
+        };
+        const instructions = typeof definition.instructions === 'function' ? await definition.instructions(callContext) : definition.instructions;
+        const prompt = await definition.prompt(callContext);
+        return options.services.agentEngine!.run({
+          model: definition.model, instructions, prompt, maxSteps: definition.maxSteps ?? 8, ...(definition.maxOutputTokens ? { maxOutputTokens: definition.maxOutputTokens } : {}), tools: toolMap, finishTool: definition.finishWhen.tool, signal: agentSignal,
+          onEvent: append,
+        });
+      });
+    } finally {
+      toolsEnabled = false;
+      if (!finishToolSucceeded && !agentAbortController.signal.aborted) agentAbortController.abort(new Error('Agent engine stopped before successful completion'));
+    }
+    if (!finishToolSucceeded || result.finishTool !== definition.finishWhen.tool) throw new WorkcoreError('AGENT_FINISH_CONDITION_NOT_MET', 'Agent stopped without successfully calling its configured finish tool', 422);
+    const encoded = encodeWithCodec(resolveWireCodec(options, payload.codecId ?? 'json'), finishToolResult);
+    if (new TextEncoder().encode(JSON.stringify(encoded)).byteLength > (options.maxResultBytes ?? 2_097_152)) throw new WorkcoreError('RESULT_TOO_LARGE', 'Agent result exceeds configured limit', 413);
+    run.status = 'succeeded'; run.finishedAt = new Date().toISOString(); run.finishReason = `tool:${result.finishTool}`;
+    run.result = encoded;
+    try { await append({ type: 'run.completed', data: { finishReason: run.finishReason } }); }
+    catch (traceError) { options.services.logger?.error('Agent succeeded but its completion trace could not be persisted', { runId: run.id, detail: safeMessage(traceError) }); }
+    await store.update(run);
+    try { await options.services.tasks.complete(payload.id, encoded); }
+    catch (error) { options.services.logger?.error('Agent completed but task bookkeeping failed', { runId: payload.id, detail: safeMessage(error) }); }
+  } catch (error) {
+    toolsEnabled = false;
+    if (!agentAbortController.signal.aborted) agentAbortController.abort(error);
+    if (run.status === 'succeeded') {
+      options.services.logger?.error('Agent reached its finish condition but terminal bookkeeping failed', { runId: run.id, detail: safeMessage(error) });
+      try { await store.update(run); } catch (storeError) { options.services.logger?.error('Could not persist completed agent run', { runId: run.id, detail: safeMessage(storeError) }); }
+      try { await options.services.tasks.complete(payload.id, run.result ?? null); } catch (taskError) { options.services.logger?.error('Could not mark completed agent queue item terminal', { runId: run.id, detail: safeMessage(taskError) }); }
+      return;
+    }
+    run.status = signal.aborted ? 'interrupted' : 'failed'; run.finishedAt = new Date().toISOString();
+    run.error = { code: error instanceof WorkcoreError ? error.code : 'AGENT_FAILED', message: safeMessage(error) };
+    run.finishReason = signal.aborted ? 'cancelled' : 'error';
+    try { await append({ type: 'run.failed', data: run.error as unknown as JsonValue }); } catch { /* trace delivery must not hide the original failure */ }
+    await store.update(run);
+    await options.services.tasks.fail(payload.id, run.error);
+  } finally {
+    if (context !== undefined) await cleanupContext(context, options.services.logger);
+  }
 }
 
 function createWorker(options: PlatformOptions, apps: Map<string, ApplicationRegistration>) {
@@ -1159,7 +1619,7 @@ async function eventStream(request: Request, scope: Scope, actor: Actor, registr
       controller.signal.addEventListener('abort', close, { once: true });
       unsubscribe = options.services.events.subscribe(scope, (event) => {
         void (async () => {
-          if (event.type !== 'mutation.succeeded' && event.type !== 'task.succeeded') return;
+          if (event.type !== 'mutation.succeeded' && event.type !== 'task.succeeded' && event.type !== 'task.failed' && event.type !== 'workspace.invalidated') return;
           if (!await options.services.workspaces.canAccess(actor, scope)) { abort(); return; }
           send({ type: 'invalidate', eventId: event.id });
         })().catch((error) => {
@@ -1191,15 +1651,51 @@ async function makeManifest(registration: ApplicationRegistration, actor: Actor,
       const outputSchema = getJsonSchema(def.output, 'output');
       const ui = def.ui ? {
         ...def.ui,
-        variants: Object.fromEntries(Object.entries(def.ui.variants).map(([variantName, variant]) => [variantName, {
-          ...variant,
-          ...(variant.actions ? { actions: variant.actions.filter((action) => visibleMutations.has(action.mutation)) } : {}),
-        }])),
+         variants: Object.fromEntries(Object.entries(def.ui.variants).map(([variantName, variant]) => {
+            const { chat, chatActions, ...safeVariant } = variant;
+            const safeChat = chat ? {
+              ...chat,
+              ...(chat.actions ? { actions: Object.fromEntries(Object.entries(chat.actions).filter(([, mapping]) => visibleMutations.has(mapping.mutation))) } : {}),
+            } : undefined;
+            const safeChatActions = chatActions ? Object.fromEntries(Object.entries(chatActions).filter(([, mapping]) => visibleMutations.has(mapping.mutation))) : undefined;
+            return [variantName, {
+             ...safeVariant,
+             ...(variant.actions ? { actions: variant.actions.filter((action) => visibleMutations.has(action.mutation)) } : {}),
+              ...(safeChatActions ? { chatActions: safeChatActions } : {}),
+              ...(safeChat && visibleMutations.has(safeChat.sendMutation) ? { chat: safeChat } : {}),
+           }];
+         })),
       } : null;
       operations.push({ name, kind, input: inputSchema, output: outputSchema, ui });
     }
   }
-  return { protocolVersion: 1, schemaDialect: 'https://json-schema.org/draft/2020-12/schema', applicationId: definition.id, operations };
+  const builtinEnabled = (id: 'operations' | 'tasks' | 'schedules' | 'history' | 'agents') => definition.admin?.builtins?.[id] !== false;
+  const capabilities = {
+    tasksRead: await canCapability(registration, options, actor, scope, 'workcore.tasks.read', undefined),
+    schedulesRead: await canCapability(registration, options, actor, scope, 'workcore.schedules.read', undefined),
+    schedulesManage: await canCapability(registration, options, actor, scope, 'workcore.schedules.manage', undefined),
+    historyRead: await canCapability(registration, options, actor, scope, 'workcore.history.read', undefined),
+    agentRunsRead: await canCapability(registration, options, actor, scope, 'workcore.agents.runs.read', undefined),
+    agentRunsReadAll: await canCapability(registration, options, actor, scope, 'workcore.agents.runs.read.all', undefined),
+    agentResultsRead: await canCapability(registration, options, actor, scope, 'workcore.agents.results.read', undefined),
+    agentMessagesRead: await canCapability(registration, options, actor, scope, 'workcore.agents.messages.read', undefined),
+    agentToolsRead: await canCapability(registration, options, actor, scope, 'workcore.agents.tools.read', undefined),
+    agentToolPayloadsRead: await canCapability(registration, options, actor, scope, 'workcore.agents.toolPayloads.read', undefined),
+  };
+  const pages: AdminManifestPage[] = [];
+  if (builtinEnabled('operations') && operations.length) pages.push({ id: 'operations', title: 'Operations', description: 'Explore validated operations available in this workspace.', layout: 'stacked', blocks: [], builtin: true });
+  if (builtinEnabled('tasks') && capabilities.tasksRead) pages.push({ id: 'tasks', title: 'Task runs', description: 'Inspect queued, running and completed tasks.', blocks: [{ id: 'task-runs', type: 'resource', resource: 'tasks' }], builtin: true });
+  if (builtinEnabled('schedules') && capabilities.schedulesRead) pages.push({ id: 'schedules', title: 'Schedules', description: 'Manage recurring and one-off task schedules.', blocks: [{ id: 'schedules', type: 'resource', resource: 'schedules' }], builtin: true });
+  if (builtinEnabled('history') && capabilities.historyRead) pages.push({ id: 'history', title: 'History', description: 'Recent execution outcomes for this workspace.', blocks: [{ id: 'history', type: 'resource', resource: 'history' }], builtin: true });
+  if (builtinEnabled('agents') && options.services.agentRuns && capabilities.agentRunsRead) pages.push({ id: 'agents', title: 'Agent runs', description: 'Inspect agent execution status and authorized trace details.', blocks: [{ id: 'agent-runs', type: 'resource', resource: 'agents' }], builtin: true });
+  for (const [id, page] of Object.entries(definition.admin?.pages ?? {})) {
+    const blocks = page.blocks.filter((block) => block.type === 'resource'
+      ? (block.resource === 'tasks' ? capabilities.tasksRead : block.resource === 'schedules' ? capabilities.schedulesRead : block.resource === 'history' ? capabilities.historyRead : Boolean(options.services.agentRuns && capabilities.agentRunsRead))
+      : operations.some((operation) => operation.name === block.operation && ((block.type === 'query' && operation.kind === 'query') || (block.type === 'mutation-form' && operation.kind === 'mutation') || (block.type === 'task-launcher' && operation.kind === 'task'))));
+    if (blocks.length) pages.push({ id, ...page, blocks });
+  }
+  const defaultPage = pages.some((page) => page.id === definition.admin?.defaultPage) ? definition.admin!.defaultPage : pages[0]?.id;
+  return { protocolVersion: 1, schemaDialect: 'https://json-schema.org/draft/2020-12/schema', applicationId: definition.id, operations, pages, capabilities, ...(defaultPage ? { defaultPage } : {}) };
 }
 
 async function permissionVisible(registration: ApplicationRegistration, definition: RuntimeOperation, actor: Actor, scope: Scope, options: PlatformOptions) {
@@ -1209,6 +1705,39 @@ async function permissionVisible(registration: ApplicationRegistration, definiti
   const permissions = typeof definition.permission === 'string' ? [definition.permission] : definition.permission;
   for (const permission of permissions) if (!await canCapability(registration, options, actor, scope, permission, undefined)) return false;
   return true;
+}
+
+function isAgentRunStatus(value: string | undefined): value is AgentRunStatus {
+  return value === 'queued' || value === 'running' || value === 'succeeded' || value === 'failed' || value === 'interrupted';
+}
+
+async function projectAgentRun(run: AgentRun, registration: ApplicationRegistration, actor: Actor, scope: Scope, options: PlatformOptions) {
+  const visible = await canCapability(registration, options, actor, scope, 'workcore.agents.results.read', undefined);
+  const { result: _result, ...metadata } = run;
+  return visible ? { ...metadata, ...(run.result === undefined ? {} : { result: decodeStored(run.result, run.codecId, options) }) } : metadata;
+}
+
+function projectAgentEvent(event: AgentTraceEvent, permissions: { canReadTools: boolean; canReadPayloads: boolean; canReadMessages: boolean }): AgentTraceEvent {
+  if (event.type.startsWith('tool.') && !permissions.canReadTools) return { ...event, data: { redacted: true } };
+  if (event.type.startsWith('tool.') && !permissions.canReadPayloads && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+    const { input: _input, result: _result, preview: _preview, ...safe } = event.data;
+    return { ...event, data: safe };
+  }
+  if ((event.type === 'step.completed' || event.type === 'step.started') && !permissions.canReadMessages) return { ...event, data: { redacted: true } };
+  if (event.type.startsWith('step.') && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+    const data = { ...event.data };
+    if (!permissions.canReadTools) delete data.toolCalls;
+    else if (!permissions.canReadPayloads) {
+      if (Array.isArray(data.toolCalls)) {
+        data.toolCalls = data.toolCalls.map((call) => call && typeof call === 'object' && !Array.isArray(call)
+          ? (typeof call.toolName === 'string' ? { toolName: call.toolName } : {})
+          : {});
+      } else delete data.toolCalls;
+    }
+    if (!permissions.canReadPayloads) delete data.preview;
+    return { ...event, data };
+  }
+  return event;
 }
 
 function getJsonSchema(schema: AnySchema, direction: 'input' | 'output'): JsonSchema {
@@ -1224,6 +1753,45 @@ function getJsonSchema(schema: AnySchema, direction: 'input' | 'output'): JsonSc
 export function validateDefinition(definition: RuntimeDefinition) {
   if (definition.authorization && (!definition.authorization.context?.['~standard']?.validate || typeof definition.authorization.check !== 'function')) throw new Error('Application authorization must provide a Standard Schema context and check function');
   const mutationNames = new Set(Object.keys(definition.mutations ?? {}));
+  for (const [name, configured] of Object.entries(definition.agents ?? {})) {
+    const agentDefinition = configured as RuntimeAgent;
+    if (!agentDefinition.input?.['~standard']?.validate) throw new Error(`Agent '${name}' must provide a Standard Schema input`);
+    if (typeof agentDefinition.model !== 'string' || !agentDefinition.model.trim()) throw new Error(`Agent '${name}' requires a model`);
+    if (typeof agentDefinition.prompt !== 'function' || !(typeof agentDefinition.instructions === 'string' || typeof agentDefinition.instructions === 'function')) throw new Error(`Agent '${name}' requires instructions and a prompt`);
+    if (!Array.isArray(agentDefinition.tools) || !agentDefinition.tools.length) throw new Error(`Agent '${name}' must declare at least one tool`);
+    if (!Number.isInteger(agentDefinition.maxSteps ?? 8) || (agentDefinition.maxSteps ?? 8) < 1 || (agentDefinition.maxSteps ?? 8) > 100) throw new Error(`Agent '${name}' maxSteps must be between 1 and 100`);
+    if (agentDefinition.maxOutputTokens !== undefined && (!Number.isInteger(agentDefinition.maxOutputTokens) || agentDefinition.maxOutputTokens < 1)) throw new Error(`Agent '${name}' maxOutputTokens must be a positive integer`);
+    const toolNames = new Set<string>();
+    for (const tool of agentDefinition.tools) {
+      const toolName = `${tool.kind}.${tool.operation}`;
+      if (toolNames.has(toolName)) throw new Error(`Agent '${name}' declares duplicate tool '${toolName}'`);
+      toolNames.add(toolName);
+      if (!operationAt(definition, tool.kind, tool.operation)) throw new Error(`Agent '${name}' references unknown ${tool.kind} '${tool.operation}'`);
+      getJsonSchema(operationAt(definition, tool.kind, tool.operation)!.input, 'input');
+    }
+    if (!agentDefinition.finishWhen?.tool || !toolNames.has(agentDefinition.finishWhen.tool)) throw new Error(`Agent '${name}' finishWhen.tool must reference one of its declared tools`);
+  }
+  const pageNames = new Set<string>();
+  for (const [pageId, page] of Object.entries(definition.admin?.pages ?? {})) {
+    if (['operations', 'tasks', 'schedules', 'history', 'agents'].includes(pageId)) throw new Error(`Admin page '${pageId}' uses a reserved built-in page id`);
+    if (pageNames.has(pageId)) throw new Error(`Duplicate admin page '${pageId}'`);
+    pageNames.add(pageId);
+    if (!page.title || !Array.isArray(page.blocks)) throw new Error(`Admin page '${pageId}' requires a title and blocks`);
+    if (page.layout && !['stacked', 'two-column', 'overview'].includes(page.layout)) throw new Error(`Admin page '${pageId}' has an unsupported layout '${page.layout}'`);
+    const blockIds = new Set<string>();
+    for (const block of page.blocks) {
+      if (!block.id || blockIds.has(block.id)) throw new Error(`Admin page '${pageId}' has a missing or duplicate block id '${block.id}'`);
+      blockIds.add(block.id);
+      if (block.type === 'resource') continue;
+      const expected = block.type === 'query' ? definition.queries?.[block.operation] : block.type === 'mutation-form' ? definition.mutations?.[block.operation] : definition.tasks?.[block.operation];
+      if (!expected) throw new Error(`Admin page '${pageId}' block '${block.id}' references an unknown ${block.type} operation '${block.operation}'`);
+      if (expected.api !== true) throw new Error(`Admin page '${pageId}' block '${block.id}' references '${block.operation}', which is not exposed to the admin API`);
+      if (block.variant && !expected.ui?.variants[block.variant]) throw new Error(`Admin page '${pageId}' block '${block.id}' references unknown variant '${block.variant}'`);
+    }
+  }
+  const builtInPages = ['operations', 'tasks', 'schedules', 'history', 'agents'] as const;
+  if (definition.admin?.defaultPage && !definition.admin.pages?.[definition.admin.defaultPage] && !builtInPages.includes(definition.admin.defaultPage as typeof builtInPages[number])) throw new Error(`Unknown default admin page '${definition.admin.defaultPage}'`);
+  if (definition.admin?.defaultPage && builtInPages.includes(definition.admin.defaultPage as typeof builtInPages[number]) && definition.admin.builtins?.[definition.admin.defaultPage as typeof builtInPages[number]] === false) throw new Error(`Default admin page '${definition.admin.defaultPage}' is disabled`);
   for (const [kind, operations] of [['query', definition.queries], ['mutation', definition.mutations], ['task', definition.tasks]] as const) {
     for (const [name, operation] of Object.entries(operations ?? {})) {
       if (!operation.input?.['~standard']?.validate || !operation.output?.['~standard']?.validate) throw new Error(`${kind} '${name}' must provide Standard Schema input and output`);
@@ -1235,6 +1803,32 @@ export function validateDefinition(definition: RuntimeDefinition) {
         if (!operation.ui.variants[operation.ui.default]) throw new Error(`${kind} '${name}' default UI variant '${operation.ui.default}' does not exist`);
         for (const [variantName, variant] of Object.entries(operation.ui.variants)) {
           if (kind === 'query' && variant.renderer === 'form') throw new Error(`Query '${name}' cannot use form renderer '${variantName}'`);
+          if (kind === 'query' && variant.renderer === 'chat') {
+            if (!variant.chat?.sendMutation) throw new Error(`Chat query '${name}' renderer '${variantName}' must declare chat.sendMutation`);
+            const chatMutation = definition.mutations?.[variant.chat.sendMutation];
+            if (!chatMutation) throw new Error(`Chat query '${name}' references unknown send mutation '${variant.chat.sendMutation}'`);
+            const inputProperties = getJsonSchema(chatMutation.input, 'input').properties as Record<string, unknown> | undefined;
+            if (!inputProperties?.[variant.chat.messageInput]) throw new Error(`Chat query '${name}' references unknown message input '${variant.chat.messageInput}' on '${variant.chat.sendMutation}'`);
+            if (variant.chat.conversationIdInput && !inputProperties[variant.chat.conversationIdInput]) throw new Error(`Chat query '${name}' references unknown conversation input '${variant.chat.conversationIdInput}' on '${variant.chat.sendMutation}'`);
+            if (variant.chat.conversationQueryInput) {
+              const queryProperties = getJsonSchema(operation.input, 'input').properties as Record<string, unknown> | undefined;
+              if (!queryProperties?.[variant.chat.conversationQueryInput]) throw new Error(`Chat query '${name}' references unknown query input '${variant.chat.conversationQueryInput}'`);
+            }
+            const requiredSendFields = (getJsonSchema(chatMutation.input, 'input').required as string[] | undefined) ?? [];
+            const supportedSendFields = new Set([variant.chat.messageInput, ...(variant.chat.conversationIdInput ? [variant.chat.conversationIdInput] : [])]);
+            const unsupportedRequiredField = requiredSendFields.find((field) => !supportedSendFields.has(field));
+            if (unsupportedRequiredField) throw new Error(`Chat query '${name}' send mutation '${variant.chat.sendMutation}' has unsupported required input '${unsupportedRequiredField}'`);
+          }
+          for (const [actionName, mapping] of Object.entries({ ...variant.chatActions, ...variant.chat?.actions })) {
+            const actionMutation = definition.mutations?.[mapping.mutation];
+            if (!actionMutation) throw new Error(`Query '${name}' action '${actionName}' references unknown mutation '${mapping.mutation}'`);
+            if (actionMutation.api !== true) throw new Error(`Query '${name}' action '${actionName}' mutation '${mapping.mutation}' must be exposed to the admin API`);
+            if (mapping.variant && !actionMutation.ui?.variants[mapping.variant]) throw new Error(`Query '${name}' action '${actionName}' references unknown variant '${mapping.variant}' on mutation '${mapping.mutation}'`);
+            const actionProperties = getJsonSchema(actionMutation.input, 'input').properties as Record<string, unknown> | undefined;
+            for (const inputName of Object.keys(mapping.bind ?? {})) {
+              if (!actionProperties?.[inputName]) throw new Error(`Query '${name}' action '${actionName}' binds unknown input '${inputName}' on mutation '${mapping.mutation}'`);
+            }
+          }
           if (kind !== 'query' && variant.renderer !== 'form' && variant.renderer !== 'json') throw new Error(`${kind} '${name}' must use a form/json renderer`);
           let rowProperties: Record<string, unknown> | undefined;
           if (variant.renderer === 'table') {
@@ -1305,9 +1899,45 @@ async function readBody(request: Request, maxBytes: number): Promise<unknown> {
 
 function boundedLimit(value: string | null) { return Math.min(200, Math.max(1, Number.parseInt(value ?? '50', 10) || 50)); }
 function sameScope(a: Scope, b: Scope) { return a.applicationId === b.applicationId && a.workspaceId === b.workspaceId; }
+function applySchedulePatch(schedule: ScheduleEntry, patch: Record<string, unknown>) {
+  if (typeof patch.enabled === 'boolean') {
+    if (patch.enabled && !schedule.enabled) {
+      if (schedule.kind === 'once' && schedule.runAt && Date.parse(schedule.runAt) <= Date.now()) throw new WorkcoreError('INVALID_SCHEDULE', 'A past one-off schedule cannot be re-enabled', 400);
+      if (schedule.kind === 'recurring') schedule.nextRunAt = nextScheduleOccurrence(schedule.cron!, new Date(), schedule.timezone).toISOString();
+    }
+    schedule.enabled = patch.enabled;
+  }
+  if (patch.cron !== undefined) {
+    if (schedule.kind !== 'recurring' || !isSupportedCron(String(patch.cron))) throw new WorkcoreError('INVALID_SCHEDULE', 'Invalid recurring cron expression', 400);
+    schedule.cron = String(patch.cron);
+    schedule.nextRunAt = nextScheduleOccurrence(schedule.cron, new Date(), schedule.timezone).toISOString();
+  }
+  if (patch.timezone !== undefined) {
+    const timezone = String(patch.timezone);
+    try { new Intl.DateTimeFormat('en', { timeZone: timezone }); } catch { throw new WorkcoreError('INVALID_TIMEZONE', 'Unknown timezone', 400); }
+    schedule.timezone = timezone;
+    if (schedule.kind === 'recurring') schedule.nextRunAt = nextScheduleOccurrence(schedule.cron!, new Date(), timezone).toISOString();
+  }
+}
 function normalizePath(path: string) { return `/${path.split('/').filter(Boolean).join('/')}`; }
 function randomId() { return globalThis.crypto.randomUUID(); }
+function encodeMemoryAgentCursor(createdAt: string, id: string) { return encodeURIComponent(`${createdAt}\u0000${id}`); }
+function decodeMemoryAgentCursor(cursor: string) {
+  try {
+    const [createdAt, id, extra] = decodeURIComponent(cursor).split('\u0000');
+    if (!createdAt || !id || extra !== undefined || !Number.isFinite(Date.parse(createdAt))) throw new TypeError();
+    return [createdAt, id] as const;
+  } catch { throw new TypeError('Invalid agent run cursor'); }
+}
 function safeMessage(error: unknown) { return error instanceof WorkcoreError ? error.message.slice(0, 300) : 'Operation failed'; }
+function safeTraceValue(value: unknown): JsonValue {
+  try {
+    const encoded = jsonWireCodec.encode(value);
+    const serialized = JSON.stringify(encoded);
+    if (new TextEncoder().encode(serialized).byteLength <= 32_768) return encoded;
+    return { truncated: true };
+  } catch { return { unavailable: true }; }
+}
 async function safeHistory(options: PlatformOptions, entry: HistoryEntry): Promise<boolean> {
   try { await options.services.history.append(entry); return true; }
   catch (error) { options.services.logger?.error('Operation history persistence failed', { executionId: entry.id, detail: safeMessage(error) }); }
@@ -1498,6 +2128,8 @@ export function createMemoryState(options: { workspaces?: Array<{ applicationId:
   const taskQueue: TaskPayload[] = [];
   const processing = new Map<string, TaskPayload>();
   const taskRuns = new Map<string, TaskRun>();
+  const agentRuns = new Map<string, AgentRun>();
+  const agentEvents = new Map<string, AgentTraceEvent[]>();
   const historyRows = new Map<string, HistoryEntry[]>();
   const scheduleRows = new Map<string, ScheduleEntry>();
   const kvRows = new Map<string, unknown>();
@@ -1526,6 +2158,26 @@ export function createMemoryState(options: { workspaces?: Array<{ applicationId:
       progress: async (id, progress) => { const run = taskRuns.get(id); if (run) run.progress = Math.max(0, Math.min(100, progress)); },
       list: async (scope, limit) => [...taskRuns.values()].filter((run) => sameScope(run.scope, scope)).slice(0, limit),
       waitForWork: (signal) => new Promise((resolve) => { if (signal.aborted) return resolve(); const wake = () => { waiters.delete(wake); signal.removeEventListener('abort', wake); resolve(); }; waiters.add(wake); signal.addEventListener('abort', wake, { once: true }); }),
+    },
+    agentRuns: {
+      create: async (run) => { if (agentRuns.has(run.id)) throw new Error(`Duplicate agent run '${run.id}'`); agentRuns.set(run.id, structuredClone(run)); agentEvents.set(run.id, []); },
+      get: async (scope, runId) => { const run = agentRuns.get(runId); return run && sameScope(run.scope, scope) ? structuredClone(run) : undefined; },
+      list: async (scope, filter) => {
+        let rows = [...agentRuns.values()].filter((run) => sameScope(run.scope, scope)
+          && (!filter.agent || run.agent === filter.agent) && (!filter.status || run.status === filter.status)
+          && (!filter.actorId || run.actorId === filter.actorId) && (!filter.conversationId || run.conversationId === filter.conversationId))
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+        if (filter.cursor) {
+          const [createdAt, id] = decodeMemoryAgentCursor(filter.cursor);
+          rows = rows.filter((run) => run.createdAt < createdAt || (run.createdAt === createdAt && run.id < id));
+        }
+        const page = rows.slice(0, filter.limit);
+        const last = page.at(-1);
+        return { runs: structuredClone(page), nextCursor: rows.length > page.length && last ? encodeMemoryAgentCursor(last.createdAt, last.id) : null };
+      },
+      update: async (run) => { const existing = agentRuns.get(run.id); if (!existing || !sameScope(existing.scope, run.scope)) throw new Error(`Unknown agent run '${run.id}'`); agentRuns.set(run.id, structuredClone(run)); },
+      appendEvent: async (event) => { const run = agentRuns.get(event.runId); if (!run) throw new Error(`Unknown agent run '${event.runId}'`); const rows = agentEvents.get(event.runId) ?? []; if (rows.some((item) => item.sequence === event.sequence)) return; rows.push(structuredClone(event)); agentEvents.set(event.runId, rows); },
+      listEvents: async (scope, runId, afterSequence, limit) => { const run = agentRuns.get(runId); if (!run || !sameScope(run.scope, scope)) return []; return structuredClone((agentEvents.get(runId) ?? []).filter((event) => event.sequence > afterSequence).slice(0, limit)); },
     },
     schedules: {
       create: async (schedule) => { scheduleRows.set(schedule.id, structuredClone(schedule)); },

@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { jsonWireCodec, nextScheduleOccurrence, type EventAdapter, type HistoryEntry, type PlatformServices, type ScheduleEntry, type Scope, type TaskPayload, type TaskRun, type WorkcoreEvent } from '@workcore/core';
+import { jsonWireCodec, nextScheduleOccurrence, type AgentRun, type AgentRunAdapter, type AgentTraceEvent, type EventAdapter, type HistoryEntry, type PlatformServices, type ScheduleEntry, type Scope, type TaskPayload, type TaskRun, type WorkcoreEvent } from '@workcore/core';
 
 type DurableFileState = {
   tasks: TaskPayload[];
@@ -10,6 +10,8 @@ type DurableFileState = {
   history: HistoryEntry[];
   schedules: ScheduleEntry[];
   kv: Record<string, unknown>;
+  agentRuns: AgentRun[];
+  agentEvents: AgentTraceEvent[];
 };
 
 export type FileRetentionOptions = {
@@ -17,12 +19,22 @@ export type FileRetentionOptions = {
   historyLimit?: number;
   /** Retain at most this many task-run records, preserving queued/running runs. Defaults to 1,000. */
   taskRunLimit?: number;
+  /** Retain at most this many newest terminal agent runs, preserving queued/running runs. Defaults to 1,000. */
+  agentRunLimit?: number;
 };
 
-const emptyState = (): DurableFileState => ({ tasks: [], taskDedupe: [], processing: [], runs: [], history: [], schedules: [], kv: {} });
+const emptyState = (): DurableFileState => ({ tasks: [], taskDedupe: [], processing: [], runs: [], history: [], schedules: [], kv: {}, agentRuns: [], agentEvents: [] });
 const scopeKey = (scope: Scope) => JSON.stringify([scope.applicationId, scope.workspaceId]);
 const kvKey = (scope: Scope, key: string) => JSON.stringify([scope.applicationId, scope.workspaceId, key]);
 const sameScope = (left: Scope, right: Scope) => left.applicationId === right.applicationId && left.workspaceId === right.workspaceId;
+function encodeAgentCursor(createdAt: string, id: string) { return encodeURIComponent(`${createdAt}\u0000${id}`); }
+function decodeAgentCursor(cursor: string) {
+  try {
+    const [createdAt, id, extra] = decodeURIComponent(cursor).split('\u0000');
+    if (!createdAt || !id || extra !== undefined || !Number.isFinite(Date.parse(createdAt))) throw new TypeError();
+    return [createdAt, id] as const;
+  } catch { throw new TypeError('Invalid agent run cursor'); }
+}
 
 /**
  * Single-process local/demo adapter. Production multi-process deployments should use shared adapters.
@@ -40,9 +52,10 @@ function createFileAdapterState(options: {
   const waiters = new Set<() => void>();
   const historyLimit = options.retention?.historyLimit ?? 5_000;
   const taskRunLimit = options.retention?.taskRunLimit ?? 1_000;
+  const agentRunLimit = options.retention?.agentRunLimit ?? 1_000;
   const maxKVValueBytes = options.maxKVValueBytes ?? 1_048_576;
   if (!Number.isInteger(maxKVValueBytes) || maxKVValueBytes < 1) throw new TypeError('maxKVValueBytes must be a positive integer');
-  for (const [name, limit] of [['historyLimit', historyLimit], ['taskRunLimit', taskRunLimit]] as const) {
+  for (const [name, limit] of [['historyLimit', historyLimit], ['taskRunLimit', taskRunLimit], ['agentRunLimit', agentRunLimit]] as const) {
     if (!Number.isInteger(limit) || limit < 1) throw new TypeError(`${name} must be a positive integer`);
   }
   const pruneTaskRuns = (state: DurableFileState) => {
@@ -97,6 +110,38 @@ function createFileAdapterState(options: {
       return () => { set.delete(listener); if (!set.size) listeners.delete(key); };
     },
   };
+  const agentRuns: AgentRunAdapter = {
+    create: (run) => update((state) => { if (state.agentRuns.some((item) => item.id === run.id)) throw new Error(`Duplicate agent run '${run.id}'`); state.agentRuns.unshift(structuredClone(run)); pruneAgentRuns(state); }),
+    get: async (scope, runId) => { const run = (await read()).agentRuns.find((item) => item.id === runId && sameScope(item.scope, scope)); return run ? structuredClone(run) : undefined; },
+    list: async (scope, filter) => {
+      let rows = (await read()).agentRuns.filter((run) => sameScope(run.scope, scope) && (!filter.agent || run.agent === filter.agent)
+        && (!filter.status || run.status === filter.status) && (!filter.actorId || run.actorId === filter.actorId)
+        && (!filter.conversationId || run.conversationId === filter.conversationId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+      if (filter.cursor) {
+        const [createdAt, id] = decodeAgentCursor(filter.cursor);
+        rows = rows.filter((run) => run.createdAt < createdAt || (run.createdAt === createdAt && run.id < id));
+      }
+      const page = rows.slice(0, filter.limit);
+      const last = page.at(-1);
+      return { runs: structuredClone(page), nextCursor: rows.length > page.length && last ? encodeAgentCursor(last.createdAt, last.id) : null };
+    },
+    update: (run) => update((state) => { const index = state.agentRuns.findIndex((item) => item.id === run.id && sameScope(item.scope, run.scope)); if (index < 0) throw new Error(`Unknown agent run '${run.id}'`); state.agentRuns[index] = structuredClone(run); pruneAgentRuns(state); }),
+    appendEvent: (event) => update((state) => { const run = state.agentRuns.find((item) => item.id === event.runId); if (!run) throw new Error(`Unknown agent run '${event.runId}'`); if (!state.agentEvents.some((item) => item.runId === event.runId && item.sequence === event.sequence)) state.agentEvents.push(structuredClone(event)); }),
+    listEvents: async (scope, runId, afterSequence, limit) => { const state = await read(); if (!state.agentRuns.some((run) => run.id === runId && sameScope(run.scope, scope))) return []; return structuredClone(state.agentEvents.filter((event) => event.runId === runId && event.sequence > afterSequence).sort((a, b) => a.sequence - b.sequence).slice(0, limit)); },
+  };
+
+  function pruneAgentRuns(state: DurableFileState) {
+    const active = state.agentRuns.filter((run) => run.status === 'queued' || run.status === 'running');
+    const retained = new Set(active.map((run) => run.id));
+    let terminalCount = 0;
+    for (const run of state.agentRuns) {
+      if (run.status === 'queued' || run.status === 'running') continue;
+      if (terminalCount++ < agentRunLimit) retained.add(run.id);
+    }
+    const removed = new Set(state.agentRuns.filter((run) => !retained.has(run.id)).map((run) => run.id));
+    state.agentRuns = state.agentRuns.filter((run) => retained.has(run.id));
+    if (removed.size) state.agentEvents = state.agentEvents.filter((event) => !removed.has(event.runId));
+  }
 
   return {
     workspaces: {
@@ -104,6 +149,7 @@ function createFileAdapterState(options: {
       list: async (actor, applicationId) => options.workspaces.filter((workspace) => workspace.applicationId === applicationId && workspace.actors.includes(actor.id)).map(({ id, name }) => ({ id, name })),
     },
     events: eventAdapter,
+    agentRuns,
     history: {
       append: (entry) => update((state) => { state.history.unshift(entry); state.history.length = Math.min(state.history.length, historyLimit); }),
       list: async (scope, limit) => (await read()).history.filter((entry) => sameScope(entry.scope, scope)).slice(0, limit),
@@ -268,4 +314,5 @@ export const createFileHistory = (state: FileAdapterState) => state.history;
 export const createFileTasks = (state: FileAdapterState) => state.tasks;
 export const createFileSchedules = (state: FileAdapterState) => state.schedules;
 export const createFileKV = (state: FileAdapterState) => state.kv;
+export const createFileAgentRuns = (state: FileAdapterState) => state.agentRuns!;
 export const createFileLogger = (state: FileAdapterState): NonNullable<FileAdapterState['logger']> => state.logger!;

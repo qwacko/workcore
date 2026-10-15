@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { editableJson, parseEditableJson, hydrateRuntimeTypes } from './rich-input.js';
+import { editableJson, parseEditableJson, hydrateRuntimeTypes, displayCell } from './rich-input.js';
 
 describe('rich admin input', () => {
+  it('uses the same rich table cell rendering on Operations and custom pages', () => {
+    expect(displayCell(new Date('2026-10-15T12:00:00Z'))).toBe('2026-10-15T12:00:00.000Z');
+    expect(displayCell(42n)).toBe('42n');
+    expect(displayCell(new Map([['key', 1]]))).toBe('Map(1)');
+    expect(displayCell(new Set([1]))).toBe('Set(1)');
+    expect(displayCell({ nested: true })).toContain('"nested": true');
+  });
   it('keeps ordinary JSON editable without an envelope', () => {
     const input = { title: 'Hello', count: 2, enabled: true };
     expect(editableJson(input)).toBe(JSON.stringify(input, null, 2));

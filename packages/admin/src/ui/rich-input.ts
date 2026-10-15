@@ -32,6 +32,41 @@ export function parseEditableJson(text: string): unknown {
   return parsed;
 }
 
+export function richJson(value: unknown): string {
+  const seen = new WeakSet<object>();
+  const render = (item: unknown, depth = 0): unknown => {
+    if (depth > 64) return '[Circular or deeply nested value]';
+    if (typeof item === 'bigint') return `${item}n`;
+    if (typeof item === 'undefined') return '[undefined]';
+    if (typeof item === 'symbol') return String(item);
+    if (typeof item === 'function') return `[Function${item.name ? ` ${item.name}` : ''}]`;
+    if (typeof item === 'number' && !Number.isFinite(item)) return { $type: 'Number', value: String(item) };
+    if (item instanceof Date) return { $type: 'Date', value: item.toISOString() };
+    if (item instanceof RegExp) return { $type: 'RegExp', value: String(item) };
+    if (item instanceof URL) return { $type: 'URL', value: String(item) };
+    if (item instanceof Error) return { $type: 'Error', name: item.name, message: item.message };
+    if (!item || typeof item !== 'object') return item;
+    if (seen.has(item)) return '[Circular reference]';
+    seen.add(item);
+    if (item instanceof Map) return { $type: 'Map', entries: [...item.entries()].map(([key, child]) => [render(key, depth + 1), render(child, depth + 1)]) };
+    if (item instanceof Set) return { $type: 'Set', values: [...item].map((child) => render(child, depth + 1)) };
+    if (Array.isArray(item)) return item.map((child) => render(child, depth + 1));
+    return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, render(child, depth + 1)]));
+  };
+  try { return JSON.stringify(render(value), null, 2); }
+  catch (cause) { return `Unable to render result: ${cause instanceof Error ? cause.message : String(cause)}`; }
+}
+
+export function displayCell(value: unknown): string {
+  if (value == null) return '—';
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'bigint') return `${value}n`;
+  if (value instanceof Map) return `Map(${value.size})`;
+  if (value instanceof Set) return `Set(${value.size})`;
+  if (typeof value === 'object') return richJson(value);
+  return String(value);
+}
+
 /** Hydrate annotated dates while preserving the decoded graph's cycles and shared references. */
 export function hydrateRuntimeTypes(value: unknown, schema: Record<string, unknown>, copies = new WeakMap<object, unknown>()): unknown {
   if (schema['x-workcore-runtimeType'] === 'date' && typeof value === 'string') return new Date(value);

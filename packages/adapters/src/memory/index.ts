@@ -13,6 +13,7 @@ export const createMemoryHistory = (state: MemoryState) => state.history;
 export const createMemoryTasks = (state: MemoryState) => state.tasks;
 export const createMemorySchedules = (state: MemoryState) => state.schedules;
 export const createMemoryKV = (state: MemoryState) => state.kv;
+export const createMemoryAgentRuns = (state: MemoryState) => state.agentRuns!;
 export const createMemoryLogger = (state: MemoryState): NonNullable<MemoryState['logger']> => state.logger!;
 
 export type { Scope };

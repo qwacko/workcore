@@ -162,7 +162,8 @@ describe('Workcore HTTP runtime', () => {
     const handler = platform.httpHandler({ apiBasePath: '/api' });
     const manifest = await handler(req('/manifest?applicationId=policies&workspaceId=one'));
     expect((await manifest.json()).operations.map((operation: { name: string }) => operation.name)).toEqual(['dynamic', 'open']);
-    expect(checked).toEqual([]);
+    expect(checked).toEqual(['workcore.tasks.read', 'workcore.schedules.read', 'workcore.schedules.manage', 'workcore.history.read', 'workcore.agents.runs.read', 'workcore.agents.runs.read.all', 'workcore.agents.results.read', 'workcore.agents.messages.read', 'workcore.agents.tools.read', 'workcore.agents.toolPayloads.read']);
+    checked.length = 0;
 
     const dynamic = await handler(req('/query', { applicationId: 'policies', workspaceId: 'one', operation: 'dynamic', input: {} }));
     const open = await handler(req('/query', { applicationId: 'policies', workspaceId: 'one', operation: 'open', input: {} }));
@@ -229,6 +230,211 @@ describe('Workcore HTTP runtime', () => {
     expect(await services.history.list({ applicationId: 'counter', workspaceId: 'one' }, 10)).toEqual(expect.arrayContaining([expect.objectContaining({ operation: 'increment', status: 'succeeded' })]));
   });
 
+  it('queues internal agents, executes only checked tools, records traces, and filters inspection data', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'agent-app', id: 'one', name: 'One', actors: ['alice'] }] });
+    let toolCalls = 0;
+    let failNextRun = false;
+    let retainedTool: ((input: unknown, signal?: AbortSignal) => Promise<unknown>) | undefined;
+    services.agentEngine = {
+      run: async ({ tools, finishTool, onEvent }) => {
+        await onEvent({ type: 'step.started', data: { prompt: 'private prompt' } });
+        if (failNextRun) {
+          retainedTool = tools[finishTool]!.execute;
+          throw new Error('engine failed');
+        }
+        const output = await tools[finishTool]!.execute({ value: 'done' });
+        return { output: 'model-generated text is not the result', finishReason: 'tool-calls', finishTool: output ? finishTool : undefined };
+      },
+    };
+    const app = defineWorkspace<AppContext>()({
+      id: 'agent-app',
+      mutations: {
+        finish: { input: objectSchema, output: objectSchema, permission: 'write', handler: () => { toolCalls++; return { ok: true }; } },
+        start: { input: objectSchema, output: objectSchema, permission: 'write', api: true, handler: async ({ operations, input }) => operations.enqueueAgent('organize', input, { conversationId: 'conversation-1' }) },
+      },
+      agents: {
+        organize: {
+          input: objectSchema,
+          permission: 'agent.invoke',
+          tools: [{ kind: 'mutation', operation: 'finish', description: 'Finish the work' }],
+          model: 'test/model',
+          instructions: 'Do the requested work',
+          prompt: ({ input }) => JSON.stringify(input),
+          finishWhen: { tool: 'mutation.finish' },
+        },
+      },
+    });
+    const platform = createPlatform({
+      applications: [app.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })],
+      auth: { authenticate: () => ({ id: 'alice' }), resolveActor: (id) => ({ id }) },
+      authorise: ({ permission }) => !['workcore.agents.runs.read.all', 'workcore.agents.toolPayloads.read', 'workcore.agents.results.read', 'workcore.agents.messages.read'].includes(permission),
+      services,
+    });
+    const observedLiveEvents: string[] = [];
+    const unsubscribeLiveEvents = services.events.subscribe({ applicationId: 'agent-app', workspaceId: 'one' }, (event) => observedLiveEvents.push(event.type));
+    const handler = platform.httpHandler({ apiBasePath: '/api' });
+    const queued = await handler(req('/mutate', { applicationId: 'agent-app', workspaceId: 'one', operation: 'start', input: { request: 'organize' } }));
+    expect(queued.status).toBe(200);
+    const { runId } = (await queued.json() as { result: { runId: string } }).result;
+    expect(await services.agentRuns!.get({ applicationId: 'agent-app', workspaceId: 'one' }, runId)).toMatchObject({ status: 'queued', agent: 'organize', conversationId: 'conversation-1' });
+    const worker = platform.worker(); worker.start();
+    let run;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      run = await services.agentRuns!.get({ applicationId: 'agent-app', workspaceId: 'one' }, runId);
+      if (run?.status === 'succeeded' || run?.status === 'failed') break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await worker.stop();
+    expect(run).toMatchObject({ status: 'succeeded', finishReason: 'tool:mutation.finish' });
+    expect(run?.result).toEqual({ ok: true });
+    expect(observedLiveEvents).toContain('workspace.invalidated');
+    const details = await handler(new Request(`http://localhost/api/agent-runs/${runId}?applicationId=agent-app&workspaceId=one`, { headers: { 'x-actor': 'alice' } }));
+    expect((await details.json() as { run: object }).run).not.toHaveProperty('result');
+    const listing = await handler(new Request('http://localhost/api/agent-runs?applicationId=agent-app&workspaceId=one', { headers: { 'x-actor': 'alice' } }));
+    expect((await listing.json() as { runs: Array<{ id: string; result?: unknown }> }).runs).toEqual([expect.objectContaining({ id: runId, status: 'succeeded' })]);
+    expect(toolCalls).toBe(1);
+    const events = await handler(new Request(`http://localhost/api/agent-runs/${runId}/events?applicationId=agent-app&workspaceId=one`, { headers: { 'x-actor': 'alice' } }));
+    expect(events.status).toBe(200);
+    const rows = (await events.json() as { events: Array<{ type: string; data?: unknown }> }).events;
+    expect(rows.map((event) => event.type)).toEqual(expect.arrayContaining(['run.started', 'tool.started', 'tool.completed', 'run.completed']));
+    expect(rows.find((event) => event.type === 'tool.started')?.data).toEqual({ name: 'mutation.finish' });
+    expect(rows.find((event) => event.type === 'step.started')?.data).toEqual({ redacted: true });
+
+    const invalidationsBeforeFailure = observedLiveEvents.filter((type) => type === 'workspace.invalidated').length;
+    failNextRun = true;
+    const failedQueue = await handler(req('/mutate', { applicationId: 'agent-app', workspaceId: 'one', operation: 'start', input: { request: 'organize again' } }));
+    const { runId: failedRunId } = (await failedQueue.json() as { result: { runId: string } }).result;
+    const failedWorker = platform.worker(); failedWorker.start();
+    let failedRun;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      failedRun = await services.agentRuns!.get({ applicationId: 'agent-app', workspaceId: 'one' }, failedRunId);
+      if (failedRun?.status === 'failed') break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await failedWorker.stop();
+    unsubscribeLiveEvents();
+    expect(failedRun).toMatchObject({ status: 'failed', error: { code: 'AGENT_FAILED' } });
+    await expect(retainedTool?.({ value: 'late side effect' })).rejects.toMatchObject({ code: 'EXECUTION_ABORTED' });
+    expect(toolCalls).toBe(1);
+    expect(observedLiveEvents.filter((type) => type === 'workspace.invalidated')).toHaveLength(invalidationsBeforeFailure + 1);
+  });
+
+  it('keeps memory agent-run pagination cursors stable when a filtered run changes status', async () => {
+    const services = createMemoryState();
+    const scope = { applicationId: 'cursor-test', workspaceId: 'one' };
+    const base = { scope, actorId: 'alice', agent: 'test', status: 'queued' as const, correlationId: 'corr' };
+    await services.agentRuns!.create({ ...base, id: 'new', createdAt: '2026-10-14T10:01:00.000Z' });
+    await services.agentRuns!.create({ ...base, id: 'old', createdAt: '2026-10-14T10:00:00.000Z' });
+    const first = await services.agentRuns!.list(scope, { status: 'queued', limit: 1 });
+    await services.agentRuns!.update({ ...base, id: 'new', status: 'succeeded', createdAt: '2026-10-14T10:01:00.000Z' });
+    const second = await services.agentRuns!.list(scope, { status: 'queued', limit: 1, cursor: first.nextCursor! });
+    expect(first.runs.map((run) => run.id)).toEqual(['new']);
+    expect(second.runs.map((run) => run.id)).toEqual(['old']);
+  });
+
+  it('removes truncated trace previews when tool payload access is denied', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'trace-redaction', id: 'one', name: 'One', actors: ['alice'] }] });
+    const scope = { applicationId: 'trace-redaction', workspaceId: 'one' };
+    const app = defineWorkspace()({ id: scope.applicationId });
+    const platform = createPlatform({
+      applications: [app.registerApplication({ createAppContext: () => ({}) })],
+      auth: { authenticate: () => ({ id: 'alice' }) },
+      authorise: ({ permission }) => permission !== 'workcore.agents.toolPayloads.read',
+      services,
+    });
+    await services.agentRuns!.create({ id: 'trace-1', scope, actorId: 'alice', agent: 'test', status: 'succeeded', createdAt: new Date().toISOString(), correlationId: 'corr' });
+    await services.agentRuns!.appendEvent({
+      id: 'trace-event-1', runId: 'trace-1', sequence: 1, createdAt: new Date().toISOString(), type: 'step.completed',
+      data: { toolCalls: { truncated: true, preview: '[{"toolName":"private","input":{"secret":"DO_NOT_EXPOSE"}}]' } },
+    });
+    const response = await platform.httpHandler({ apiBasePath: '/api' })(new Request('http://localhost/api/agent-runs/trace-1/events?applicationId=trace-redaction&workspaceId=one', { headers: { 'x-actor': 'alice' } }));
+    const body = await response.json() as { events: Array<{ data?: Record<string, unknown> }> };
+    expect(JSON.stringify(body)).not.toContain('DO_NOT_EXPOSE');
+    expect(body.events[0]?.data?.toolCalls).toBeUndefined();
+  });
+
+  it('prevents agent tools from starting after the run deadline', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'agent-deadline', id: 'one', name: 'One', actors: ['alice'] }] });
+    let sideEffects = 0;
+    services.agentEngine = {
+      run: async ({ tools, finishTool }) => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        await tools[finishTool]!.execute({});
+        return { finishReason: 'tool-calls', finishTool };
+      },
+    };
+    const app = defineWorkspace()({
+      id: 'agent-deadline',
+      mutations: {
+        start: { input: objectSchema, output: objectSchema, permission: [], api: true, handler: ({ operations }) => operations.enqueueAgent('slow', {}) },
+        finish: { input: objectSchema, output: objectSchema, permission: [], handler: () => { sideEffects++; return {}; } },
+      },
+      agents: {
+        slow: { input: objectSchema, permission: [], model: 'test/model', instructions: '', prompt: () => '', tools: [{ kind: 'mutation', operation: 'finish' }], finishWhen: { tool: 'mutation.finish' } },
+      },
+    });
+    const platform = createPlatform({
+      applications: [app.registerApplication({ createAppContext: () => ({}) })],
+      auth: { authenticate: () => ({ id: 'alice' }), resolveActor: (id) => ({ id }) },
+      services,
+      operationTimeoutMs: 20,
+    });
+    const queued = await platform.httpHandler({ apiBasePath: '/api' })(new Request('http://localhost/api/mutate', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ applicationId: 'agent-deadline', workspaceId: 'one', operation: 'start', input: {} }),
+    }));
+    const { result: { runId } } = await queued.json() as { result: { runId: string } };
+    const worker = platform.worker(); worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await worker.stop();
+    expect(await services.agentRuns!.get({ applicationId: 'agent-deadline', workspaceId: 'one' }, runId)).toMatchObject({ status: 'failed', error: { code: 'OPERATION_TIMEOUT' } });
+    expect(sideEffects).toBe(0);
+  });
+
+  it.each(['authorization', 'persistence'] as const)('does not enqueue an agent if its parent times out during %s', async (stage) => {
+    const scope = { applicationId: 'enqueue-deadline', workspaceId: 'one' };
+    const services = createMemoryState({ workspaces: [{ ...scope, id: 'one', name: 'One', actors: ['alice'] }] });
+    let release!: () => void;
+    let entered!: () => void;
+    let finished!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const completed = new Promise<void>((resolve) => { finished = resolve; });
+    const pause = async () => { entered(); await gate; };
+    const create = services.agentRuns!.create;
+    if (stage === 'persistence') services.agentRuns!.create = async (run) => { await create(run); await pause(); };
+    const app = defineWorkspace()({
+      id: scope.applicationId,
+      mutations: {
+        start: { input: objectSchema, output: objectSchema, api: true, permission: [], handler: async ({ operations }) => {
+          try { return await operations.enqueueAgent('child', {}); }
+          finally { finished(); }
+        } },
+        finish: { input: objectSchema, output: objectSchema, permission: [], handler: () => ({}) },
+      },
+      agents: { child: {
+        input: objectSchema,
+        permission: async () => { if (stage === 'authorization') await pause(); return true; },
+        model: 'test', instructions: '', prompt: () => '',
+        tools: [{ kind: 'mutation', operation: 'finish' }], finishWhen: { tool: 'mutation.finish' },
+      } },
+    });
+    const platform = createPlatform({
+      applications: [app.registerApplication({ createAppContext: () => ({}) })],
+      auth: { authenticate: () => ({ id: 'alice' }) }, services, operationTimeoutMs: 20,
+    });
+    const response = platform.httpHandler({ apiBasePath: '/api' })(req('/mutate', { ...scope, operation: 'start', input: {} }));
+    try {
+      await started;
+      expect((await response).status).toBe(504);
+    } finally { release(); }
+    await completed;
+    expect(await services.tasks.list(scope, 10)).toEqual([]);
+    const { runs } = await services.agentRuns!.list(scope, { limit: 10 });
+    if (stage === 'authorization') expect(runs).toEqual([]);
+    else expect(runs).toEqual([expect.objectContaining({ status: 'failed' })]);
+  });
+
   it('exposes only api-enabled operations in a versioned manifest', async () => {
     const services = createMemoryState({ workspaces: [{ applicationId: 'counter', id: 'one', name: 'One', actors: ['alice'] }] });
     const { handler } = fixture(services);
@@ -238,6 +444,70 @@ describe('Workcore HTTP runtime', () => {
     expect(manifest.protocolVersion).toBe(1);
     expect(manifest.schemaDialect).toContain('2020-12');
     expect(manifest.operations.map(({ name }) => name)).toEqual(['value', 'increment', 'update']);
+  });
+
+  it('publishes configured admin pages and filters built-ins by system capability', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'dash', id: 'one', name: 'One', actors: ['alice'] }] });
+    const app = defineWorkspace<AppContext>()({
+      id: 'dash',
+      admin: {
+        defaultPage: 'overview',
+        builtins: { schedules: false, agents: false },
+        pages: { overview: { title: 'Overview', layout: 'two-column', blocks: [{ id: 'count', type: 'query', operation: 'value', input: {} }, { id: 'edit', type: 'mutation-form', operation: 'increment' }, { id: 'schedule-resource', type: 'resource', resource: 'schedules' }] } },
+      },
+      queries: { value: { input: objectSchema, output: numberSchema, api: true, permission: 'read', handler: ({ ctx }) => ctx.app.value.current } },
+      mutations: { increment: { input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: ({ ctx }) => ++ctx.app.value.current } },
+    });
+    const platform = createPlatform({
+      applications: [app.registerApplication({ createAppContext: () => ({ value: { current: 1 } }) })],
+      auth: { authenticate: () => ({ id: 'alice' }) },
+      authorise: ({ permission }) => permission !== 'workcore.history.read',
+      services,
+    });
+    const manifest = await (await platform.httpHandler({ apiBasePath: '/api' })(req('/manifest?applicationId=dash&workspaceId=one'))).json();
+    expect(manifest.defaultPage).toBe('overview');
+    expect(manifest.pages.map((page: { id: string }) => page.id)).toEqual(['operations', 'tasks', 'overview']);
+    expect(manifest.pages.at(-1).blocks.map((block: { id: string }) => block.id)).toEqual(['count', 'edit', 'schedule-resource']);
+    expect(manifest.capabilities).toMatchObject({ tasksRead: true, schedulesRead: true, schedulesManage: true, historyRead: false });
+  });
+
+  it('publishes agent observability capabilities and strips unauthorized chat send metadata', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'chat-app', id: 'one', name: 'One', actors: ['alice'] }] });
+    const chatQueryInput = schema<Record<string, unknown>>((value): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value));
+    chatQueryInput['~standard'].jsonSchema.input = () => ({ type: 'object', properties: { conversationId: { type: 'string' } } });
+    const sendInput = schema<Record<string, unknown>>((value): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value));
+    sendInput['~standard'].jsonSchema.input = () => ({ type: 'object', properties: { message: { type: 'string' }, conversationId: { type: 'string' } }, required: ['message'] });
+    const app = defineWorkspace<AppContext>()({
+      id: 'chat-app',
+      queries: {
+        conversation: {
+          input: chatQueryInput, output: objectSchema, api: true, permission: 'chat.read', handler: () => ({ conversation: { id: 'thread-1' }, messages: [] }),
+          ui: { default: 'chat', variants: { chat: { title: 'Conversation', renderer: 'chat', chat: { sendMutation: 'sendMessage', messageInput: 'message', conversationIdInput: 'conversationId', conversationQueryInput: 'conversationId' } } } },
+        },
+      },
+      mutations: { sendMessage: { input: sendInput, output: objectSchema, api: true, permission: 'chat.send', handler: () => ({ runId: 'run-1' }) } },
+    });
+    const platform = createPlatform({
+      applications: [app.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })],
+      auth: { authenticate: () => ({ id: 'alice' }) },
+      authorise: ({ permission }) => permission !== 'chat.send' && permission !== 'workcore.agents.toolPayloads.read',
+      services,
+    });
+    const response = await platform.httpHandler({ apiBasePath: '/api' })(req('/manifest?applicationId=chat-app&workspaceId=one'));
+    const manifest = await response.json() as { pages: Array<{ id: string }>; capabilities: Record<string, boolean>; operations: Array<{ name: string; ui: { variants: Record<string, { renderer: string; chat?: unknown }> } | null }> };
+    expect(manifest.pages.map((page) => page.id)).toContain('agents');
+    expect(manifest.capabilities.agentRunsRead).toBe(true);
+    expect(manifest.capabilities.agentToolPayloadsRead).toBe(false);
+    expect(manifest.operations.map((operation) => operation.name)).toEqual(['conversation']);
+    expect(manifest.operations[0]?.ui?.variants.chat).toMatchObject({ renderer: 'chat' });
+    expect(manifest.operations[0]?.ui?.variants.chat).not.toHaveProperty('chat');
+  });
+
+  it('rejects unknown admin operation references at definition time', () => {
+    expect(() => defineWorkspace<AppContext>()({
+      id: 'invalid-admin',
+      admin: { pages: { overview: { title: 'Overview', blocks: [{ id: 'bad', type: 'query', operation: 'missing' }] } } },
+    })).toThrow(/unknown query operation 'missing'/);
   });
 
   it('distinguishes event delivery failure from a committed mutation and does not trigger work', async () => {
@@ -523,8 +793,10 @@ describe('Workcore HTTP runtime', () => {
     const response = await platform.httpHandler({ apiBasePath: '/api' })(new Request('http://localhost/api/events?applicationId=counter&workspaceId=one', { headers: { 'x-actor': 'alice' }, signal: controller.signal }));
     const reader = response.body!.getReader();
     expect(new TextDecoder().decode((await reader.read()).value)).toContain('ready');
+    await services.events.publish({ id: 'invalidate', type: 'workspace.invalidated', applicationId: 'counter', workspaceId: 'one', executionId: 'e1', actorId: 'alice', correlationId: 'c1', createdAt: new Date().toISOString() });
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('invalidate');
     access = false;
-    await services.events.publish({ id: 'revoke', type: 'mutation.succeeded', applicationId: 'counter', workspaceId: 'one', executionId: 'e1', actorId: 'alice', correlationId: 'c1', createdAt: new Date().toISOString() });
+    await services.events.publish({ id: 'revoke', type: 'mutation.succeeded', applicationId: 'counter', workspaceId: 'one', executionId: 'e2', actorId: 'alice', correlationId: 'c1', createdAt: new Date().toISOString() });
     const closed = await reader.read();
     expect(closed.done).toBe(true);
     controller.abort();

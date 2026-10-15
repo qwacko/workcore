@@ -7,7 +7,7 @@ export default defineConfig({
   use: { baseURL: 'http://127.0.0.1:4181', trace: 'retain-on-failure' },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: `HOST=127.0.0.1 PORT=4181 BETTER_AUTH_URL=http://127.0.0.1:4181 WORKCORE_DATABASE=/tmp/opencode/workcore-e2e-db-${process.pid}.sqlite WORKCORE_DATA=/tmp/opencode/workcore-e2e-tracker-${process.pid}.json WORKCORE_STATE=/tmp/opencode/workcore-e2e-state-${process.pid}.json pnpm dev`,
+    command: `HOST=127.0.0.1 PORT=4181 BETTER_AUTH_URL=http://127.0.0.1:4181 WORKCORE_AGENT_MODE=demo WORKCORE_DATABASE=/tmp/opencode/workcore-e2e-db-${process.pid}.sqlite WORKCORE_DATA=/tmp/opencode/workcore-e2e-tracker-${process.pid}.json WORKCORE_STATE=/tmp/opencode/workcore-e2e-state-${process.pid}.json pnpm dev`,
     url: 'http://127.0.0.1:4181',
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,

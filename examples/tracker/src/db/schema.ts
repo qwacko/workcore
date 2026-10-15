@@ -1,4 +1,4 @@
-import { foreignKey, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 // Better Auth core tables, plus its username plugin and the demo's admin flag.
 export const user = sqliteTable('user', {
@@ -78,3 +78,23 @@ export const activities = sqliteTable('activities', {
   status: text('status', { enum: ['planned', 'complete'] }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 }, (table) => [primaryKey({ columns: [table.applicationId, table.workspaceId, table.id], name: 'activities_scope_id_pk' })]);
+
+export const conversations = sqliteTable('tracker_conversations', {
+  id: text('id').primaryKey(),
+  applicationId: text('application_id').notNull(),
+  workspaceId: text('workspace_id').notNull(),
+  actorId: text('actor_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  title: text('title').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+}, (table) => [index('tracker_conversations_scope_actor_idx').on(table.applicationId, table.workspaceId, table.actorId, table.updatedAt)]);
+
+export const conversationMessages = sqliteTable('tracker_conversation_messages', {
+  id: text('id').primaryKey(),
+  conversationId: text('conversation_id').notNull().references(() => conversations.id, { onDelete: 'cascade' }),
+  role: text('role', { enum: ['user', 'assistant'] }).notNull(),
+  text: text('text').notNull(),
+  status: text('status', { enum: ['complete', 'streaming', 'failed'] }).notNull(),
+  runId: text('run_id'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+}, (table) => [index('tracker_conversation_messages_order_idx').on(table.conversationId, table.createdAt)]);

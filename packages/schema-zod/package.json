@@ -1,0 +1,12 @@
+{
+  "name": "@workcore/schema-zod",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "scripts": { "build": "tsc -p tsconfig.json", "test": "vitest run", "typecheck": "tsc -p tsconfig.check.json" },
+  "dependencies": { "@workcore/core": "workspace:*" },
+  "peerDependencies": { "zod": "^4.0.0" },
+  "devDependencies": { "typescript": "7.0.2", "vitest": "^3.2.4", "zod": "^4.1.12" }
+}

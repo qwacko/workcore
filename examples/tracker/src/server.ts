@@ -3,10 +3,12 @@ import { resolve } from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
+import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { createAdminHandler } from '@workcore/admin/server';
+import { createAiSdkAgentEngine } from '@workcore/ai-sdk';
 import { superjsonCodec } from '@workcore/codec-superjson';
-import { createPlatform, type Actor, type PlatformServices } from '@workcore/core';
-import { createFileEvents, createFileHistory, createFileKV, createFileLogger, createFileSchedules, createFileState, createFileTasks } from '@workcore/adapters/file';
+import { createPlatform, type Actor, type AgentEngine, type PlatformServices } from '@workcore/core';
+import { createFileAgentRuns, createFileEvents, createFileHistory, createFileKV, createFileLogger, createFileSchedules, createFileState, createFileTasks } from '@workcore/adapters/file';
 import { tracker } from './app.js';
 import { identity } from './identity-app.js';
 import { notes } from './second-app.js';
@@ -15,14 +17,26 @@ import { serverConfig, workcoreTrustedOrigins } from './config.js';
 import { closeDatabase, db, migrateDatabase } from './db/index.js';
 import { user } from './db/schema.js';
 import { activityStore, seedActivityData } from './tracker-data.js';
+import { conversationStore } from './conversation-data.js';
+import { miloDemoEngine } from './milo-demo-engine.js';
 import { roleCanUseWorkcoreCapability } from './demo-workspaces.js';
 import { seedIdentityAndWorkspaces, sqliteWorkspaceAdapter, workspaceRole } from './workspace-data.js';
 
 const fileState = createFileState({ path: resolve(process.env.WORKCORE_STATE ?? 'data/workcore-state.json'), workspaces: [] });
+const modelId = process.env.WORKCORE_AGENT_MODEL ?? 'anthropic/claude-3.5-sonnet';
+const openrouter = process.env.OPENROUTER_API_KEY
+  ? createOpenRouter({ apiKey: process.env.OPENROUTER_API_KEY })
+  : undefined;
+const agentModel = openrouter?.chat(modelId);
+const agentEngine: AgentEngine = agentModel && process.env.WORKCORE_AGENT_MODE !== 'demo'
+  ? createAiSdkAgentEngine({ model: agentModel })
+  : miloDemoEngine;
 const services: PlatformServices = {
   workspaces: sqliteWorkspaceAdapter,
   events: createFileEvents(fileState),
   history: createFileHistory(fileState),
+  agentRuns: createFileAgentRuns(fileState),
+  agentEngine,
   tasks: createFileTasks(fileState),
   schedules: createFileSchedules(fileState),
   kv: createFileKV(fileState),
@@ -39,7 +53,7 @@ async function actorFromId(id: string): Promise<Actor | null> {
 const platform = createPlatform({
   applications: [
     tracker.registerApplication({
-      createAppContext: async () => ({ activities: activityStore }),
+      createAppContext: async () => ({ activities: activityStore, conversations: conversationStore, agentRuns: services.agentRuns! }),
       resolveAuthorization: async ({ actor, scope }) => {
         const membershipRole = await workspaceRole(actor.id, scope);
         const role: 'owner' | 'viewer' = membershipRole === 'owner' ? 'owner' : 'viewer';

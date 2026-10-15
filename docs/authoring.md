@@ -98,6 +98,62 @@ This is an in-console action, not a separate detail-page route or bookmarkable f
 - Permissions default to deny. Check workspace access independently, and use `api: true` only for intended external operations.
 - Generated manifests/forms need Standard JSON Schema in addition to Standard Schema validation. Unsupported shapes use the JSON editor.
 
+## Configurable admin pages
+
+`admin` on a workspace definition configures the prebuilt admin's navigation and custom dashboard pages. Built-in pages remain enabled by default and can be hidden with `builtins`; their API endpoints still enforce their own capabilities. Custom pages are compositions of existing authorized operations and built-in resources—there is no HTML, script, or arbitrary renderer extension point.
+
+The built-in **Agent runs** page is shown when agent-run storage is configured and the actor has `workcore.agents.runs.read`. By default, actors see only their own runs; workspace-wide filtering requires `workcore.agents.runs.read.all`. Trace content is separately filtered by the messages, tool, tool-payload, and results capabilities.
+
+Queries may opt into the admin's non-streaming chat renderer. Conversation persistence remains application-owned: the query should return `{ conversation: { id }, messages }` (optionally with `activeRuns`), and the send mutation should persist/enqueue the user message and return an identifier for a newly-created conversation. The query stays read-only; sending is a separate mutation. Only the configured message and optional conversation ID inputs are supplied by the composer, so other required mutation inputs are rejected during definition validation.
+
+```ts
+ui: {
+  default: 'chat',
+  variants: {
+    chat: {
+      title: 'Assistant',
+      renderer: 'chat',
+      chat: {
+        sendMutation: 'sendMessage',
+        messageInput: 'message',
+        conversationIdInput: 'conversationId',
+        conversationQueryInput: 'conversationId',
+        conversationIdPath: 'conversation.id',
+        conversationIdResultPath: 'conversationId',
+      },
+    },
+  },
+}
+```
+
+The mutation's authorization is checked normally and its chat metadata is omitted from the manifest when the actor cannot use that mutation; the transcript remains read-only in that case. The admin refreshes the query on normal Workcore invalidations rather than streaming model output.
+
+```ts
+const workspace = defineWorkspace<AppContext>()({
+  id: 'tracker',
+  admin: {
+    defaultPage: 'overview',
+    builtins: { schedules: false },
+    pages: {
+      overview: {
+        title: 'Activity overview',
+        description: 'A compact view of current activity.',
+        layout: 'two-column',
+        blocks: [
+          { id: 'recent', type: 'query', operation: 'activities', variant: 'basic', input: { limit: 10 } },
+          { id: 'create', type: 'mutation-form', operation: 'createActivity', title: 'Add activity' },
+        ],
+      },
+    },
+  },
+  // Declare queries, mutations and tasks in this same workspace definition.
+});
+```
+
+Supported blocks are `query`, `mutation-form`, `task-launcher`, and `resource` (`tasks`, `schedules`, or `history`). Query blocks call the existing query endpoint and validate through its ordinary schema/permission boundary. Mutation and task blocks link to the operation console so they reuse its generated form and task controls. References and variants are checked when defining the workspace. The manifest removes blocks whose referenced operation or system resource is not visible to the current actor; this is navigation filtering, not a replacement for server authorization.
+
+`layout` accepts `stacked`, `two-column`, or `overview` (two-column). Query blocks start from their configured input and expose an editable JSON input; the query schema validates each request on the server. Schema-generated dashboard filters, inline mutation forms, metric cards, and per-workspace page overrides are not yet supported. Use an application query for business calculations and a custom frontend for interfaces beyond these declarative blocks.
+
 See [architecture and security](/architecture) for execution contracts and [production deployment](/production-deployment) for PostgreSQL/Redis composition.
 
 For authentication integrations, see [Better Auth and identity management](/authentication).

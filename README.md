@@ -27,6 +27,7 @@ The tracker example uses Better Auth with its username plugin and Drizzle on SQL
 | `@workcore/core` | Definitions, checked runtime, HTTP/SSE endpoints and adapter contracts |
 | `@workcore/adapters` | Explicit memory and local file implementations for the core adapter contracts |
 | `@workcore/client` | Browser-safe typed client and fetch/SSE transport |
+| `@workcore/ai-sdk` | Optional Vercel AI SDK engine for queued Workcore agents |
 | `@workcore/codec-superjson` | Optional SuperJSON wire codec for rich values such as `Date` |
 | `@workcore/codec-devalue` | Optional devalue wire codec for its supported rich-value set |
 | `@workcore/admin` | Prebuilt Svelte admin assets and host-route handler |
@@ -119,4 +120,4 @@ Run `pnpm docs:dev` to edit the VitePress site or `pnpm docs:build` to check it.
 
 TypeScript 7 is used for core/client and the demo. Svelte's current checker requires TypeScript 6 for its ordinary API, so the admin package checks source with TypeScript 6 and runs `svelte-check --tsgo` with TypeScript 7. This is isolated to the UI toolchain.
 
-Framework-managed transactions/outbox, automatic retries, agents, composed views and Better Auth integration remain deferred. PostgreSQL and Redis adapters are available, but Redis events are transient and task delivery is at-least-once. See [actual limitations](docs/architecture.md#current-limitations) and [production deployment](docs/production-deployment.md).
+Framework-managed transactions/outbox, automatic retries, agent streaming/resumption, composed views and Better Auth integration remain deferred. PostgreSQL and Redis adapters are available, but Redis events are transient and task delivery is at-least-once. See [actual limitations](docs/architecture.md#current-limitations) and [production deployment](docs/production-deployment.md).

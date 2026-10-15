@@ -14,6 +14,8 @@ try {
   run('pnpm', ['--filter', '@workcore/codec-superjson', 'pack', '--pack-destination', temporary]);
   run('pnpm', ['--filter', '@workcore/codec-devalue', 'pack', '--pack-destination', temporary]);
   run('pnpm', ['--filter', '@workcore/admin', 'pack', '--pack-destination', temporary]);
+  run('pnpm', ['--filter', '@workcore/ai-sdk', 'pack', '--pack-destination', temporary]);
+  run('pnpm', ['--filter', '@workcore/schema-zod', 'pack', '--pack-destination', temporary]);
   const consumer = join(temporary, 'consumer');
   await (await import('node:fs/promises')).mkdir(consumer);
   const tar = (name) => pathToFileURL(join(temporary, name)).href;
@@ -22,15 +24,24 @@ try {
   const clientTar = tar('workcore-client-0.1.0.tgz');
   const superjsonCodecTar = tar('workcore-codec-superjson-0.1.0.tgz');
   const devalueCodecTar = tar('workcore-codec-devalue-0.1.0.tgz');
+  const aiSdkTar = tar('workcore-ai-sdk-0.1.0.tgz');
+  const schemaZodTar = tar('workcore-schema-zod-0.1.0.tgz');
+  for (const archive of [join(temporary, 'workcore-ai-sdk-0.1.0.tgz'), join(temporary, 'workcore-schema-zod-0.1.0.tgz')]) {
+    const entries = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' });
+    if (/dist\/(?:index\.test|type-tests)(?:\.|\/)/.test(entries)) throw new Error(`Test-only artifact found in ${archive}`);
+  }
   await writeFile(join(consumer, 'package.json'), JSON.stringify({
     name: 'workcore-packed-consumer', private: true, type: 'module',
-    pnpm: { overrides: { '@workcore/core': coreTar, '@workcore/adapters': adaptersTar, '@workcore/client': clientTar, '@workcore/codec-superjson': superjsonCodecTar, '@workcore/codec-devalue': devalueCodecTar } },
+    pnpm: { overrides: { '@workcore/core': coreTar, '@workcore/adapters': adaptersTar, '@workcore/client': clientTar, '@workcore/codec-superjson': superjsonCodecTar, '@workcore/codec-devalue': devalueCodecTar, '@workcore/ai-sdk': aiSdkTar, '@workcore/schema-zod': schemaZodTar } },
     dependencies: {
       '@workcore/core': coreTar,
       '@workcore/adapters': adaptersTar,
       '@workcore/client': clientTar,
       '@workcore/codec-superjson': superjsonCodecTar,
       '@workcore/codec-devalue': devalueCodecTar,
+      '@workcore/ai-sdk': aiSdkTar,
+      '@workcore/schema-zod': schemaZodTar,
+      ai: '6.0.303',
       '@workcore/admin': tar('workcore-admin-0.1.0.tgz'),
       typescript: '7.0.2',
       zod: '4.6.5',
@@ -47,9 +58,13 @@ import { createClient, createFetchTransport } from '@workcore/client';
 import { createAdminHandler } from '@workcore/admin/server';
 import { superjsonCodec } from '@workcore/codec-superjson';
 import { devalueCodec } from '@workcore/codec-devalue';
+import { createAiSdkAgentEngine } from '@workcore/ai-sdk';
+import { chatSchemaHelper } from '@workcore/schema-zod';
 import { z } from 'zod';
 
 const schema = z.object({ value: z.number() });
+const chatSchemas = chatSchemaHelper({ messageType: z.enum(['message', 'prompt']) });
+void chatSchemas.input.parse({ types: ['prompt'] });
 const app = defineWorkspace<{ add(value: number): number }>()({ id: 'consumer', queries: { read: { input: schema, output: schema, api: true, permission: 'read', handler: ({ ctx, input }) => ({ value: ctx.app.add(input.value) }) } } });
 const client = createClient<typeof app>({ transport: createFetchTransport({}), applicationId: 'consumer', workspaceId: 'one' });
 void client.query('read', { value: 2 });
@@ -61,6 +76,7 @@ void client.query('read', { value: 'bad' });
 createAdminHandler({ basePath: '/admin' });
 void superjsonCodec();
 void devalueCodec();
+void createAiSdkAgentEngine({ model: {} as never });
 const memory = createMemoryState();
 void createMemoryHistory(memory);
 const file = createFileState({ path: 'workcore-state.json', workspaces: [] });

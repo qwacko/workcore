@@ -22,6 +22,7 @@ integration('PostgreSQL and Redis adapter contracts', () => {
     await pool.query('INSERT INTO workcore_workspace_members(application_id,workspace_id,actor_id) VALUES($1,$2,$3)', [scope.applicationId, workspaceId, 'actor-1']);
   });
   afterAll(async () => {
+    await pool.query('DELETE FROM workcore_agent_runs WHERE application_id=$1 AND workspace_id=$2', [scope.applicationId, workspaceId]);
     await pool.query('DELETE FROM workcore_history WHERE application_id=$1 AND workspace_id=$2', [scope.applicationId, workspaceId]);
     await pool.query('DELETE FROM workcore_tasks WHERE application_id=$1 AND workspace_id=$2', [scope.applicationId, workspaceId]);
     await pool.query("DELETE FROM workcore_task_dedupe WHERE id='task-contract'");
@@ -30,6 +31,20 @@ integration('PostgreSQL and Redis adapter contracts', () => {
     await pool.query('DELETE FROM workcore_kv WHERE application_id=$1 AND workspace_id=$2', [scope.applicationId, workspaceId]);
     await pool.query('DELETE FROM workcore_workspaces WHERE application_id=$1 AND id=$2', [scope.applicationId, workspaceId]);
     await Promise.all([publisher.quit(), subscriber.quit(), pool.end()]);
+  });
+
+  it('keeps agent-run cursors stable when the cursor run leaves its status filter', async () => {
+    const state = createPostgresState({ pool });
+    const base = { scope, actorId: 'actor-1', agent: 'cursor-agent', status: 'queued' as const, correlationId: 'corr' };
+    const newer = { ...base, id: `${workspaceId}-new`, createdAt: '2026-10-15T10:01:00.000Z' };
+    const older = { ...base, id: `${workspaceId}-old`, createdAt: '2026-10-15T10:00:00.000Z' };
+    await state.agentRuns!.create(newer);
+    await state.agentRuns!.create(older);
+    const first = await state.agentRuns!.list(scope, { limit: 1, agent: base.agent, status: 'queued' });
+    await state.agentRuns!.update({ ...newer, status: 'succeeded' });
+    const second = await state.agentRuns!.list(scope, { limit: 1, agent: base.agent, status: 'queued', cursor: first.nextCursor! });
+    expect(first.runs.map((run) => run.id)).toEqual([newer.id]);
+    expect(second.runs.map((run) => run.id)).toEqual([older.id]);
   });
 
   it('provides durable scoped state, task claiming, and schedule reservations', async () => {
@@ -42,6 +57,12 @@ integration('PostgreSQL and Redis adapter contracts', () => {
 
     await state.history.append({ id: 'history-contract', scope, actorId: 'actor-1', kind: 'query', operation: 'read', status: 'succeeded', startedAt: new Date().toISOString() });
     expect((await state.history.list(scope, 10))[0]?.id).toBe('history-contract');
+
+    await state.agentRuns!.create({ id: 'agent-contract', scope, actorId: 'actor-1', agent: 'summarize', status: 'queued', createdAt: new Date().toISOString(), correlationId: 'corr' });
+    await state.agentRuns!.appendEvent({ id: 'agent-event-contract', runId: 'agent-contract', sequence: 1, createdAt: new Date().toISOString(), type: 'run.started', data: { model: 'test' } });
+    expect(await state.agentRuns!.get(scope, 'agent-contract')).toMatchObject({ status: 'queued', agent: 'summarize' });
+    expect((await state.agentRuns!.list(scope, { limit: 10, status: 'queued' })).runs.map((run) => run.id)).toContain('agent-contract');
+    expect(await state.agentRuns!.listEvents(scope, 'agent-contract', 0, 10)).toMatchObject([{ sequence: 1, type: 'run.started' }]);
 
     const payload = { id: 'task-contract', ...scope, operation: 'run', input: {}, actorId: 'actor-1', correlationId: 'corr', createdAt: new Date().toISOString() };
     await state.tasks.enqueue(payload);

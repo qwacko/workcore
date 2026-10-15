@@ -26,7 +26,7 @@ export const demoWorkspaces: DemoWorkspace[] = [
 ];
 
 export const capabilityRoles = {
-  owner: ['workcore.history.read', 'workcore.tasks.read', 'workcore.schedules.read', 'workcore.schedules.manage'],
+  owner: ['workcore.history.read', 'workcore.tasks.read', 'workcore.schedules.read', 'workcore.schedules.manage', 'workcore.agents.runs.read', 'workcore.agents.runs.read.all', 'workcore.agents.results.read', 'workcore.agents.messages.read', 'workcore.agents.tools.read', 'workcore.agents.toolPayloads.read'],
   viewer: ['workcore.history.read', 'workcore.tasks.read', 'workcore.schedules.read'],
 } as const;
 

@@ -37,6 +37,63 @@ function verifySiblingOperationTypes(operations: RefreshHandlerArgs['operations'
 }
 void verifySiblingOperationTypes;
 
+type SendHandlerArgs = Parameters<typeof tracker.mutations.sendAssistantMessage.handler>[0];
+function verifyAgentCallTypes(operations: SendHandlerArgs['operations']) {
+  void operations.enqueueAgent('milo', { conversationId: 'conversation', assistantMessageId: 'message', userMessage: 'hello' });
+  // @ts-expect-error Agent enqueue inputs come from that agent's input schema.
+  void operations.enqueueAgent('milo', { conversationId: 1 });
+  // @ts-expect-error Agent names are checked against the workspace definition.
+  void operations.enqueueAgent('missing', {});
+}
+void verifyAgentCallTypes;
+
+const typedAgentDefinition = defineWorkspace<TrackerContext>()({
+  id: 'typed-agent-definition',
+  mutations: { finish: { input: z.object({}), output: z.object({ ok: z.boolean() }), handler: () => ({ ok: true }) } },
+  agents: {
+    inspect: {
+      input: z.object({ question: z.string() }),
+      model: 'test/model',
+      instructions: 'Answer through the finish tool.',
+      prompt: ({ input }) => {
+        const question: string = input.question;
+        // @ts-expect-error Agent callback input is inferred from the declared schema.
+        input.missing;
+        return question;
+      },
+      tools: [{ kind: 'mutation', operation: 'finish' }],
+      finishWhen: { tool: 'mutation.finish' },
+    },
+  },
+});
+void typedAgentDefinition;
+
+defineWorkspace()({
+  id: 'invalid-agent-tool-type',
+  mutations: { finish: { input: z.object({}), output: z.string(), handler: () => 'done' } },
+  agents: {
+    invalid: {
+      input: z.object({}), model: 'test/model', instructions: '', prompt: () => '',
+      // @ts-expect-error Agent tools must reference a declared operation of that kind.
+      tools: [{ kind: 'mutation', operation: 'missing' }],
+      finishWhen: { tool: 'mutation.finish' },
+    },
+  },
+});
+
+defineWorkspace()({
+  id: 'invalid-agent-finish-type',
+  mutations: { finish: { input: z.object({}), output: z.string(), handler: () => 'done' } },
+  agents: {
+    invalid: {
+      input: z.object({}), model: 'test/model', instructions: '', prompt: () => '',
+      tools: [{ kind: 'mutation', operation: 'finish' }],
+      // @ts-expect-error The finishing tool must reference one of the declared operations.
+      finishWhen: { tool: 'mutation.missing' },
+    },
+  },
+});
+
 const peerTasks = defineWorkspace<TrackerContext>()({
   id: 'peer-task-types',
   mutations: {
@@ -141,10 +198,10 @@ defineWorkspace<TrackerContext>()({
 tracker.registerApplication({ createAppContext: async () => ({}) });
 
 // @ts-expect-error A definition with authorization requires an authorization-context resolver.
-tracker.registerApplication({ createAppContext: async () => ({ activities: undefined as unknown as TrackerContext['activities'] }) });
+tracker.registerApplication({ createAppContext: async () => ({ activities: undefined as unknown as TrackerContext['activities'], conversations: undefined as unknown as TrackerContext['conversations'], agentRuns: undefined as unknown as TrackerContext['agentRuns'] }) });
 
 tracker.registerApplication({
-  createAppContext: async () => ({ activities: undefined as unknown as TrackerContext['activities'] }),
+  createAppContext: async () => ({ activities: undefined as unknown as TrackerContext['activities'], conversations: undefined as unknown as TrackerContext['conversations'], agentRuns: undefined as unknown as TrackerContext['agentRuns'] }),
   // @ts-expect-error The authorization resolver must return the definition's validated auth context.
   resolveAuthorization: async () => ({ userId: 1, role: 'viewer', isAdmin: false }),
 });

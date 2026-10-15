@@ -118,4 +118,32 @@ describe('local durable adapter', () => {
     await services.tasks.enqueue({ id: 'task-0', ...scope, operation: 'run', input: {}, actorId: 'alice', correlationId: 'corr', createdAt: new Date().toISOString() });
     expect(await services.tasks.claim()).toBeUndefined();
   });
+
+  it('retains the configured number of terminal agent runs in addition to active runs', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'workcore-agent-retention-'));
+    const scope = { applicationId: 'app', workspaceId: 'one' };
+    const services = createFileState({ path: join(directory, 'state.json'), workspaces: [{ ...scope, id: 'one', name: 'One', actors: ['alice'] }], retention: { agentRunLimit: 1 } });
+    const createdAt = new Date().toISOString();
+    for (const [id, status] of [['active', 'running'], ['old', 'succeeded'], ['new', 'failed']] as const) {
+      await services.agentRuns!.create({ id, scope, actorId: 'alice', agent: 'test', status, createdAt, correlationId: 'corr' });
+      await services.agentRuns!.appendEvent({ id: `${id}-event`, runId: id, sequence: 1, createdAt, type: 'run.started' });
+    }
+    expect((await services.agentRuns!.list(scope, { limit: 10 })).runs.map((run) => run.id)).toEqual(['new', 'active']);
+    expect(await services.agentRuns!.listEvents(scope, 'old', 0, 10)).toEqual([]);
+    expect(await services.agentRuns!.listEvents(scope, 'active', 0, 10)).toHaveLength(1);
+  });
+
+  it('keeps filtered agent pagination cursors valid after a run changes status', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'workcore-agent-cursor-'));
+    const scope = { applicationId: 'app', workspaceId: 'one' };
+    const services = createFileState({ path: join(directory, 'state.json'), workspaces: [{ ...scope, id: 'one', name: 'One', actors: ['alice'] }] });
+    const base = { scope, actorId: 'alice', agent: 'test', status: 'queued' as const, correlationId: 'corr' };
+    await services.agentRuns!.create({ ...base, id: 'new', createdAt: '2026-10-14T10:01:00.000Z' });
+    await services.agentRuns!.create({ ...base, id: 'old', createdAt: '2026-10-14T10:00:00.000Z' });
+    const first = await services.agentRuns!.list(scope, { status: 'queued', limit: 1 });
+    await services.agentRuns!.update({ ...base, id: 'new', status: 'succeeded', createdAt: '2026-10-14T10:01:00.000Z' });
+    const second = await services.agentRuns!.list(scope, { status: 'queued', limit: 1, cursor: first.nextCursor! });
+    expect(first.runs.map((run) => run.id)).toEqual(['new']);
+    expect(second.runs.map((run) => run.id)).toEqual(['old']);
+  });
 });

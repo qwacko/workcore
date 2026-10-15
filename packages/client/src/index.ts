@@ -1,4 +1,4 @@
-import type { DefinitionAt, InputFor, OutputFor, QueryNames, MutationNames, TaskNames } from '@workcore/core';
+import type { AdminManifestPage, AgentRun, AgentRunStatus, AgentTraceEvent, DefinitionAt, InputFor, OutputFor, QueryNames, MutationNames, TaskNames, UiMetadata as CoreUiMetadata } from '@workcore/core';
 import { jsonWireCodec, type JsonValue, type WireCodec } from '@workcore/core';
 
 export type TransportRequest = {
@@ -15,7 +15,12 @@ export type WorkcoreTransport = {
   applications(): Promise<Array<{ id: string; workspaceCount: number }>>;
   workspaces(applicationId: string): Promise<Array<{ id: string; name: string }>>;
   subscribe(applicationId: string, workspaceId: string, callbacks: { onInvalidate(): void; onReady?(): void; onReconnect?(): void; onError(error: Error): void }): () => void;
+  agentRuns?(applicationId: string, workspaceId: string, filter?: AgentRunFilter): Promise<{ runs: AgentRun[]; nextCursor: string | null }>;
+  agentRun?(applicationId: string, workspaceId: string, runId: string): Promise<AgentRun>;
+  agentRunEvents?(applicationId: string, workspaceId: string, runId: string, after?: number, limit?: number): Promise<{ events: AgentTraceEvent[]; nextCursor: string | null }>;
 };
+
+export type AgentRunFilter = { limit?: number; cursor?: string; agent?: string; status?: AgentRunStatus; actorId?: string; conversationId?: string };
 
 export type WorkcoreManifest = {
   protocolVersion: number;
@@ -27,25 +32,15 @@ export type WorkcoreManifest = {
     output: Record<string, unknown>;
     ui: UiMetadata | null;
   }>;
+  /** Optional for compatibility with protocol-v1 servers predating configurable pages. */
+  pages?: AdminManifestPage[];
+  defaultPage?: string;
+  capabilities?: {
+    tasksRead: boolean; schedulesRead: boolean; schedulesManage: boolean; historyRead: boolean;
+    agentRunsRead: boolean; agentRunsReadAll: boolean; agentResultsRead: boolean; agentMessagesRead: boolean; agentToolsRead: boolean; agentToolPayloadsRead: boolean;
+  };
 };
-export type UiMetadata = {
-  default: string;
-  variants: Record<string, {
-    title: string;
-    subtitle?: string;
-    helpText?: string;
-    renderer: 'table' | 'json' | 'form';
-    rowKey?: string;
-    columns?: readonly string[];
-    actions?: ReadonlyArray<{
-      label: string;
-      mutation: string;
-      variant?: string;
-      bind?: Record<string, { fromRow: string }>;
-    }>;
-    layout?: Record<string, unknown>;
-  }>;
-};
+export type UiMetadata = CoreUiMetadata;
 
 export function createFetchTransport(options: { baseUrl?: string; fetch?: typeof fetch; credentials?: RequestCredentials; onWarning?: (code: string) => void; codec?: WireCodec }): WorkcoreTransport {
   const fetcher = options.fetch ?? fetch;
@@ -88,6 +83,9 @@ export function createFetchTransport(options: { baseUrl?: string; fetch?: typeof
     manifest: async (applicationId, workspaceId) => json(`${baseUrl}/manifest?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`),
     applications: async () => (await json<{ applications: Array<{ id: string; workspaceCount: number }> }>(`${baseUrl}/applications`)).applications,
     workspaces: async (applicationId) => (await json<{ workspaces: Array<{ id: string; name: string }> }>(`${baseUrl}/workspaces?applicationId=${encodeURIComponent(applicationId)}`)).workspaces,
+    agentRuns: async (applicationId, workspaceId, filter = {}) => json(`${baseUrl}/agent-runs?${new URLSearchParams({ applicationId, workspaceId, ...Object.fromEntries(Object.entries(filter).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])) })}`),
+    agentRun: async (applicationId, workspaceId, runId) => (await json<{ run: AgentRun }>(`${baseUrl}/agent-runs/${encodeURIComponent(runId)}?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`)).run,
+    agentRunEvents: async (applicationId, workspaceId, runId, after = 0, limit = 50) => json(`${baseUrl}/agent-runs/${encodeURIComponent(runId)}/events?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}&after=${after}&limit=${limit}`),
     subscribe: (applicationId, workspaceId, callbacks) => {
       const source = new EventSource(`${baseUrl}/events?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`, { withCredentials: true });
       let connected = false;
@@ -112,6 +110,18 @@ export function createClient<D>(options: { transport: WorkcoreTransport; applica
     query: <N extends QueryNames<D>>(operation: N, input: InputFor<DefinitionAt<D, 'query', N>>) => request<OutputFor<DefinitionAt<D, 'query', N>>>('query', operation, input),
     mutate: <N extends MutationNames<D>>(operation: N, input: InputFor<DefinitionAt<D, 'mutation', N>>) => request<OutputFor<DefinitionAt<D, 'mutation', N>>>('mutate', operation, input),
     enqueue: <N extends TaskNames<D>>(operation: N, input: InputFor<DefinitionAt<D, 'task', N>>) => request<{ runId: string }>('enqueue', operation, input),
+    agentRuns: (filter?: AgentRunFilter) => {
+      if (!options.transport.agentRuns) throw new Error('This transport does not support built-in agent run inspection');
+      return options.transport.agentRuns(options.applicationId, options.workspaceId, filter);
+    },
+    agentRun: (runId: string) => {
+      if (!options.transport.agentRun) throw new Error('This transport does not support built-in agent run inspection');
+      return options.transport.agentRun(options.applicationId, options.workspaceId, runId);
+    },
+    agentRunEvents: (runId: string, after?: number, limit?: number) => {
+      if (!options.transport.agentRunEvents) throw new Error('This transport does not support built-in agent run inspection');
+      return options.transport.agentRunEvents(options.applicationId, options.workspaceId, runId, after, limit);
+    },
     subscribe: <N extends QueryNames<D>>(operation: N, input: InputFor<DefinitionAt<D, 'query', N>>, callbacks: { onData(data: OutputFor<DefinitionAt<D, 'query', N>>): void; onError(error: Error): void }) => {
       let disposed = false;
       let generation = 0;
