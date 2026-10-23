@@ -56,6 +56,9 @@ importers:
       '@workcore/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@workcore/schema-zod':
+        specifier: workspace:*
+        version: link:../../packages/schema-zod
       ai:
         specifier: ^6.0.0
         version: 6.0.303(zod@4.6.5)

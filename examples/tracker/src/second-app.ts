@@ -19,7 +19,7 @@ export const notes = defineWorkspace<NotesContext>()({
       output,
       api: true,
       permission: 'notes.read',
-      ui: { default: 'list', variants: { list: { title: 'Notebook', renderer: 'json', subtitle: 'A second application with a different context shape' } } },
+      views: { default: 'list', variants: { list: { title: 'Notebook', renderer: 'json', subtitle: 'A second application with a different context shape' } } },
       handler: ({ ctx }) => ctx.app.notebook.list(ctx.scope.workspaceId),
     },
   },

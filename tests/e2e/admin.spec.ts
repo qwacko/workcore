@@ -37,7 +37,7 @@ test('admin supports editing and streams the update to another authorized client
   await expect(alice.getByRole('table')).toBeVisible();
   await expect(bob.getByRole('table')).toBeVisible();
 
-  const statusFilter = alice.locator('.generated-form select');
+  const statusFilter = alice.locator('.collection-filters select');
   await statusFilter.selectOption('complete');
   await alice.getByRole('button', { name: 'Run query' }).click();
   await expect(alice.getByRole('table').getByText('Shared trail cleanup')).toBeVisible();
@@ -46,13 +46,13 @@ test('admin supports editing and streams the update to another authorized client
   await alice.getByRole('button', { name: 'Run query' }).click();
   await expect(alice.getByRole('table').getByText('Plan group hike')).toBeVisible();
 
-  await alice.locator('.row-actions button').first().click();
-  const titleInput = alice.locator('.generated-form input[type="text"]').nth(1);
+  await alice.locator('.row-actions button[aria-label^="Edit title"]').first().click();
+  const titleInput = alice.locator('.collection-editor .generated-form input[type="text"]').last();
   const updatedTitle = `Live update ${Date.now()}`;
   await titleInput.fill(updatedTitle);
-  await alice.getByRole('button', { name: 'Run mutation' }).click();
-  await expect(alice.getByText(updatedTitle)).toBeVisible();
-  await expect(bob.getByText(updatedTitle)).toBeVisible({ timeout: 8_000 });
+  await alice.getByRole('button', { name: 'Save changes' }).click();
+  await expect(alice.getByRole('table').getByText(updatedTitle)).toBeVisible();
+  await expect(bob.getByRole('table').getByText(updatedTitle)).toBeVisible({ timeout: 8_000 });
 
   const denied = await bob.request.post(`${baseURL}/workcore/api/query`, {
     data: { applicationId: 'tracker', workspaceId: 'personal-alice', operation: 'activities', input: {} },
@@ -78,13 +78,212 @@ test('the admin renders configured custom pages from operation metadata', async 
   await page.getByLabel('Input for activities').fill(JSON.stringify({ limit: 1 }, null, 2));
   await page.getByRole('button', { name: 'Run query' }).click();
   await expect(page.getByRole('table').getByRole('row')).toHaveCount(2);
-  await expect(page.getByRole('button', { name: 'Open form' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Submit mutation' })).toBeVisible();
+  await page.getByLabel('Input for activities').fill(JSON.stringify({ limit: 10 }, null, 2));
+  await page.getByRole('button', { name: 'Run query' }).click();
+  await page.locator('.row-actions button[aria-label^="Edit title"]').first().click();
+  await expect(page.getByRole('heading', { name: 'Edit record' })).toBeVisible();
+  const inlineTitle = page.locator('.collection-editor .generated-form input[type="text"]').last();
+  await inlineTitle.fill(`Semantic edit ${Date.now()}`);
+  const savedTitle = await inlineTitle.inputValue();
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(page.getByRole('table').getByText(savedTitle)).toBeVisible();
   await page.getByRole('button', { name: 'Task runs' }).click();
-  await expect(page.getByRole('heading', { name: 'Task runs', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Task runs', level: 1 })).toBeVisible();
   await page.goBack();
   await expect(page.getByRole('heading', { name: 'Activity dashboard', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Edit activity' }).first().click();
   await expect(page.getByRole('heading', { name: 'Edit activity' })).toBeVisible();
+});
+
+test('page mutation forms submit through the authorized operation and refresh their query', async ({ page }) => {
+  await login(page, 'alice');
+  await page.getByRole('button', { name: /Activity dashboard/ }).click();
+  await page.getByRole('button', { name: 'Run query' }).click();
+  const form = page.locator('.inline-mutation-form');
+  const fields = form.locator('.generated-form input');
+  const updatedTitle = `Inline mutation ${Date.now()}`;
+  await fields.nth(0).fill('ride-002');
+  await fields.nth(1).fill(updatedTitle);
+  await form.locator('.generated-form select').selectOption('complete');
+  await form.getByRole('button', { name: 'Submit mutation' }).click();
+  await expect(form.getByRole('status')).toHaveText('Mutation completed.');
+  await expect(page.getByRole('table').getByText(updatedTitle)).toBeVisible();
+});
+
+test('operation default view uses its query-owned collection configuration', async ({ page }) => {
+  await login(page, 'alice');
+  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await expect(page.getByRole('button', { name: 'Manage activities', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Run query' }).click();
+  await expect(page.getByLabel('Filter title')).toBeVisible();
+  const editFirstRow = page.locator('.row-actions button[aria-label^="Edit title"]').first();
+  await expect(editFirstRow).toBeVisible();
+  await expect(editFirstRow).toHaveAccessibleName(/title/i);
+  await editFirstRow.click();
+  await expect(page.getByRole('heading', { name: 'Edit record' })).toBeVisible();
+});
+
+test('authored JSON variant renders JSON without adding inferred picker variants', async ({ page }) => {
+  await login(page, 'alice');
+  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.getByRole('button', { name: 'Activity data', exact: true }).click();
+  await page.getByRole('button', { name: 'Run query' }).click();
+  await expect(page.locator('.result')).toContainText('rows');
+});
+
+test('linked mutation actions prefill matching row fields by schema', async ({ page }) => {
+  await login(page, 'alice');
+  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.getByRole('button', { name: 'Run query' }).click();
+  await page.locator('.row-actions').getByRole('button', { name: /Edit activity:/ }).first().click();
+  await expect(page.getByRole('heading', { name: 'Edit activity', exact: true })).toBeVisible();
+  const input = (name: string) => page.locator('.generated-form label').filter({ hasText: name }).locator('input');
+  await expect(input('id')).not.toHaveValue('');
+  await expect(input('title')).not.toHaveValue('');
+  await expect(page.locator('.generated-form label').filter({ hasText: 'status' }).locator('select')).toHaveValue(/planned|complete/);
+});
+
+test('Operations exposes authored named views in its variant picker', async ({ page }) => {
+  await login(page, 'alice');
+  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.getByRole('button', { name: 'Manage activities', exact: true }).click();
+  await page.getByRole('button', { name: 'Run query' }).click();
+  await expect(page.getByLabel('Filter title')).toBeVisible();
+  await expect(page.locator('.row-actions button[aria-label^="Edit title"]').first()).toBeVisible();
+});
+
+test('collection filter changes confirm and discard dirty editor drafts', async ({ page }) => {
+  await login(page, 'alice');
+  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.locator('.row-actions button[aria-label^="Edit title"]').first().click();
+  const title = page.locator('.collection-editor .generated-form input[type="text"]').last();
+  await title.fill('Unsaved activity draft');
+
+  page.once('dialog', (dialog) => void dialog.dismiss());
+  await page.locator('.collection-filters select').selectOption('complete');
+  await expect(page.locator('.collection-editor')).toBeVisible();
+  await expect(title).toHaveValue('Unsaved activity draft');
+  await expect(page.locator('.collection-filters select')).toHaveValue('');
+
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.locator('.collection-filters select').selectOption('planned');
+  await expect(page.locator('.collection-editor')).toHaveCount(0);
+  const statuses = page.getByRole('table').locator('tbody tr td:nth-child(2)');
+  await expect(statuses).not.toHaveCount(0);
+  for (const cell of await statuses.all()) await expect(cell).toHaveText('planned');
+});
+
+test('page navigation confirms before discarding a dirty collection editor', async ({ page }) => {
+  await login(page, 'alice');
+  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.locator('.row-actions button[aria-label^="Edit title"]').first().click();
+  const title = page.locator('.collection-editor .generated-form input[type="text"]').last();
+  await title.fill('Draft preserved on canceled navigation');
+
+  page.once('dialog', (dialog) => void dialog.dismiss());
+  await page.getByRole('button', { name: /Activity dashboard/ }).click();
+  await expect(page.getByRole('heading', { name: 'Operations', exact: true })).toBeVisible();
+  await expect(title).toHaveValue('Draft preserved on canceled navigation');
+
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: /Activity dashboard/ }).click();
+  await expect(page.getByRole('heading', { name: 'Activity dashboard', exact: true })).toBeVisible();
+});
+
+test('browser back confirms before discarding a dirty page editor', async ({ page }) => {
+  await login(page, 'alice');
+  await page.getByRole('button', { name: 'Activity dashboard' }).click();
+  await page.locator('.row-actions button[aria-label^="Edit title"]').first().click();
+  const title = page.locator('.collection-editor .generated-form input[type="text"]').last();
+  await title.fill('Keep this draft while canceling back');
+
+  page.once('dialog', (dialog) => void dialog.dismiss());
+  await page.goBack();
+  await expect(page.getByRole('heading', { name: 'Activity dashboard', exact: true })).toBeVisible();
+  await expect(title).toHaveValue('Keep this draft while canceling back');
+
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.goBack();
+  await expect(page.getByRole('heading', { name: 'Operations', exact: true })).toBeVisible();
+});
+
+test('semantic collections render as selectable cards on narrow screens', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page, 'alice');
+  await page.getByLabel('Admin page').selectOption('activityDashboard');
+  await expect(page.locator('.mobile-collection')).toBeVisible();
+  await expect(page.getByRole('table')).toBeHidden();
+  await expect(page.locator('.collection-card')).not.toHaveCount(0);
+  await expect(page.locator('.collection-card').first().locator('.collection-card-heading strong')).not.toBeEmpty();
+  await page.locator('.collection-card').first().locator('button[aria-label^="Edit title"]').click();
+  await expect(page.getByRole('heading', { name: 'Edit record' })).toBeVisible();
+});
+
+test('application-authored resource blocks load through the authorized history adapter', async ({ page }) => {
+  await login(page, 'alice');
+  await page.getByRole('button', { name: 'Workspace history' }).click();
+  await expect(page.getByRole('heading', { name: 'Workspace history', exact: true })).toBeVisible();
+  await expect(page.locator('.custom-block').getByRole('heading', { name: 'Recent activity' })).toBeVisible();
+  await expect(page.locator('.custom-block').getByText(/No history records|operation/).first()).toBeVisible();
+});
+
+test('application-authored operation catalog and executor use checked manifest operations', async ({ page }) => {
+  await login(page, 'alice');
+  await page.getByRole('button', { name: 'Operation workbench' }).click();
+  await expect(page.getByRole('heading', { name: 'Operation workbench', exact: true })).toBeVisible();
+  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.getByRole('button', { name: 'Run query' }).click();
+  await expect(page.getByRole('table')).toBeVisible();
+});
+
+test('custom component descriptors render a safe placeholder without loading manifest code', async ({ page }) => {
+  await login(page, 'alice');
+  await page.getByRole('button', { name: 'Renderer extension' }).click();
+  await expect(page.getByRole('heading', { name: 'Renderer extension', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Activity summary', exact: true })).toBeVisible();
+  await expect(page.locator('.custom-component-placeholder code')).toHaveText('tracker/activity-summary@1');
+  await expect(page.getByText('A custom renderer can replace this placeholder with an activity summary.')).toBeVisible();
+});
+
+test('page-owned state binds into a child query source', async ({ page }) => {
+  await login(page, 'alice');
+  await page.getByRole('button', { name: 'Activity search' }).click();
+  await expect(page.getByRole('heading', { name: 'Activity search', exact: true })).toBeVisible();
+  const search = page.getByRole('searchbox', { name: 'Search activities' });
+  const resultRows = page.locator('.custom-block table tbody tr');
+  await expect(resultRows).not.toHaveCount(0);
+  const status = page.getByLabel('Activity status');
+  await status.selectOption('complete');
+  const statusCells = page.getByRole('table').locator('tbody tr td:nth-child(2)');
+  await expect(statusCells).not.toHaveCount(0);
+  await expect.poll(async () => {
+    const statuses = await statusCells.allTextContents();
+    return statuses.length > 0 && statuses.every((value) => value === 'complete');
+  }).toBe(true);
+  await status.selectOption('planned');
+  await expect(statusCells).not.toHaveCount(0);
+  const plannedCount = await statusCells.count();
+  await expect.poll(async () => {
+    const statuses = await statusCells.allTextContents();
+    return statuses.length > 0 && statuses.every((value) => value === 'planned');
+  }).toBe(true);
+  await status.selectOption('');
+  await expect.poll(() => statusCells.count()).toBeGreaterThan(plannedCount);
+  await search.fill('no-match-expected-9f8e7d');
+  await search.press('Enter');
+  await expect(resultRows).toHaveCount(0);
+  await search.fill('');
+  await search.press('Enter');
+  await expect(resultRows).not.toHaveCount(0);
+});
+
+test('semantic collections remain readable without exposing an unauthorized editor', async ({ page }) => {
+  await login(page, 'bob');
+  await page.getByRole('button', { name: /Activity dashboard/ }).click();
+  await expect(page.getByRole('table')).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Edit/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Edit activity' })).toHaveCount(0);
 });
 
 test('agent-run inspection appears only for actors with the run capability', async ({ browser }) => {
@@ -92,7 +291,7 @@ test('agent-run inspection appears only for actors with the run capability', asy
   await login(owner, 'alice');
   await owner.getByLabel('Workspace').selectOption('team');
   await owner.getByRole('button', { name: 'Agent runs' }).click();
-  await expect(owner.getByRole('heading', { name: 'Agent runs', exact: true })).toBeVisible();
+  await expect(owner.locator('h1', { hasText: 'Agent runs' })).toBeVisible();
   await expect(owner.getByText('No agent runs')).toBeVisible();
 
   const viewer = await browser.newPage();
@@ -101,6 +300,35 @@ test('agent-run inspection appears only for actors with the run capability', asy
   await expect(viewer.getByRole('button', { name: 'Agent runs' })).toHaveCount(0);
   await owner.close();
   await viewer.close();
+});
+
+test('semantic agent resource filters, selects a run, and renders its authorized trace', async ({ page }) => {
+  const runFilters: string[] = [];
+  await page.route('**/workcore/api/agent-runs**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith('/events')) {
+      await route.fulfill({ contentType: 'application/json', body: encodeWire({ events: [{ id: 'event-1', runId: 'run-semantic', sequence: 1, createdAt: '2026-10-15T12:00:00.000Z', type: 'run.started', data: { phase: 'started' } }], nextCursor: null }) });
+      return;
+    }
+    runFilters.push(url.searchParams.get('agent') ?? '');
+    const runs = url.searchParams.has('cursor')
+      ? [{ id: 'run-semantic-2', scope: { applicationId: 'tracker', workspaceId: 'team' }, actorId: 'alice', agent: 'Trail helper', status: 'failed', createdAt: '2026-10-15T12:01:00.000Z', correlationId: 'correlation-2' }]
+      : [{ id: 'run-semantic', scope: { applicationId: 'tracker', workspaceId: 'team' }, actorId: 'alice', agent: 'Trail helper', status: 'succeeded', createdAt: '2026-10-15T12:00:00.000Z', correlationId: 'correlation-1', result: { ok: true } }];
+    await route.fulfill({ contentType: 'application/json', body: encodeWire({ runs, nextCursor: url.searchParams.has('cursor') ? null : 'cursor-next' }) });
+  });
+  await login(page, 'alice');
+  await page.getByLabel('Workspace').selectOption('team');
+  await page.getByRole('button', { name: 'Agent runs' }).click();
+  await expect(page.getByRole('button', { name: /Trail helper/ })).toBeVisible();
+  await page.getByLabel('Agent', { exact: true }).fill('Trail helper');
+  await page.getByRole('button', { name: 'Filter' }).click();
+  await expect.poll(() => runFilters.at(-1)).toBe('Trail helper');
+  await page.getByRole('button', { name: /Trail helper/ }).click();
+  await expect(page.getByText('run.started')).toBeVisible();
+  await expect(page.getByText('correlation-1')).toHaveCount(0);
+  await expect(page.getByText('Final result')).toBeVisible();
+  await page.getByRole('button', { name: 'Load more runs' }).click();
+  await expect(page.locator('.agent-run-row')).toHaveCount(2);
 });
 
 test('Milo chat sends a message to a queued personality agent and displays the saved reply', async ({ page }) => {
@@ -162,7 +390,7 @@ test('mobile navigation keeps an obvious page selector available while scrolling
   const pageSelect = page.getByLabel('Admin page');
   await expect(pageSelect).toBeVisible();
   await pageSelect.selectOption('tasks');
-  await expect(page.getByRole('heading', { name: 'Task runs', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Task runs', level: 1 })).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await expect(pageSelect).toBeVisible();
   await pageSelect.selectOption('operations');
@@ -262,17 +490,20 @@ test('custom launchers distinguish query, mutation and task operations with the 
     const manifest = decodeWire(await response.json()) as WorkcoreManifest;
     const input = { type: 'object', properties: {} };
     manifest.operations.push(
-      { kind: 'mutation', name: 'activities', input, output: input, ui: { default: 'form', variants: { form: { title: 'Same-name mutation', renderer: 'form' } } } },
-      { kind: 'task', name: 'activities', input, output: input, ui: { default: 'form', variants: { form: { title: 'Same-name task', renderer: 'form' } } } },
+      { kind: 'mutation', name: 'activities', input, output: input },
+      { kind: 'task', name: 'activities', input, output: input },
     );
-    manifest.pages!.push({ id: 'namespace-test', title: 'Namespace test', blocks: [{ id: 'mutation', type: 'mutation-form', operation: 'activities' }, { id: 'task', type: 'task-launcher', operation: 'activities' }] });
+    manifest.interface.operationViews.push(
+      { operation: 'activities', kind: 'mutation', default: 'form', variants: { form: { title: 'Same-name mutation', renderer: 'form' } } },
+      { operation: 'activities', kind: 'task', default: 'form', variants: { form: { title: 'Same-name task', renderer: 'form' } } },
+    );
+    manifest.interface.pages.push({ id: 'namespace-test', title: 'Namespace test', blocks: [{ id: 'mutation', type: 'mutation-form', operation: 'activities' }, { id: 'task', type: 'task-launcher', operation: 'activities' }] });
     await route.fulfill({ contentType: 'application/json', body: encodeWire(manifest) });
   });
   await login(page, 'alice');
   await page.getByRole('button', { name: /Namespace test/ }).click();
-  await page.getByRole('button', { name: 'Open form' }).click();
+  await expect(page.getByRole('button', { name: 'Submit mutation' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Same-name mutation' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Run mutation', exact: true })).toBeVisible();
   await page.getByRole('button', { name: /Namespace test/ }).click();
   await page.getByRole('button', { name: 'Launch task', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Same-name task' })).toBeVisible();
@@ -319,7 +550,7 @@ test('tasks run once in the worker and schedules can be managed', async ({ page,
   await page.getByRole('button', { name: /Refresh summary/ }).click();
   await page.getByRole('button', { name: 'Schedule task' }).click();
   await page.getByRole('button', { name: 'Create schedule' }).click();
-  await expect(page.getByRole('heading', { name: 'Schedules', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Schedules', level: 1 })).toBeVisible();
   const cron = page.getByLabel('Cron for refreshSummary');
   await expect(cron).toHaveValue('0 9 * * *');
   await cron.fill('30 8 * * *');
@@ -331,6 +562,19 @@ test('tasks run once in the worker and schedules can be managed', async ({ page,
   await page.getByRole('button', { name: 'Disable' }).click();
   await expect(page.getByRole('button', { name: 'Enable' })).toBeVisible();
   await page.getByRole('button', { name: 'Remove' }).click();
+  await page.getByRole('button', { name: 'Create schedule' }).click();
+  await expect(page.getByRole('dialog').getByLabel('Task')).toHaveValue('refreshSummary');
+  await page.getByRole('dialog').getByRole('button', { name: 'Create schedule' }).click();
+  await expect(page.locator('.schedule-resource-card')).toHaveCount(1);
+  await page.locator('.schedule-resource-card').getByRole('button', { name: 'Remove' }).click();
+});
+
+test('schedule resource blocks project read-only access without management controls', async ({ page }) => {
+  await login(page, 'bob');
+  await page.getByRole('button', { name: 'Schedules' }).click();
+  await expect(page.getByRole('heading', { name: 'Schedules', level: 1 })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Create schedule' })).toHaveCount(0);
+  await expect(page.getByLabel(/Cron for/)).toHaveCount(0);
 });
 
 test('Better Auth-backed identity workspace is admin-only and lists persistent users', async ({ browser, baseURL }) => {

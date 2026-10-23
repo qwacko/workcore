@@ -45,7 +45,7 @@ The console consumes the same authorised manifest and API as custom clients. It 
 
 Workspace definitions can optionally declare `admin.pages` and built-in page flags. The manifest includes those declarative page/block descriptions only after filtering references against the current actor's visible operations and system capabilities. Built-in Operations, Tasks, Schedules and History entries are represented by the same page metadata; their resource endpoints remain capability-checked independently. Pages compose queries, mutation forms, task launchers and platform resources, not arbitrary HTML or executable templates. See [authoring operations](/authoring#configurable-admin-pages) for the supported contract and current limits.
 
-For the proposed next iteration—not currently supported functionality—see the [semantic UI implementation brief](/ui-rendering-implementation-brief). It covers callback-based authoring, reusable semantic views, collection editing, scoped state, renderer independence, migration, and verification.
+The supported operation-view contract and callback-based page authoring are described in [authoring operations](/authoring#configurable-admin-pages). The [UI rendering implementation brief](/ui-rendering-implementation-brief) remains a design reference for possible future HTML/template renderers; executable templates and Alpine-style behavior are not currently supported.
 
 ## Local demo adapters
 
@@ -91,5 +91,5 @@ The file-backed Workcore adapters and demo Better Auth/SQLite composition are lo
 - Schedules accept simple five-field cron numeric, wildcard, list and range forms; names, steps/ranges combinations, DST edge-case guarantees and schedule editing of arbitrary task inputs are not promised.
 - No retry policy, task cancellation endpoint, agent streaming/approval/resume, arbitrary server-rendered custom views, invite/membership UI or external transport. Admin pages may compose the built-in blocks documented in the admin manifest contract.
 
-The manifest remains protocol version 1: configurable `pages` are additive and optional in the client manifest type, so clients tolerate older protocol-v1 servers that do not send them. Servers in this release still emit `pages`.
+The admin manifest uses protocol version 2. Semantic pages and operation presentations are the sole UI contract, projected for the requesting actor and workspace. Operation endpoints, authorization checks, Standard Schema validation, codecs, and transport behavior remain unchanged.
 - The API and packages are an initial `0.1.0` design. Run packaged-consumer verification as part of release checks.

@@ -60,7 +60,7 @@ export const tracker = defineWorkspace<TrackerContext>()({
       output: activityPageSchema,
       permission: 'activities.read',
       api: true,
-      ui: {
+      views: {
         default: 'basic',
         variants: {
           basic: { title: 'Activities', renderer: 'table', rowKey: 'id', columns: ['title', 'status'] },
@@ -76,7 +76,7 @@ export const tracker = defineWorkspace<TrackerContext>()({
       output: activitySchema,
       permission: 'activities.write',
       api: true,
-      ui: { default: 'basic', variants: { basic: { title: 'Edit activity', renderer: 'form' } } },
+      views: { default: 'basic', variants: { basic: { title: 'Edit activity', renderer: 'form' } } },
       handler: ({ ctx, input }) => ctx.app.activities.update(ctx.scope, input),
     },
   },

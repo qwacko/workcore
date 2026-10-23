@@ -1,15 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { chatMessages, chatThreads, chatTimelineKey, chatMutationInput } from './chat-data.js';
+import { chatMessages, chatThreads, chatTimelineKey, chatMutationInput, safeChatUrl, safeMarkdown, validateChatNavigation } from './chat-data.js';
 import { editableJson } from './rich-input.js';
 
 describe('shared chat data', () => {
   const variant = { title: 'Messages', renderer: 'chat-messages' as const };
-  it('normalizes message, thread-list, and thread-detail envelopes', () => {
+  it('uses canonical item envelopes for messages and thread lists', () => {
     const items = [{ id: 'one' }];
     expect(chatMessages({ items })).toEqual(items);
-    expect(chatMessages({ messages: items })).toEqual(items);
     expect(chatThreads({ items })).toEqual(items);
-    expect(chatThreads({ threads: items })).toEqual(items);
     expect(chatThreads({ thread: items[0] })).toEqual(items);
   });
   it('keys timelines by scope and filters, not pagination', () => {
@@ -24,8 +22,32 @@ describe('shared chat data', () => {
     }
   });
   it('builds identical mutation input for Operations and custom-page composers', () => {
-    const chat = { sendMutation: 'send', messageInput: 'text', conversationIdInput: 'thread' };
-    expect(chatMutationInput(chat, ' hello ', 'one')).toEqual({ text: 'hello', thread: 'one' });
-    expect(chatMutationInput(chat, 'hello', null)).toEqual({ text: 'hello' });
+    const chat = { sendMutation: 'send', messageInput: 'text', conversationIdInput: 'thread', inputBindings: { channel: { fromConversation: 'conversation.channel' }, fixed: { value: 'web' } } };
+    expect(chatMutationInput(chat, ' hello ', 'one', { conversation: { channel: 'campfire' } })).toEqual({ text: 'hello', thread: 'one', channel: 'campfire', fixed: 'web' });
+    expect(chatMutationInput(chat, 'hello', null)).toEqual({ text: 'hello', fixed: 'web' });
+  });
+  it('renders basic markdown while escaping HTML and unsafe link schemes', () => {
+    const rendered = safeMarkdown('**Hello** <script>alert(1)</script> [safe](https://example.test) [bad](javascript:alert(1))');
+    expect(rendered).toContain('<strong>Hello</strong>');
+    expect(rendered).toContain('&lt;script&gt;');
+    expect(rendered).toContain('href="https://example.test/"');
+    expect(rendered).not.toContain('href="javascript:');
+  });
+  it('allows only safe chat URL schemes and local relative paths', () => {
+    expect(safeChatUrl('https://example.test/path')).toBe('https://example.test/path');
+    expect(safeChatUrl('/files/report.pdf')).toBe('/files/report.pdf');
+    expect(safeChatUrl('mailto:help@example.test')).toBe('mailto:help@example.test');
+    expect(safeChatUrl('javascript:alert(1)')).toBeNull();
+    expect(safeChatUrl('//evil.example/path')).toBeNull();
+  });
+  it('validates chat navigation against visible page state declarations', () => {
+    const pages = [{ id: 'activity-search', title: 'Activity search', blocks: [], state: {
+      search: { type: 'text' as const, label: 'Search', default: '' },
+      status: { type: 'select' as const, label: 'Status', default: '', options: [{ value: '', label: 'All' }, { value: 'complete', label: 'Complete' }] },
+    } }];
+    expect(validateChatNavigation(pages, 'activity-search', { search: 'hike', status: 'complete' })).toMatchObject({ pageId: 'activity-search' });
+    expect(() => validateChatNavigation(pages, 'operations', {})).toThrow(/not available/);
+    expect(() => validateChatNavigation(pages, 'activity-search', { status: 'admin' })).toThrow(/unavailable value/);
+    expect(() => validateChatNavigation(pages, 'activity-search', { mutation: 'delete' })).toThrow(/invalid state/);
   });
 });

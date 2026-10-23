@@ -1,10 +1,10 @@
 <script lang="ts">
-  import type { UiMetadata, WorkcoreManifest } from '@workcore/client';
+  import type { OperationViews, WorkcoreManifest } from '@workcore/client';
   import { editableJson, parseEditableJson } from './rich-input.js';
 
   let { operation, variant, inputText, onInputChange } = $props<{
     operation: WorkcoreManifest['operations'][number];
-    variant?: UiMetadata['variants'][string] | undefined;
+    variant?: OperationViews['variants'][string] | undefined;
     inputText: string;
     onInputChange: (value: string) => void;
   }>();

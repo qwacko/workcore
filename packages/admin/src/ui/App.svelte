@@ -1,15 +1,20 @@
 <script lang="ts">
-  import { createFetchTransport, type UiMetadata, type WorkcoreManifest, type WorkcoreTransport } from '@workcore/client';
-  import type { AgentRun, AgentRunStatus, AgentTraceEvent, ChatAction, ChatActionMapping, OperationKind } from '@workcore/core';
+import { createFetchTransport, validateSemanticInterface, type OperationViews, type ScheduleCreateInput, type WorkcoreManifest, type WorkcoreTransport } from '@workcore/client';
+  import type { AdminBlock, AgentRun, AgentRunStatus, AgentTraceEvent, ChatAction, ChatActionMapping, ChatThread, CollectionViewOptions, OperationKind, SemanticManifestPage } from '@workcore/core';
   import { superjsonCodec } from '@workcore/codec-superjson';
   import DashboardBlock from './DashboardBlock.svelte';
   import OperationList from './OperationList.svelte';
   import OperationInput from './OperationInput.svelte';
   import DataTable from './DataTable.svelte';
+  import ChartView from './ChartView.svelte';
   import ChatView from './ChatView.svelte';
-  import { chatMessages as getChatMessages, previousCursor as getPreviousCursor, chatMutationInput, pathValue } from './chat-data.js';
+  import { chatMessages as getChatMessages, chatThreads as getChatThreads, nextCursor as getNextCursor, previousCursor as getPreviousCursor, chatMutationInput, pathValue, validateChatNavigation } from './chat-data.js';
   import { captureRequestContext } from './request-context.js';
+  import { QuerySourceController, type QuerySourceSnapshot } from './query-source.js';
   import { editableJson, parseEditableJson, hydrateRuntimeTypes, richJson, displayCell } from './rich-input.js';
+  import { getCollectionFieldValue } from './collection-editor.js';
+  import { clearChatQueryViewCache, createChatQueryCacheNamespace } from './chat-query-cache.js';
+  import { createPlatformSchedule, deletePlatformSchedule, loadAgentRunEvents, loadPlatformResource, updatePlatformSchedule } from './platform-resource-adapter.js';
 
   const config = (window as Window & { __WORKCORE_ADMIN__?: { apiBasePath?: string; basePath?: string; wireCodecId?: string } }).__WORKCORE_ADMIN__ ?? {};
   if (config.wireCodecId && config.wireCodecId !== 'json' && config.wireCodecId !== 'superjson-v1') throw new Error(`Unsupported admin wire codec '${config.wireCodecId}'`);
@@ -20,6 +25,7 @@
   let applications = $state<Array<{ id: string; workspaceCount: number }>>([]);
   let workspaces = $state<Array<{ id: string; name: string }>>([]);
   let manifest = $state<WorkcoreManifest | null>(null);
+  let pages = $state<SemanticManifestPage[]>([]);
   let selectedOperation = $state('');
   let selectedOperationKind = $state<OperationKind>('query');
   let selectedVariant = $state('');
@@ -29,10 +35,7 @@
   let loading = $state(false);
   let liveStatus = $state<'connecting' | 'connected' | 'reconnecting' | 'offline'>('connecting');
   let section = $state('operations');
-  let runs = $state<Array<Record<string, unknown>>>([]);
-  let schedules = $state<Array<Record<string, unknown>>>([]);
   let scheduleDrafts = $state<Record<string, { cron?: string; timezone?: string }>>({});
-  let history = $state<Array<Record<string, unknown>>>([]);
   let agentRuns = $state<AgentRun[]>([]);
   let selectedAgentRun = $state<AgentRun | null>(null);
   let agentEvents = $state<AgentTraceEvent[]>([]);
@@ -44,53 +47,178 @@
   let agentConversationFilter = $state('');
   let chatSending = $state(false);
   let chatFollowToken = $state(0);
+  let queryCacheNamespace = $state(createChatQueryCacheNamespace());
   let unsubscribe: (() => void) | undefined;
   let cursorStack = $state<string[]>([]);
   let queryGeneration = 0;
   let submissionGeneration = 0;
   let workspaceRequestGeneration = 0;
-  let sectionRequestGeneration = 0;
   let agentRunsGeneration = 0;
   let agentEventsGeneration = 0;
   let chatSendGeneration = 0;
   let pageNavigationGeneration = 0;
   let scheduleDialogOpen = $state(false);
+  let scheduleTaskOperation = $state('');
+  let scheduleTaskInputText = $state('{}');
   let scheduleKind = $state<'recurring' | 'once'>('recurring');
   let scheduleCron = $state('0 9 * * *');
   let scheduleRunAt = $state('');
   let scheduleTimezone = $state(Intl.DateTimeFormat().resolvedOptions().timeZone);
-  let pageQueryResults = $state<Record<string, unknown>>({});
-  let pageQueryErrors = $state<Record<string, string>>({});
-  let pageQueryLoading = $state<Record<string, boolean>>({});
+  let pageQueryStates = $state<Record<string, QuerySourceSnapshot<unknown>>>({});
+  let pageStateValues = $state<Record<string, Record<string, string>>>({});
+  let dirtyCollectionEditors = $state<Record<string, true>>({});
+  const pageQuerySources = new Map<string, QuerySourceController<unknown>>();
+  let pageResourceStates = $state<Record<string, QuerySourceSnapshot<unknown>>>({});
+  const pageResourceSources = new Map<string, QuerySourceController<unknown>>();
   let pageChatSending = $state<Record<string, boolean>>({});
   let pageChatFollowTokens = $state<Record<string, number>>({});
   let pageQueryInputs = $state<Record<string, string>>({});
-  let pageQueryGenerations: Record<string, number> = {};
   let pageChatGenerations: Record<string, number> = {};
   let operationInputGeneration = 0;
   let pageInputGenerations: Record<string, number> = {};
   let pageCursorStacks = $state<Record<string, string[]>>({});
 
   const operations = $derived(manifest?.operations ?? []);
+  const operationViews = $derived(manifest?.interface?.operationViews ?? []);
+  function operationView(operation: WorkcoreManifest['operations'][number]) {
+    return operationViews.find((view) => view.kind === operation.kind && view.operation === operation.name);
+  }
+  function operationVariant(operation: WorkcoreManifest['operations'][number], name: string) {
+    return operationView(operation)?.variants[name];
+  }
+  function mutationOperation(name: string) {
+    return operations.find((operation): operation is WorkcoreManifest['operations'][number] & { kind: 'mutation' } => operation.kind === 'mutation' && operation.name === name);
+  }
   const currentOperation = $derived(operations.find((operation) => operation.kind === selectedOperationKind && operation.name === selectedOperation));
-  const currentVariant = $derived(currentOperation?.ui?.variants[selectedVariant || currentOperation.ui.default]);
+  const currentScheduleTask = $derived(operations.find((operation) => operation.kind === 'task' && operation.name === scheduleTaskOperation));
+  const currentVariantName = $derived(selectedVariant || (currentOperation ? operationView(currentOperation)?.default : undefined) || '');
+  const currentVariant = $derived(currentOperation ? operationVariant(currentOperation, currentVariantName) : undefined);
+  const availableOperationVariants = $derived.by(() => {
+    const names = new Set(Object.keys(currentOperation ? operationView(currentOperation)?.variants ?? {} : {}));
+    return [...names].map((name) => ({ name, title: (currentOperation ? operationVariant(currentOperation, name)?.title : undefined) ?? (name === 'json' ? 'JSON' : name === 'table' ? 'Table' : name === 'cards' ? 'Cards' : name) }));
+  });
   const isTask = $derived(currentOperation?.kind === 'task');
-  const currentPage = $derived(manifest?.pages?.find((page) => page.id === section));
+  const currentPage = $derived(pages.find((page) => page.id === section));
+  const currentPageHasOperationExecutor = $derived(!!currentPage?.blocks.some((block) => block.type === 'operation-executor'));
+
+  function operationExecutorPageId(): string | undefined {
+    return pages.find((page) => page.blocks.some((block) => block.type === 'operation-executor'))?.id;
+  }
 
   function pageBlockKey(pageId: string, blockId: string) { return `${pageId}\u0000${blockId}`; }
+  function setCollectionEditorDirty(pageId: string, blockId: string, dirty: boolean) {
+    const key = pageBlockKey(pageId, blockId);
+    if (Boolean(dirtyCollectionEditors[key]) === dirty) return;
+    const next = { ...dirtyCollectionEditors };
+    if (dirty) next[key] = true;
+    else delete next[key];
+    dirtyCollectionEditors = next;
+  }
+
+  function confirmPageTransition(nextPageId: string, forceForStateChange = false): boolean {
+    if (nextPageId === section && !forceForStateChange) return true;
+    const prefix = `${section}\u0000`;
+    const dirtyKeys = Object.keys(dirtyCollectionEditors).filter((key) => key.startsWith(prefix));
+    if (!dirtyKeys.length) return true;
+    if (!window.confirm('Discard unsaved changes?')) return false;
+    const next = { ...dirtyCollectionEditors };
+    for (const key of dirtyKeys) delete next[key];
+    dirtyCollectionEditors = next;
+    return true;
+  }
+
+  function defaultVariant(operation: WorkcoreManifest['operations'][number], value = manifest): string {
+    return value?.interface?.operationViews?.find((view) => view.operation === operation.name && view.kind === operation.kind)?.default
+      ?? '';
+  }
+
+  function refreshCurrentContent() {
+    if (currentPageHasOperationExecutor) {
+      if (currentOperation?.kind === 'query') void runSelectedQuery(false);
+    } else if (currentPage) void loadPageBlocks();
+  }
 
   function invalidateChatSend() { chatSendGeneration++; chatSending = false; }
 
+  function updateChatQueryCacheNamespace(namespace?: string) {
+    const next = namespace === undefined ? createChatQueryCacheNamespace() : `${createChatQueryCacheNamespace()}:${namespace}`;
+    clearChatQueryViewCache(queryCacheNamespace);
+    queryCacheNamespace = next;
+  }
+
   function invalidatePageRequests() {
     pageNavigationGeneration++;
+    for (const source of pageQuerySources.values()) source.dispose();
+    pageQuerySources.clear();
+    pageQueryStates = {};
+    for (const source of pageResourceSources.values()) source.dispose();
+    pageResourceSources.clear();
+    pageResourceStates = {};
     for (const key of Object.keys(pageChatGenerations)) pageChatGenerations[key] = (pageChatGenerations[key] ?? 0) + 1;
     pageChatSending = {};
-    pageQueryLoading = {};
     invalidateChatSend();
   }
 
-  function pageContext(key: string) {
-    return captureRequestContext(() => [workspaceRequestGeneration, pageNavigationGeneration, applicationId, workspaceId, currentPage?.id, pageInputGenerations[key] ?? 0, pageQueryInputs[key]]);
+  function pageContext(key: string, agentResource = false) {
+    return captureRequestContext(() => [workspaceRequestGeneration, pageNavigationGeneration, applicationId, workspaceId, currentPage?.id, pageInputGenerations[key] ?? 0, pageQueryInputs[key], JSON.stringify(pageStateValues[currentPage?.id ?? ''] ?? {}), agentResource ? agentRunsGeneration : 0, agentResource ? agentStatusFilter : '', agentResource ? agentNameFilter : '', agentResource ? agentActorFilter : '', agentResource ? agentConversationFilter : '']);
+  }
+
+  function changePageState(stateName: string, value: string) {
+    const page = currentPage;
+    if (!page?.state?.[stateName]) return;
+    pageStateValues = { ...pageStateValues, [page.id]: { ...(pageStateValues[page.id] ?? {}), [stateName]: value } };
+    resetBoundQueryPagination(page, new Set([stateName]));
+    const dependentQueries = page.blocks.filter((block) => block.type === 'query' && Object.values(block.inputBindings ?? {}).some((binding) => binding.state === stateName));
+    for (const block of dependentQueries) {
+      if (block.type !== 'query') continue;
+      const key = pageBlockKey(page.id, block.id);
+      pageInputGenerations[key] = (pageInputGenerations[key] ?? 0) + 1;
+      pageQuerySources.get(key)?.invalidate();
+      if (pageQuerySources.has(key)) publishPageQuerySource(key, pageQuerySources.get(key)!);
+      pageCursorStacks[key] = [];
+    }
+    void Promise.all(dependentQueries.map((block) => block.type === 'query' ? runPageQuery(block) : undefined));
+  }
+
+  function resetBoundQueryPagination(page: SemanticManifestPage, stateNames: Set<string>) {
+    for (const block of page.blocks) {
+      if (block.type !== 'query' || !Object.values(block.inputBindings ?? {}).some((binding) => stateNames.has(binding.state))) continue;
+      const key = pageBlockKey(page.id, block.id);
+      try {
+        const input = parseEditableJson(pageQueryInputs[key] ?? JSON.stringify(block.input ?? {})) as Record<string, unknown>;
+        delete input.cursor;
+        delete input.direction;
+        if (Object.hasOwn(input, 'offset')) input.offset = 0;
+        pageQueryInputs[key] = editableJson(input);
+      } catch { /* The query input editor will report malformed drafts when run. */ }
+      pageCursorStacks[key] = [];
+    }
+  }
+
+  function pageQuerySource(key: string) {
+    let source = pageQuerySources.get(key);
+    if (!source) {
+      source = new QuerySourceController<unknown>();
+      pageQuerySources.set(key, source);
+    }
+    return source;
+  }
+
+  function publishPageQuerySource(key: string, source: QuerySourceController<unknown>) {
+    if (pageQuerySources.get(key) === source) pageQueryStates[key] = source.snapshot();
+  }
+
+  function pageResourceSource(key: string) {
+    let source = pageResourceSources.get(key);
+    if (!source) {
+      source = new QuerySourceController<unknown>();
+      pageResourceSources.set(key, source);
+    }
+    return source;
+  }
+
+  function publishPageResourceSource(key: string, source: QuerySourceController<unknown>) {
+    if (pageResourceSources.get(key) === source) pageResourceStates[key] = source.snapshot();
   }
 
   function editOperationInput(value: string) {
@@ -101,29 +229,31 @@
 
   function editPageInput(key: string, value: string, resetCursor = true) {
     pageInputGenerations[key] = (pageInputGenerations[key] ?? 0) + 1;
-    pageQueryGenerations[key] = (pageQueryGenerations[key] ?? 0) + 1;
+    const source = pageQuerySources.get(key);
+    source?.invalidate();
+    if (source) pageQueryStates[key] = source.snapshot();
     pageChatGenerations[key] = (pageChatGenerations[key] ?? 0) + 1;
     pageChatSending[key] = false;
-    pageQueryLoading[key] = false;
     if (resetCursor) pageCursorStacks[key] = [];
     pageQueryInputs[key] = value;
   }
 
-  function legacyManifestPages(value: WorkcoreManifest): NonNullable<WorkcoreManifest['pages']> {
-    const pages: NonNullable<WorkcoreManifest['pages']> = [];
-    if (value.operations.length) pages.push({ id: 'operations', title: 'Operations', layout: 'stacked', blocks: [], builtin: true });
-    if (value.capabilities?.tasksRead) pages.push({ id: 'tasks', title: 'Task runs', blocks: [{ id: 'task-runs', type: 'resource', resource: 'tasks' }], builtin: true });
-    if (value.capabilities?.schedulesRead) pages.push({ id: 'schedules', title: 'Schedules', blocks: [{ id: 'schedules', type: 'resource', resource: 'schedules' }], builtin: true });
-    if (value.capabilities?.historyRead) pages.push({ id: 'history', title: 'History', blocks: [{ id: 'history', type: 'resource', resource: 'history' }], builtin: true });
-    if (value.capabilities?.agentRunsRead) pages.push({ id: 'agents', title: 'Agent runs', blocks: [{ id: 'agent-runs', type: 'resource', resource: 'agents' }], builtin: true });
-    return pages;
+  function resolveSemanticPages(value: WorkcoreManifest): SemanticManifestPage[] {
+    const semantic = validateSemanticInterface(value);
+    return semantic.pages;
   }
 
   $effect(() => {
     void loadApplications();
     window.addEventListener('popstate', restoreAddress);
+    const onAuthScopeChange = (event: Event) => {
+      const requested = event instanceof CustomEvent && typeof event.detail?.namespace === 'string' ? event.detail.namespace : undefined;
+      updateChatQueryCacheNamespace(requested);
+    };
+    window.addEventListener('workcore:auth-scope-change', onAuthScopeChange);
     return () => {
       window.removeEventListener('popstate', restoreAddress);
+      window.removeEventListener('workcore:auth-scope-change', onAuthScopeChange);
       unsubscribe?.();
       liveStatus = 'offline';
     };
@@ -154,34 +284,37 @@
   }
 
   async function selectApplication() {
+    updateChatQueryCacheNamespace();
     invalidateChatSend();
     agentRunsGeneration++;
     agentEventsGeneration++;
     workspaceRequestGeneration++;
-    sectionRequestGeneration++;
     queryGeneration++;
     submissionGeneration++;
     loading = false;
     workspaceId = '';
     manifest = null;
+    pages = [];
     result = null;
     await loadWorkspaces();
   }
 
   async function selectWorkspace() {
+    updateChatQueryCacheNamespace();
     invalidateChatSend();
     agentRunsGeneration++;
     agentEventsGeneration++;
     const generation = ++workspaceRequestGeneration;
     queryGeneration++;
     submissionGeneration++;
-    sectionRequestGeneration++;
     loading = false;
     chatSending = false;
     unsubscribe?.();
     liveStatus = 'connecting';
     scheduleDrafts = {};
     manifest = null;
+    pages = [];
+    dirtyCollectionEditors = {};
     result = null;
     agentRuns = [];
     selectedAgentRun = null;
@@ -191,18 +324,22 @@
     const requestWorkspaceId = workspaceId;
     try {
       const responseManifest = await transport.manifest(requestApplicationId, requestWorkspaceId);
-      const loadedManifest = responseManifest.pages ? responseManifest : { ...responseManifest, pages: legacyManifestPages(responseManifest) };
+      const loadedManifest: WorkcoreManifest = responseManifest;
       if (generation !== workspaceRequestGeneration || applicationId !== requestApplicationId || workspaceId !== requestWorkspaceId) return;
       manifest = loadedManifest;
-      pageQueryResults = {};
-      pageQueryErrors = {};
-      pageQueryLoading = {};
+      pages = resolveSemanticPages(loadedManifest);
+      for (const source of pageQuerySources.values()) source.dispose();
+      pageQuerySources.clear();
+      pageQueryStates = {};
+      for (const source of pageResourceSources.values()) source.dispose();
+      pageResourceSources.clear();
+      pageResourceStates = {};
       pageChatSending = {};
-      pageQueryGenerations = {};
       pageChatGenerations = {};
       pageInputGenerations = {};
       pageCursorStacks = {};
-      pageQueryInputs = Object.fromEntries((loadedManifest.pages ?? []).flatMap((page) => page.blocks.flatMap((block) => {
+      pageStateValues = Object.fromEntries(pages.filter((page) => page.state).map((page) => [page.id, Object.fromEntries(Object.entries(page.state ?? {}).map(([key, state]) => [key, state.default]))]));
+      pageQueryInputs = Object.fromEntries(pages.flatMap((page) => page.blocks.flatMap((block) => {
         if (block.type !== 'query') return [];
         const operation = loadedManifest.operations.find((candidate) => candidate.kind === 'query' && candidate.name === block.operation);
         const initial = block.input ?? (operation ? defaultValue(operation.input) : {});
@@ -211,25 +348,23 @@
       const first = loadedManifest.operations[0];
       selectedOperation = first?.name ?? '';
       selectedOperationKind = first?.kind ?? 'query';
-      selectedVariant = first?.ui?.default ?? '';
+      selectedVariant = first ? defaultVariant(first, loadedManifest) : '';
       const requestedPage = new URLSearchParams(location.search).get('page');
-      section = loadedManifest.pages?.some((page) => page.id === requestedPage) ? requestedPage! : loadedManifest.defaultPage ?? 'operations';
+      const semanticDefaultPage = loadedManifest.interface.defaultPage;
+      section = pages.some((page) => page.id === requestedPage) ? requestedPage! : pages.some((page) => page.id === semanticDefaultPage) ? semanticDefaultPage! : pages[0]?.id ?? 'operations';
       syncInput(first?.input);
       updateAddress();
       unsubscribe = transport.subscribe(applicationId, workspaceId, {
         onInvalidate: () => {
           if (generation !== workspaceRequestGeneration) return;
-          if (currentPage && !currentPage.builtin) void loadPageQueries();
-          else if (section === 'operations') {
-            if (currentOperation?.kind === 'query') void runSelectedQuery(false);
-          } else void loadSection();
+          updateChatQueryCacheNamespace();
+          refreshCurrentContent();
         },
-        onReady: () => { if (generation !== workspaceRequestGeneration) return; liveStatus = 'connected'; if (currentPage && !currentPage.builtin) void loadPageQueries(); else if (currentOperation?.kind === 'query') void runSelectedQuery(false); },
-        onReconnect: () => { if (generation !== workspaceRequestGeneration) return; liveStatus = 'connected'; if (currentPage && !currentPage.builtin) void loadPageQueries(); else if (currentOperation?.kind === 'query') void runSelectedQuery(false); else void loadSection(); },
+        onReady: () => { if (generation !== workspaceRequestGeneration) return; liveStatus = 'connected'; refreshCurrentContent(); },
+        onReconnect: () => { if (generation !== workspaceRequestGeneration) return; liveStatus = 'connected'; refreshCurrentContent(); },
         onError: (cause) => { if (generation !== workspaceRequestGeneration) return; if (cause.message.includes('reconnecting')) liveStatus = 'reconnecting'; else { liveStatus = 'offline'; error = cause.message; } },
       });
-      await loadSection();
-      await loadPageQueries();
+      await loadPageBlocks();
       if (generation !== workspaceRequestGeneration || applicationId !== requestApplicationId || workspaceId !== requestWorkspaceId) return;
       if (first?.kind === 'query') await runOperation(false);
     } catch (cause) {
@@ -246,12 +381,28 @@
     selectedOperation = name;
     selectedOperationKind = kind;
     const operation = operations.find((candidate) => candidate.kind === kind && candidate.name === name);
-    selectedVariant = operation?.ui?.default ?? '';
+    selectedVariant = operation ? defaultVariant(operation, manifest) : '';
     syncInput(operation?.input);
     result = null;
     cursorStack = [];
     error = '';
-    if (operation?.kind === 'query') void runOperation(false);
+    // Let Svelte flush the selected operation/variant before runOperation reads
+    // its derived values; otherwise the first query after switching can be lost.
+    if (operation?.kind === 'query') setTimeout(() => void runOperation(false), 0);
+  }
+
+  function chooseScheduleTask(name: string) {
+    scheduleTaskOperation = name;
+    const operation = operations.find((candidate) => candidate.kind === 'task' && candidate.name === name);
+    scheduleTaskInputText = JSON.stringify(operation ? defaultValue(operation.input) : {}, null, 2);
+  }
+
+  function openScheduleDialog(operation = currentOperation?.kind === 'task' ? currentOperation : undefined) {
+    const task = operation ?? operations.find((candidate) => candidate.kind === 'task');
+    if (!task) { error = 'No authorized task operation is available to schedule.'; return; }
+    chooseScheduleTask(task.name);
+    if (operation && selectedOperationKind === 'task' && selectedOperation === operation.name) scheduleTaskInputText = inputText;
+    scheduleDialogOpen = true;
   }
 
   function syncInput(schema?: Record<string, unknown>) {
@@ -264,24 +415,14 @@
     return hydrateRuntimeTypes(value, operation.input);
   }
 
-
-  function encodeBody(value: unknown) {
-    const payload = codec ? codec.encode(value) : value;
-    return JSON.stringify(codec ? { workcoreCodec: codec.id, payload } : payload);
-  }
-
-  async function decodeResponse(response: Response): Promise<unknown> {
-    const data = await response.json().catch(() => ({})) as unknown;
-    if (!codec) return data;
-    if (!data || typeof data !== 'object' || Array.isArray(data)
-      || (data as { workcoreCodec?: unknown }).workcoreCodec !== codec.id || !('payload' in data)) {
-      throw new Error(`Server response did not use '${codec.id}'`);
-    }
-    return codec.decode((data as { payload: import('@workcore/core').JsonValue }).payload);
-  }
-
-  function apiHeaders(jsonBody = false) {
-    return { ...(jsonBody ? { 'content-type': 'application/json' } : {}), ...(codec ? { 'x-workcore-codec': codec.id } : {}) };
+  async function submitPageMutation(operation: WorkcoreManifest['operations'][number] & { kind: 'mutation' }, input: Record<string, unknown>) {
+    const requestApplicationId = applicationId;
+    const requestWorkspaceId = workspaceId;
+    const requestPage = currentPage?.id;
+    const pageGeneration = pageNavigationGeneration;
+    const workspaceGeneration = workspaceRequestGeneration;
+    await transport.request({ path: 'mutate', applicationId: requestApplicationId, workspaceId: requestWorkspaceId, operation: operation.name, input });
+    if (pageGeneration === pageNavigationGeneration && workspaceGeneration === workspaceRequestGeneration && requestPage === currentPage?.id && currentPage) await loadPageBlocks();
   }
 
   async function runOperation(showPending = true) {
@@ -300,7 +441,10 @@
       const value = operation.kind === 'mutation'
         ? await transport.request({ path: 'mutate', applicationId: submittedApplicationId, workspaceId: submittedWorkspaceId, operation: submittedOperation, input })
         : await transport.request({ path: 'enqueue', applicationId: submittedApplicationId, workspaceId: submittedWorkspaceId, operation: submittedOperation, input });
-      if (isCurrent()) { result = value; await loadSection(); }
+      if (isCurrent()) {
+        result = value;
+        if (currentPage) await loadPageBlocks();
+      }
     } catch (cause) { if (isCurrent()) error = message(cause); }
     finally { if (generation === submissionGeneration) loading = false; }
   }
@@ -326,55 +470,10 @@
     }
   }
 
-  async function loadSection() {
-    if (!workspaceId) return;
-    const generation = ++sectionRequestGeneration;
-    const requestApplicationId = applicationId;
-    const requestWorkspaceId = workspaceId;
-    const requestSection = section;
-    const query = `applicationId=${encodeURIComponent(requestApplicationId)}&workspaceId=${encodeURIComponent(requestWorkspaceId)}`;
-    const base = config.apiBasePath ?? '/workcore/api';
-    try {
-      if (requestSection === 'tasks') {
-        const value = await request<{ runs: Array<Record<string, unknown>> }>(`${base}/tasks?${query}`);
-        if (isCurrent()) runs = value.runs;
-      }
-      if (requestSection === 'agents') await loadAgentRuns();
-      if (requestSection === 'schedules') {
-        const value = await request<{ schedules: Array<Record<string, unknown>> }>(`${base}/schedules?${query}`);
-        if (isCurrent()) schedules = value.schedules;
-      }
-      if (requestSection === 'history') {
-        const value = await request<{ entries: Array<Record<string, unknown>> }>(`${base}/history?${query}`);
-        if (isCurrent()) history = value.entries;
-      }
-    } catch (cause) { if (isCurrent()) error = message(cause); }
-
-    function isCurrent() {
-      return generation === sectionRequestGeneration && applicationId === requestApplicationId && workspaceId === requestWorkspaceId && section === requestSection;
-    }
-  }
-
   async function loadAgentRuns(cursor?: string) {
-    if (!transport.agentRuns) return;
-    const generation = ++agentRunsGeneration;
-    const sectionGeneration = sectionRequestGeneration;
-    const requestApplicationId = applicationId;
-    const requestWorkspaceId = workspaceId;
-    const value = await transport.agentRuns(requestApplicationId, requestWorkspaceId, {
-      limit: 30,
-      ...(cursor ? { cursor } : {}),
-      ...(agentStatusFilter ? { status: agentStatusFilter } : {}),
-      ...(agentNameFilter.trim() ? { agent: agentNameFilter.trim() } : {}),
-      ...(agentActorFilter.trim() ? { actorId: agentActorFilter.trim() } : {}),
-      ...(agentConversationFilter.trim() ? { conversationId: agentConversationFilter.trim() } : {}),
-    });
-    if (generation !== agentRunsGeneration || sectionGeneration !== sectionRequestGeneration || section !== 'agents' || requestApplicationId !== applicationId || requestWorkspaceId !== workspaceId) return;
-    agentRuns = cursor ? [...agentRuns, ...value.runs] : value.runs;
-    agentRunCursor = value.nextCursor;
-    const focusedRun = agentRuns.find((run) => run.id === selectedAgentRun?.id) ?? agentRuns[0] ?? null;
-    if (focusedRun) await chooseAgentRun(focusedRun);
-    if (!agentRuns.length) { selectedAgentRun = null; agentEvents = []; }
+    agentRunsGeneration++;
+    const block = currentPage?.blocks.find((candidate) => candidate.type === 'resource' && candidate.resource === 'agents');
+    if (block?.type === 'resource') await runPageResource(block, cursor);
   }
 
   async function chooseAgentRun(run: AgentRun | null) {
@@ -382,19 +481,19 @@
     selectedAgentRun = run;
     agentEvents = [];
     agentEventsCursor = null;
-    if (!run || !transport.agentRunEvents) return;
+    if (!run) return;
     try {
-      const page = await transport.agentRunEvents(applicationId, workspaceId, run.id, 0, 100);
+      const page = await loadAgentRunEvents(transport, applicationId, workspaceId, run.id, undefined, 100);
       if (generation === agentEventsGeneration && selectedAgentRun?.id === run.id) { agentEvents = page.events; agentEventsCursor = page.nextCursor; }
     } catch (cause) { if (generation === agentEventsGeneration) error = message(cause); }
   }
 
   async function loadMoreAgentEvents() {
     const run = selectedAgentRun;
-    if (!run || !agentEventsCursor || !transport.agentRunEvents) return;
+    if (!run || !agentEventsCursor) return;
     const generation = agentEventsGeneration;
     try {
-      const page = await transport.agentRunEvents(applicationId, workspaceId, run.id, Number(agentEventsCursor), 100);
+      const page = await loadAgentRunEvents(transport, applicationId, workspaceId, run.id, Number(agentEventsCursor), 100);
       if (generation === agentEventsGeneration && selectedAgentRun?.id === run.id) { agentEvents = [...agentEvents, ...page.events]; agentEventsCursor = page.nextCursor; }
     } catch (cause) { if (generation === agentEventsGeneration) error = message(cause); }
   }
@@ -406,18 +505,27 @@
     await loadAgentRuns();
   }
 
+  function changeAgentFilter(field: 'agent' | 'status' | 'actorId' | 'conversationId', value: string) {
+    if (field === 'agent') agentNameFilter = value;
+    else if (field === 'status') {
+      if (value === '' || value === 'queued' || value === 'running' || value === 'succeeded' || value === 'failed' || value === 'interrupted') agentStatusFilter = value;
+    }
+    else if (field === 'actorId') agentActorFilter = value;
+    else agentConversationFilter = value;
+  }
+
   async function sendChatMessage(text: string) {
     const operation = currentOperation;
     const requestApplicationId = applicationId;
     const requestWorkspaceId = workspaceId;
-    const chat = currentVariant?.renderer === 'chat' ? currentVariant.chat : undefined;
-    if (!operation || operation.kind !== 'query' || !chat || !text.trim() || chatSending) return;
+    const chat = currentVariant && ['chat', 'chat-messages', 'chat-thread'].includes(currentVariant.renderer) ? currentVariant.chat : undefined;
+    if (!operation || operation.kind !== 'query' || !chat?.sendMutation || !chat.messageInput || !text.trim() || chatSending) return;
     const generation = ++chatSendGeneration;
     const mutation = operations.find((candidate) => candidate.kind === 'mutation' && candidate.name === chat.sendMutation);
     if (!mutation) throw new Error(`Chat send mutation '${chat.sendMutation}' is unavailable.`);
     const isCurrent = captureRequestContext(() => [workspaceRequestGeneration, pageNavigationGeneration, chatSendGeneration, operationInputGeneration, applicationId, workspaceId, selectedOperation, selectedOperationKind, selectedVariant, inputText]);
     const conversationId = pathValue(result, chat.conversationIdPath ?? 'conversation.id');
-    const mutationInput = chatMutationInput(chat, text, conversationId);
+    const mutationInput = chatMutationInput({ ...chat, messageInput: chat.messageInput }, text, conversationId, result);
     chatSending = true;
     error = '';
     try {
@@ -435,45 +543,171 @@
     finally { if (generation === chatSendGeneration) chatSending = false; }
   }
 
-  async function loadPageQueries() {
-    const page = currentPage;
-    if (!page || !workspaceId) return;
-    await Promise.all(page.blocks.filter((block) => block.type === 'query').map((block) => runPageQuery(block)));
+  async function loadChatQueryView(queryName: string, viewName: string | undefined, rawInput: unknown): Promise<unknown> {
+    const operation = operations.find((candidate) => candidate.kind === 'query' && candidate.name === queryName);
+    if (!operation) throw new Error(`Query view '${queryName}' is not available to this actor.`);
+    const views = operationView(operation);
+    const selectedName = viewName ?? views?.default;
+    const presentation = selectedName ? views?.variants[selectedName] : undefined;
+    if (!presentation) throw new Error(`View '${selectedName ?? ''}' is not available on query '${queryName}'.`);
+    if (!['table', 'json', 'chart'].includes(presentation.renderer)) throw new Error(`Query view '${queryName}.${selectedName}' does not use an embeddable table, chart, or JSON renderer.`);
+    if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) throw new Error('Query-view inputs must be an object.');
+    const value = await transport.request({ path: 'query', applicationId, workspaceId, operation: queryName, input: rawInput as Record<string, unknown> });
+    return { result: value, presentation };
   }
 
-  async function runPageQuery(block: Extract<NonNullable<WorkcoreManifest['pages']>[number]['blocks'][number], { type: 'query' }>) {
+  function openChatThread(thread: ChatThread, sourceVariant = currentVariant) {
+    const targetName = sourceVariant?.chatList?.threadQuery;
+    const target = targetName && operations.find((candidate) => candidate.kind === 'query' && candidate.name === targetName);
+    if (!target) { error = 'This thread list does not configure a chat detail query.'; return; }
+    const executorPage = operationExecutorPageId();
+    if (executorPage) {
+      if (!choosePage(executorPage)) return;
+    } else section = 'operations';
+    chooseOperation(target.name, 'query');
+    selectedVariant = sourceVariant?.chatList?.detailVariant ?? operationView(target)?.default ?? '';
+    const input = defaultValue(target.input) as Record<string, unknown>;
+    input[sourceVariant?.chatList?.threadIdInput ?? 'threadId'] = thread.id;
+    inputText = editableJson(input);
+    result = null;
+    error = '';
+    setTimeout(() => void runSelectedQuery(true), 0);
+  }
+
+  function searchOperationThreads(value: string) {
+    const input = currentInput();
+    delete input.cursor;
+    delete input.direction;
+    input[currentVariant?.chatList?.searchInput ?? 'search'] = value;
+    inputText = editableJson(input);
+    void runSelectedQuery(true);
+  }
+
+  async function loadOperationMoreThreads(cursor: string) {
+    const input = currentInput();
+    input.cursor = cursor;
+    input.direction = 'forward';
+    const value = await transport.request({ path: 'query', applicationId, workspaceId, operation: selectedOperation, input });
+    return { items: getChatThreads(value), nextCursor: getNextCursor(value) };
+  }
+
+  function openPageChatThread(block: Extract<AdminBlock, { type: 'query' }>, thread: ChatThread) {
+    const operation = operations.find((candidate) => candidate.kind === 'query' && candidate.name === block.operation);
+    const sourceVariant = operation && operationVariant(operation, block.variant ?? operationView(operation)?.default ?? '');
+    openChatThread(thread, sourceVariant);
+  }
+
+  function searchPageThreads(block: Extract<AdminBlock, { type: 'query' }>, value: string) {
+    const page = currentPage;
+    if (!page) return;
+    const key = pageBlockKey(page.id, block.id);
+    const operation = operations.find((candidate) => candidate.kind === 'query' && candidate.name === block.operation);
+    const variant = operation && operationVariant(operation, block.variant ?? operationView(operation)?.default ?? '');
+    const input = parseEditableJson(pageQueryInputs[key] ?? '{}') as Record<string, unknown>;
+    delete input.cursor;
+    delete input.direction;
+    input[variant?.chatList?.searchInput ?? 'search'] = value;
+    pageQueryInputs[key] = editableJson(input);
+    void runPageQuery(block);
+  }
+
+  async function loadPageMoreThreads(block: Extract<AdminBlock, { type: 'query' }>, cursor: string) {
+    const page = currentPage;
+    if (!page) throw new Error('This page is no longer active.');
+    const key = pageBlockKey(page.id, block.id);
+    const operation = operations.find((candidate) => candidate.kind === 'query' && candidate.name === block.operation);
+    if (!operation) throw new Error(`Query '${block.operation}' is unavailable.`);
+    const input = hydrateRuntimeTypes(parseEditableJson(pageQueryInputs[key] ?? '{}'), operation.input) as Record<string, unknown>;
+    applyPageStateBindings(page, block, input);
+    input.cursor = cursor;
+    input.direction = 'forward';
+    const value = await transport.request({ path: 'query', applicationId, workspaceId, operation: block.operation, input });
+    return { items: getChatThreads(value), nextCursor: getNextCursor(value) };
+  }
+
+  function navigateFromChat(pageId: string, stateValues: Record<string, string>) {
+    try { choosePage(validateChatNavigation(pages, pageId, stateValues).pageId, stateValues); }
+    catch (cause) { error = message(cause); }
+  }
+
+  async function loadPageBlocks() {
+    const page = currentPage;
+    if (!page || !workspaceId) return;
+    await Promise.all(page.blocks.map((block) => block.type === 'query' ? runPageQuery(block) : block.type === 'resource' ? runPageResource(block) : undefined));
+  }
+
+  async function runPageQuery(block: Extract<AdminBlock, { type: 'query' }>) {
     const page = currentPage;
     if (!page || !workspaceId) return;
     const key = pageBlockKey(page.id, block.id);
-    const generation = (pageQueryGenerations[key] ?? 0) + 1;
-    pageQueryGenerations[key] = generation;
     const requestApplicationId = applicationId;
     const requestWorkspaceId = workspaceId;
     const contextIsCurrent = pageContext(key);
-    const isCurrent = () => contextIsCurrent() && pageQueryGenerations[key] === generation;
-    pageQueryLoading[key] = true;
-    pageQueryErrors[key] = '';
-    try {
+    const source = pageQuerySource(key);
+    const request = source.run(async () => {
       const operation = operations.find((candidate) => candidate.kind === 'query' && candidate.name === block.operation);
       if (!operation) throw new Error(`Query '${block.operation}' is unavailable.`);
-      const input = hydrateRuntimeTypes(parseEditableJson(pageQueryInputs[key] ?? JSON.stringify(block.input ?? {})), operation.input);
-      const value = await transport.request({ path: 'query', applicationId: requestApplicationId, workspaceId: requestWorkspaceId, operation: block.operation, input });
-      if (isCurrent()) pageQueryResults[key] = value;
-    } catch (cause) {
-      if (isCurrent()) pageQueryErrors[key] = message(cause);
-    } finally {
-      if (isCurrent()) pageQueryLoading[key] = false;
+       const input = parseEditableJson(pageQueryInputs[key] ?? JSON.stringify(block.input ?? {})) as Record<string, unknown>;
+        applyPageStateBindings(page, block, input);
+        const validatedInput = hydrateRuntimeTypes(input, operation.input);
+       return transport.request({ path: 'query', applicationId: requestApplicationId, workspaceId: requestWorkspaceId, operation: block.operation, input: validatedInput });
+    }, contextIsCurrent);
+    publishPageQuerySource(key, source);
+    await request;
+    publishPageQuerySource(key, source);
+  }
+
+  function applyPageStateBindings(page: SemanticManifestPage, block: Extract<AdminBlock, { type: 'query' }>, input: Record<string, unknown>) {
+    for (const [target, binding] of Object.entries(block.inputBindings ?? {})) {
+      const state = page.state?.[binding.state];
+      const value = pageStateValues[page.id]?.[binding.state] ?? state?.default ?? '';
+      if (state?.type === 'select' && value === '') delete input[target];
+      else input[target] = value;
     }
   }
 
-  function pageCustomQuery(block: Extract<NonNullable<WorkcoreManifest['pages']>[number]['blocks'][number], { type: 'query' }>, cursor?: string) {
+  async function runPageResource(block: Extract<AdminBlock, { type: 'resource' }>, cursor?: string) {
+    const page = currentPage;
+    if (!page || !workspaceId) return;
+    const key = pageBlockKey(page.id, block.id);
+    const requestApplicationId = applicationId;
+    const requestWorkspaceId = workspaceId;
+    const source = pageResourceSource(key);
+    let loadedAgentPage: { runs: AgentRun[]; nextCursor: string | null } | undefined;
+    const contextIsCurrent = pageContext(key, block.resource === 'agents');
+    const request = source.run(async () => {
+      const loaded = await loadPlatformResource(transport, requestApplicationId, requestWorkspaceId, block.resource, {
+        ...(cursor ? { cursor } : {}),
+        filters: { status: agentStatusFilter, agent: agentNameFilter, actorId: agentActorFilter, conversationId: agentConversationFilter },
+        previousRuns: agentRuns,
+      });
+      loadedAgentPage = loaded.agentPage;
+      return loaded.result;
+    }, contextIsCurrent);
+    publishPageResourceSource(key, source);
+    const succeeded = await request;
+    if (succeeded && contextIsCurrent() && block.resource === 'agents' && loadedAgentPage) {
+      agentRuns = loadedAgentPage.runs;
+      agentRunCursor = loadedAgentPage.nextCursor;
+      const focusedRun = agentRuns.find((run) => run.id === selectedAgentRun?.id) ?? agentRuns[0] ?? null;
+      if (focusedRun) void chooseAgentRun(focusedRun);
+      else { selectedAgentRun = null; agentEvents = []; }
+    }
+    publishPageResourceSource(key, source);
+  }
+
+  function pageCustomQuery(block: Extract<AdminBlock, { type: 'query' }>, pagination?: { cursor?: string; offset?: number }) {
     const page = currentPage;
     if (!page) return;
     const key = pageBlockKey(page.id, block.id);
     const input = parseEditableJson(pageQueryInputs[key] ?? JSON.stringify(block.input ?? {})) as Record<string, unknown>;
-    if (cursor) {
+    if (pagination && Object.hasOwn(pagination, 'offset')) {
+      input.offset = Math.max(0, pagination.offset ?? 0);
+      delete input.cursor;
+      pageCursorStacks[key] = [];
+    } else if (pagination?.cursor) {
       pageCursorStacks[key] = [...(pageCursorStacks[key] ?? []), String(input.cursor ?? '')];
-      input.cursor = cursor;
+      input.cursor = pagination.cursor;
     } else {
       const stack = pageCursorStacks[key] ?? [];
       const previous = stack.at(-1) ?? '';
@@ -485,7 +719,62 @@
     void runPageQuery(block);
   }
 
-  async function loadPageOlderMessages(block: Extract<NonNullable<WorkcoreManifest['pages']>[number]['blocks'][number], { type: 'query' }>, cursor: string) {
+  function pageCollectionFilter(block: Extract<AdminBlock, { type: 'query' }>, targetParam: string, value: unknown) {
+    const page = currentPage;
+    if (!page) return;
+    const key = pageBlockKey(page.id, block.id);
+    let input: Record<string, unknown>;
+    try { input = parseEditableJson(pageQueryInputs[key] ?? JSON.stringify(block.input ?? {})) as Record<string, unknown>; }
+    catch { input = { ...(block.input ?? {}) }; }
+    if (value === undefined) delete input[targetParam];
+    else input[targetParam] = value;
+    delete input.cursor;
+    delete input.offset;
+    pageCursorStacks[key] = [];
+    editPageInput(key, editableJson(input));
+    void runPageQuery(block);
+  }
+
+  function operationCollectionFilter(targetParam: string, value: unknown) {
+    let input: Record<string, unknown>;
+    try { input = parseEditableJson(inputText) as Record<string, unknown>; }
+    catch { input = {}; }
+    if (value === undefined) delete input[targetParam];
+    else input[targetParam] = value;
+    delete input.cursor;
+    delete input.offset;
+    cursorStack = [];
+    editOperationInput(editableJson(input));
+    void runOperation(false);
+  }
+
+  async function saveOperationCollection(collection: CollectionViewOptions, input: Record<string, unknown>) {
+    const operationName = collection.editor?.mutation;
+    const queryName = currentOperation?.kind === 'query' ? currentOperation.name : undefined;
+    if (!operationName || !workspaceId || !queryName) throw new Error('This collection editor is no longer available.');
+    const operation = operations.find((candidate) => candidate.kind === 'mutation' && candidate.name === operationName);
+    if (!operation) throw new Error('This collection editor is not authorized.');
+    const requestApplicationId = applicationId;
+    const requestWorkspaceId = workspaceId;
+    await transport.request({ path: 'mutate', applicationId: requestApplicationId, workspaceId: requestWorkspaceId, operation: operationName, input: hydrateRuntimeTypes(input, operation.input) });
+    if (applicationId === requestApplicationId && workspaceId === requestWorkspaceId && selectedOperation === queryName) await runOperation(false);
+  }
+
+  async function savePageCollection(block: Extract<AdminBlock, { type: 'query' }>, collection: CollectionViewOptions | undefined, input: Record<string, unknown>) {
+    const page = currentPage;
+    const editor = collection?.editor;
+    if (!page || !editor || !workspaceId) throw new Error('This collection editor is no longer available.');
+    const operation = operations.find((candidate) => candidate.kind === 'mutation' && candidate.name === editor.mutation);
+    if (!operation) throw new Error('This collection editor is not authorized.');
+    const requestApplicationId = applicationId;
+    const requestWorkspaceId = workspaceId;
+    const hydrated = hydrateRuntimeTypes(input, operation.input);
+    await transport.request({ path: 'mutate', applicationId: requestApplicationId, workspaceId: requestWorkspaceId, operation: editor.mutation, input: hydrated });
+    if (currentPage?.id !== page.id || applicationId !== requestApplicationId || workspaceId !== requestWorkspaceId) return;
+    await runPageQuery(block);
+  }
+
+  async function loadPageOlderMessages(block: Extract<AdminBlock, { type: 'query' }>, cursor: string) {
     const page = currentPage;
     if (!page || !workspaceId) throw new Error('This page is no longer active.');
     const key = pageBlockKey(page.id, block.id);
@@ -497,13 +786,14 @@
     if (!operation) throw new Error(`Query '${block.operation}' is unavailable.`);
     const input = hydrateRuntimeTypes(parseEditableJson(requestInputText), operation.input);
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Chat query input must be an object.');
+    applyPageStateBindings(page, block, input as Record<string, unknown>);
     const olderInput = { ...input as Record<string, unknown>, cursor, direction: 'backward' };
     const value = await transport.request({ path: 'query', applicationId: requestApplicationId, workspaceId: requestWorkspaceId, operation: block.operation, input: olderInput });
     if (!isCurrent()) throw new Error('This page changed while loading messages.');
-    return { messages: getChatMessages(value), previousCursor: getPreviousCursor(value) };
+    return { items: getChatMessages(value), previousCursor: getPreviousCursor(value) };
   }
 
-  async function sendPageChatMessage(block: Extract<NonNullable<WorkcoreManifest['pages']>[number]['blocks'][number], { type: 'query' }>, messageText: string) {
+  async function sendPageChatMessage(block: Extract<AdminBlock, { type: 'query' }>, messageText: string) {
     const page = currentPage;
     if (!page) throw new Error('This page is no longer active.');
     const key = pageBlockKey(page.id, block.id);
@@ -516,16 +806,18 @@
     const requestWorkspaceGeneration = workspaceRequestGeneration;
     const isCurrent = () => contextIsCurrent() && pageChatGenerations[key] === generation;
     const operation = operations.find((candidate) => candidate.kind === 'query' && candidate.name === block.operation);
-    const variant = operation?.ui?.variants[block.variant ?? operation.ui.default];
-    const chat = variant?.renderer === 'chat' ? variant.chat : undefined;
-    const mutation = chat && operations.find((candidate) => candidate.kind === 'mutation' && candidate.name === chat.sendMutation);
-    if (!operation || !chat || !mutation) throw new Error('This chat is not available to your account.');
-    const currentResult = pageQueryResults[key];
+    const variant = operation && operationVariant(operation, block.variant ?? operationView(operation)?.default ?? '');
+    const chat = variant && ['chat', 'chat-messages', 'chat-thread'].includes(variant.renderer) ? variant.chat : undefined;
+    const mutation = chat?.sendMutation && operations.find((candidate) => candidate.kind === 'mutation' && candidate.name === chat.sendMutation);
+    if (!operation || !chat?.messageInput || !mutation) throw new Error('This chat is not available to your account.');
+    const currentResult = pageQueryStates[key]?.result;
     const conversationId = pathValue(currentResult, chat.conversationIdPath ?? 'conversation.id');
-    pageQueryErrors[key] = '';
+    const source = pageQuerySource(key);
+    source.invalidate();
+    pageQueryStates[key] = source.snapshot();
     pageChatSending[key] = true;
     try {
-      const input = chatMutationInput(chat, messageText, conversationId);
+      const input = chatMutationInput({ ...chat, messageInput: chat.messageInput }, messageText, conversationId, currentResult);
       const sendResult = await transport.request({ path: 'mutate', applicationId: requestApplicationId, workspaceId: requestWorkspaceId, operation: mutation.name, input });
       if (!isCurrent()) return;
       pageChatFollowTokens[key] = (pageChatFollowTokens[key] ?? 0) + 1;
@@ -537,7 +829,10 @@
       }
       await runPageQuery(block);
     } catch (cause) {
-      if (isCurrent()) pageQueryErrors[key] = message(cause);
+      if (isCurrent()) {
+        source.setError(cause);
+        pageQueryStates[key] = source.snapshot();
+      }
       throw cause;
     } finally {
       if (workspaceRequestGeneration === requestWorkspaceGeneration && pageChatGenerations[key] === generation) {
@@ -553,19 +848,26 @@
     input.direction = 'backward';
     const value = await transport.request({ path: 'query', applicationId, workspaceId, operation: selectedOperation, input });
     if (!isCurrent()) throw new Error('This query changed while loading messages.');
-    return { messages: getChatMessages(value), previousCursor: getPreviousCursor(value) };
+    return { items: getChatMessages(value), previousCursor: getPreviousCursor(value) };
   }
 
-  function choosePage(id: string) {
+  function choosePage(id: string, stateUpdates?: Record<string, string>): boolean {
+    if (!confirmPageTransition(id, !!stateUpdates && Object.keys(stateUpdates).length > 0)) return false;
+    if (!pages.some((page) => page.id === id)) return false;
     invalidatePageRequests();
+    if (stateUpdates) {
+      pageStateValues = { ...pageStateValues, [id]: { ...(pageStateValues[id] ?? {}), ...stateUpdates } };
+      const targetPage = pages.find((page) => page.id === id);
+      if (targetPage) resetBoundQueryPagination(targetPage, new Set(Object.keys(stateUpdates)));
+    }
     section = id;
     const url = new URL(location.href);
     url.searchParams.set('applicationId', applicationId);
     url.searchParams.set('workspaceId', workspaceId);
     url.searchParams.set('page', id);
     window.history.pushState({}, '', url);
-    if (id === 'tasks' || id === 'schedules' || id === 'history' || id === 'agents') void loadSection();
-    else void loadPageQueries();
+    if (pages.some((page) => page.id === id)) void loadPageBlocks();
+    return true;
   }
 
   async function restoreAddress() {
@@ -584,75 +886,64 @@
       return;
     }
     const nextPage = params.get('page');
-    if (nextPage && manifest?.pages?.some((page) => page.id === nextPage)) choosePageFromHistory(nextPage);
+    if (nextPage && pages.some((page) => page.id === nextPage)) choosePageFromHistory(nextPage);
   }
 
   function choosePageFromHistory(id: string) {
+    if (!confirmPageTransition(id)) {
+      restoreCurrentAddress();
+      return;
+    }
     invalidatePageRequests();
     section = id;
-    if (id === 'tasks' || id === 'schedules' || id === 'history' || id === 'agents') void loadSection();
-    else void loadPageQueries();
+    if (pages.some((page) => page.id === id)) void loadPageBlocks();
   }
 
   function openBlockOperation(name: string, kind: OperationKind, variant?: string) {
-    choosePage('operations');
+    const executorPage = operationExecutorPageId();
+    if (!executorPage) { error = 'No operation executor page is available.'; return; }
+    if (!choosePage(executorPage)) return;
     chooseOperation(name, kind);
     if (variant) selectedVariant = variant;
   }
 
-  async function request<T>(url: string): Promise<T> {
-    const response = await fetch(url, { credentials: 'same-origin', headers: apiHeaders() });
-    const data = await decodeResponse(response) as { error?: { message?: string } } & T;
-    if (!response.ok) throw new Error(data.error?.message ?? `Request failed (${response.status})`);
-    return data as T;
-  }
-
   async function createSchedule() {
-    if (!currentOperation || currentOperation.kind !== 'task') return;
+    if (!currentScheduleTask) return;
     try {
       if (scheduleKind === 'once' && (!scheduleRunAt || !Number.isFinite(Date.parse(scheduleRunAt)))) throw new Error('Choose a valid future run time.');
-      const response = await fetch(`${config.apiBasePath ?? '/workcore/api'}/schedules`, {
-        method: 'POST', credentials: 'same-origin', headers: apiHeaders(true),
-        body: encodeBody({ applicationId, workspaceId, operation: currentOperation.name, input: parseOperationInput(currentOperation), kind: scheduleKind, ...(scheduleKind === 'once' ? { runAt: new Date(scheduleRunAt).toISOString() } : { cron: scheduleCron }), timezone: scheduleTimezone }),
-      });
-      const data = await decodeResponse(response) as { error?: { message?: string } };
-      if (!response.ok) throw new Error(data.error?.message ?? 'Could not create schedule');
+      const task = currentScheduleTask;
+      if (!task) throw new Error('Choose an available task to schedule.');
+      const input = hydrateRuntimeTypes(scheduleTaskInputText.trim() ? parseEditableJson(scheduleTaskInputText) : {}, task.input);
+      const scheduleInput: ScheduleCreateInput = scheduleKind === 'once'
+        ? { operation: task.name, input, kind: 'once', runAt: new Date(scheduleRunAt).toISOString(), timezone: scheduleTimezone }
+        : { operation: task.name, input, kind: 'recurring', cron: scheduleCron, timezone: scheduleTimezone };
+      await createPlatformSchedule(transport, applicationId, workspaceId, scheduleInput);
       scheduleDialogOpen = false;
       section = 'schedules';
-      await loadSection();
+      await loadPageBlocks();
     } catch (cause) { error = message(cause); }
   }
 
   async function deleteSchedule(id: unknown) {
     try {
-      const query = `applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`;
-      const response = await fetch(`${config.apiBasePath ?? '/workcore/api'}/schedules/${encodeURIComponent(String(id))}?${query}`, { method: 'DELETE', credentials: 'same-origin', headers: apiHeaders() });
-      if (!response.ok) throw new Error('Could not remove schedule');
-      await loadSection();
+      await deletePlatformSchedule(transport, applicationId, workspaceId, String(id));
+      await loadPageBlocks();
     } catch (cause) { error = message(cause); }
   }
 
   async function toggleSchedule(schedule: Record<string, unknown>) {
     try {
-      const query = `applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`;
-      const response = await fetch(`${config.apiBasePath ?? '/workcore/api'}/schedules/${encodeURIComponent(String(schedule.id))}?${query}`, {
-        method: 'PATCH', credentials: 'same-origin', headers: apiHeaders(true), body: encodeBody({ enabled: !schedule.enabled }),
-      });
-      const data = await decodeResponse(response) as { error?: { message?: string } };
-      if (!response.ok) throw new Error(data.error?.message ?? 'Could not update schedule');
-      await loadSection();
+      await updatePlatformSchedule(transport, applicationId, workspaceId, String(schedule.id), { enabled: !schedule.enabled });
+      await loadPageBlocks();
     } catch (cause) { error = message(cause); }
   }
   async function saveSchedule(schedule: Record<string, unknown>) {
     try {
-      const query = `applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`;
       const draft = scheduleDrafts[String(schedule.id)] ?? {};
-      const patch = { ...(schedule.kind === 'recurring' ? { cron: draft.cron ?? schedule.cron } : {}), timezone: draft.timezone ?? schedule.timezone };
-      const response = await fetch(`${config.apiBasePath ?? '/workcore/api'}/schedules/${encodeURIComponent(String(schedule.id))}?${query}`, { method: 'PATCH', credentials: 'same-origin', headers: apiHeaders(true), body: encodeBody(patch) });
-      const data = await decodeResponse(response) as { error?: { message?: string } };
-      if (!response.ok) throw new Error(data.error?.message ?? 'Could not save schedule');
+      const patch = { ...(schedule.kind === 'recurring' ? { cron: draft.cron ?? String(schedule.cron ?? '') } : {}), timezone: draft.timezone ?? String(schedule.timezone ?? 'UTC') };
+      await updatePlatformSchedule(transport, applicationId, workspaceId, String(schedule.id), patch);
       delete scheduleDrafts[String(schedule.id)];
-      await loadSection();
+      await loadPageBlocks();
     } catch (cause) { error = message(cause); }
   }
 
@@ -670,14 +961,32 @@
   function currentInput() {
     try { return parseEditableJson(inputText) as Record<string, unknown>; } catch { return {}; }
   }
-  function editRow(row: Record<string, unknown>, action: NonNullable<NonNullable<UiMetadata['variants'][string]>['actions']>[number]) {
+  function matchesInputSchema(value: unknown, schema: Record<string, unknown>): boolean {
+    if (value === null) return schema.type === 'null' || (Array.isArray(schema.type) && schema.type.includes('null'));
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (value instanceof Date) return types.includes('string') && schema.format === 'date-time';
+    return types.some((type) => type === 'string' ? typeof value === 'string'
+      : type === 'number' ? typeof value === 'number' && Number.isFinite(value)
+        : type === 'integer' ? typeof value === 'number' && Number.isInteger(value)
+          : type === 'boolean' ? typeof value === 'boolean'
+            : type === 'array' ? Array.isArray(value)
+              : type === 'object' ? !!value && typeof value === 'object' && !Array.isArray(value)
+                : false);
+  }
+  function editRow(row: Record<string, unknown>, action: NonNullable<NonNullable<OperationViews['variants'][string]>['actions']>[number]) {
     const mutationOperation = operations.find((operation) => operation.name === action.mutation && operation.kind === 'mutation');
     if (!mutationOperation) { error = `Unknown row action mutation: ${action.mutation}`; return; }
     chooseOperation(mutationOperation.name, 'mutation');
-    selectedVariant = action.variant ?? mutationOperation.ui?.default ?? '';
+    selectedVariant = action.variant ?? operationView(mutationOperation)?.default ?? '';
     const bound: Record<string, unknown> = {};
-    for (const [inputKey, binding] of Object.entries(action.bind ?? {})) bound[inputKey] = row[binding.fromRow];
+    for (const [inputKey, binding] of Object.entries(action.bind ?? {})) {
+      const value = getCollectionFieldValue(row, binding.fromRow);
+      if (value !== undefined) bound[inputKey] = value;
+    }
     const properties = mutationOperation.input.properties as Record<string, Record<string, unknown>> | undefined;
+    for (const [key, schema] of Object.entries(properties ?? {})) {
+      if (!Object.hasOwn(bound, key) && Object.hasOwn(row, key) && matchesInputSchema(row[key], schema)) bound[key] = row[key];
+    }
     for (const [key, schema] of Object.entries(properties ?? {})) {
       if (!(key in bound) && ((mutationOperation.input.required as string[] | undefined) ?? []).includes(key)) bound[key] = defaultValue(schema);
     }
@@ -704,13 +1013,15 @@
     let prepared: string;
     try { prepared = editableJson(bound); }
     catch (cause) { error = `Could not prepare chat action input: ${message(cause)}`; return; }
-    choosePage('operations');
+    const executorPage = operationExecutorPageId();
+    if (!executorPage) { error = 'No operation executor page is available.'; return; }
+    if (!choosePage(executorPage)) return;
     chooseOperation(mutationOperation.name, 'mutation');
     inputText = prepared;
-    selectedVariant = mapping.variant ?? mutationOperation.ui?.default ?? '';
+    selectedVariant = mapping.variant ?? operationView(mutationOperation)?.default ?? '';
     result = null;
     error = '';
-    section = 'operations';
+    section = executorPage;
   }
   function updateAddress() {
     const url = new URL(location.href);
@@ -718,6 +1029,13 @@
     url.searchParams.set('workspaceId', workspaceId);
     url.searchParams.set('page', section);
     window.history.replaceState({}, '', url);
+  }
+  function restoreCurrentAddress() {
+    const url = new URL(location.href);
+    url.searchParams.set('applicationId', applicationId);
+    url.searchParams.set('workspaceId', workspaceId);
+    url.searchParams.set('page', section);
+    window.history.pushState({}, '', url);
   }
   function defaultValue(schema: Record<string, unknown>): unknown {
     if ('default' in schema) return schema.default;
@@ -747,6 +1065,26 @@
     inputText = editableJson(input);
     void runOperation();
   }
+  function operationCollectionPage(pagination?: { cursor?: string; offset?: number }) {
+    const input = currentInput();
+    if (pagination && Object.hasOwn(pagination, 'offset')) {
+      input.offset = Math.max(0, pagination.offset ?? 0);
+      delete input.cursor;
+      cursorStack = [];
+    } else if (pagination?.cursor) {
+      cursorStack = [...cursorStack, String(input.cursor ?? '')];
+      input.cursor = pagination.cursor;
+    } else {
+      const previous = cursorStack.at(-1) ?? '';
+      cursorStack = cursorStack.slice(0, -1);
+      if (previous) input.cursor = previous; else delete input.cursor;
+    }
+    inputText = editableJson(input);
+    void runOperation();
+  }
+  function operationOffsetPage(offset: number) {
+    operationCollectionPage({ offset });
+  }
 </script>
 
 <svelte:head><title>Workcore Admin</title><meta name="description" content="Workspace operations and live data" /></svelte:head>
@@ -760,134 +1098,160 @@
     <label class="select-wrap"><span class="sr-only">Workspace</span><select bind:value={workspaceId} onchange={selectWorkspace} disabled={!workspaces.length}><option value="" disabled>Select workspace</option>{#each workspaces as workspace}<option value={workspace.id}>{workspace.name}</option>{/each}</select><span class="chevron">⌄</span></label>
     <div class="side-label nav-label">WORKSPACE</div>
     <nav>
-      {#each manifest?.pages ?? [] as page}
+      {#each pages as page}
          <button class:active={section === page.id} onclick={() => choosePage(page.id)}><span>{page.id === 'operations' ? '◫' : page.id === 'tasks' ? '◷' : page.id === 'schedules' ? '▤' : page.id === 'history' ? '◴' : page.id === 'agents' ? '✳' : '▧'}</span><span>{page.title}</span></button>
       {/each}
     </nav>
-    <div class="sidebar-bottom"><span class="connection-dot" class:reconnecting={liveStatus === 'reconnecting'} class:offline={liveStatus === 'offline'}></span>{liveStatus === 'connected' ? 'Connected' : liveStatus === 'connecting' ? 'Connecting…' : liveStatus === 'reconnecting' ? 'Reconnecting…' : 'Offline'} <span class="version">v1 protocol</span></div>
+    <div class="sidebar-bottom"><span class="connection-dot" class:reconnecting={liveStatus === 'reconnecting'} class:offline={liveStatus === 'offline'}></span>{liveStatus === 'connected' ? 'Connected' : liveStatus === 'connecting' ? 'Connecting…' : liveStatus === 'reconnecting' ? 'Reconnecting…' : 'Offline'} <span class="version">v2 semantic UI</span></div>
   </aside>
 
   <main class="main">
     <header class="topbar"><div><span class="breadcrumb">{applicationId}</span><span class="slash">/</span><span>{workspaceId || 'No workspace'}</span></div><span class="avatar">{workspaceId.slice(0, 1).toUpperCase() || 'W'}</span></header>
     <div class="mobile-page-nav">
       <label for="mobile-page-select">PAGE</label>
-      <select id="mobile-page-select" aria-label="Admin page" value={section} onchange={(event) => choosePage(event.currentTarget.value)} disabled={!manifest?.pages?.length}>
-        {#each manifest?.pages ?? [] as page}<option value={page.id}>{page.title}</option>{/each}
+      <select id="mobile-page-select" aria-label="Admin page" value={section} onchange={(event) => choosePage(event.currentTarget.value)} disabled={!pages.length}>
+        {#each pages as page}<option value={page.id}>{page.title}</option>{/each}
       </select>
     </div>
     <div class="content">
       {#if error}<div class="alert"><span>Something needs attention</span><p>{error}</p><button onclick={() => error = ''} aria-label="Dismiss">×</button></div>{/if}
       {#if !workspaces.length && !error}<div class="empty"><h1>No workspace access</h1><p>Sign in with an account that belongs to a Workcore workspace.</p></div>
-      {:else if currentPage && !currentPage.builtin}
-        <div class="page-heading"><div><div class="eyebrow">CUSTOM WORKSPACE PAGE</div><h1>{currentPage.title}</h1><p>{currentPage.description ?? ''}</p></div><button class="secondary" onclick={() => void loadPageQueries()}>Refresh</button></div>
-        <div class="custom-page" class:two-column={currentPage.layout === 'two-column' || currentPage.layout === 'overview'}>
+      {:else if currentPage}
+        <div class="page-heading"><div><div class="eyebrow">{currentPage.builtin ? 'BUILT-IN PAGE' : 'WORKSPACE PAGE'}</div><h1>{currentPage.title}</h1><p>{currentPage.description ?? ''}</p></div>{#if currentPageHasOperationExecutor}<span class="live-pill" class:offline={liveStatus === 'offline'} class:reconnecting={liveStatus === 'reconnecting'}><span></span> {liveStatus === 'connected' ? 'Live updates' : liveStatus === 'reconnecting' ? 'Reconnecting' : liveStatus === 'offline' ? 'Live updates offline' : 'Connecting'}</span>{:else}<button class="secondary" onclick={() => void loadPageBlocks()}>Refresh</button>{/if}</div>
+        {#if currentPage.state && Object.keys(currentPage.state).length}
+          <section class="panel generated-form" aria-label="Page controls">
+            {#each Object.entries(currentPage.state) as [stateName, state]}
+              <label class="field-label">{state.label}
+                {#if state.type === 'select'}
+                  <select value={pageStateValues[currentPage.id]?.[stateName] ?? state.default} onchange={(event) => changePageState(stateName, event.currentTarget.value)}>
+                    {#each state.options as option}<option value={option.value}>{option.label}</option>{/each}
+                  </select>
+                {:else}
+                  <input type="search" value={pageStateValues[currentPage.id]?.[stateName] ?? state.default} onchange={(event) => changePageState(stateName, event.currentTarget.value)} />
+                {/if}
+              </label>
+            {/each}
+          </section>
+        {/if}
+        <div class="custom-page" class:two-column={currentPage.layout === 'two-column' || currentPage.layout === 'overview' || currentPage.layout === 'grid'}>
           {#each currentPage.blocks as block (block.id)}
             {@const blockOperation = block.type === 'query' ? operations.find((operation) => operation.kind === 'query' && operation.name === block.operation) : block.type === 'mutation-form' ? operations.find((operation) => operation.kind === 'mutation' && operation.name === block.operation) : block.type === 'task-launcher' ? operations.find((operation) => operation.kind === 'task' && operation.name === block.operation) : undefined}
-            {@const blockVariant = block.type === 'query' ? blockOperation?.ui?.variants[block.variant ?? blockOperation.ui.default] : undefined}
+            {@const blockMutation = block.type === 'mutation-form' ? mutationOperation(block.operation) : undefined}
+            {@const blockVariant = block.type === 'query' && blockOperation ? operationVariant(blockOperation, block.variant ?? operationView(blockOperation)?.default ?? '') : undefined}
+            {@const collectionEditorMutation = block.type === 'query' && blockVariant?.collection?.editor ? mutationOperation(blockVariant.collection.editor.mutation) : undefined}
             {@const blockKey = pageBlockKey(currentPage.id, block.id)}
+            {#if block.type === 'operation-catalog'}
+            <OperationList operations={operations} operationViews={operationViews} selected={selectedOperation} selectedKind={selectedOperationKind} onSelect={chooseOperation} />
+            {:else if block.type === 'operation-executor'}
+              <section class="panel detail-panel">
+                {#if currentOperation}
+                  <div class="panel-heading detail-heading"><div><div class="eyebrow">{currentOperation.kind.toUpperCase()}</div><h2>{currentVariant?.title ?? currentOperation.name}</h2><p>{currentVariant?.subtitle ?? currentOperation.name}</p></div><span class="kind-tag">{currentOperation.kind}</span></div>
+                  {#if availableOperationVariants.length > 1}
+                    <div class="variant-tabs">{#each availableOperationVariants as variant}<button class:chosen={currentVariantName === variant.name} onclick={() => useVariant(variant.name)}>{variant.title}</button>{/each}</div>
+                  {/if}
+                  {#if currentVariant?.helpText}<p class="help-text">{currentVariant.helpText}</p>{/if}
+                  <OperationInput operation={currentOperation} variant={currentVariant} {inputText} onInputChange={editOperationInput} />
+                  <div class="actions"><button class="primary" onclick={() => runOperation()} disabled={loading}>{loading ? 'Running…' : currentOperation.kind === 'query' ? 'Run query' : currentOperation.kind === 'mutation' ? 'Run mutation' : 'Launch task'}</button>{#if isTask && manifest?.capabilities?.schedulesManage}<button class="secondary" onclick={() => openScheduleDialog(currentOperation)}>Schedule task</button>{/if}</div>
+                  {#if result !== null}
+                    {#if currentVariant?.renderer === 'table' && isPage(result)}
+                      <div class="table-result"><div class="result-heading"><h3>{result.totalCount ?? result.rows.length} results</h3><span>LIVE</span></div>
+                          {#if currentVariant.collection}
+                            {@const queryBlock = { id: `operation-${currentOperation.name}`, type: 'query' as const, operation: currentOperation.name, variant: currentVariantName } satisfies AdminBlock}
+                            {@const editorOperation = currentVariant.collection.editor ? operations.find((operation) => operation.kind === 'mutation' && operation.name === currentVariant.collection?.editor?.mutation) : undefined}
+                            <DashboardBlock block={queryBlock} contextKey={`${applicationId}:${workspaceId}:operation:${currentOperation.name}:${selectedVariant}`} result={result} variant={currentVariant} queryOperation={currentOperation} {editorOperation} editorVariant={editorOperation && currentVariant.collection.editor ? operationVariant(editorOperation, currentVariant.collection.editor.variant ?? operationView(editorOperation)?.default ?? '') : undefined} inputText={inputText} showControls={false} cacheNamespace={queryCacheNamespace} onFilter={operationCollectionFilter} onPage={operationCollectionPage} onSave={(input: Record<string, unknown>) => saveOperationCollection(currentVariant.collection!, input)} onEditorDirtyChange={(dirty: boolean) => setCollectionEditorDirty('operations', `operation-${currentOperation.name}`, dirty)} onRowAction={(row: Record<string, unknown>, action: NonNullable<OperationViews['variants'][string]['actions']>[number]) => editRow(row, action)} onChatQueryView={loadChatQueryView} onChatNavigate={navigateFromChat} />
+                          {:else if result.rows.length}<DataTable rows={result.rows} columns={rowColumns(result.rows[0]!)} actions={currentVariant?.actions ?? []} display={displayCell} onAction={(row, action) => editRow(row, action)} />{:else}<div class="empty"><p>No rows returned.</p></div>{/if}
+                         {#if currentVariant.collection?.paginationMode === 'offset'}
+                           {@const limit = Math.max(1, Number(currentInput().limit) || 50)}
+                           {@const offset = Math.max(0, Number(currentInput().offset) || 0)}
+                           {@const total = Math.max(0, Number(result.totalCount) || 0)}
+                           {@const pages = Math.max(1, Math.ceil(total / limit))}
+                           <div class="pagination"><button class="secondary" onclick={() => operationOffsetPage(Math.max(0, offset - limit))} disabled={offset === 0 || loading}>Previous</button><label>Page <input aria-label="Page" type="number" min="1" max={pages} value={Math.floor(offset / limit) + 1} onchange={(event) => { const page = Math.min(pages, Math.max(1, Number(event.currentTarget.value) || 1)); operationOffsetPage((page - 1) * limit); }} disabled={loading} /> of {pages}</label><button class="secondary" onclick={() => operationOffsetPage(offset + limit)} disabled={offset + limit >= total || loading}>Next</button></div>
+                         {:else if !currentVariant.collection && (result.nextCursor || cursorStack.length)}<div class="pagination"><button class="secondary" onclick={previousPage} disabled={!cursorStack.length}>Previous</button><button class="secondary" onclick={nextPage} disabled={!result.nextCursor}>Next page</button></div>{/if}
+                      </div>
+                     {:else if currentVariant?.renderer.startsWith('chat')}
+                        <ChatView variant={currentVariant} {result} {inputText} contextKey={`${applicationId}:${workspaceId}:${selectedOperationKind}:${selectedOperation}:${selectedVariant}`} sending={chatSending} followToken={chatFollowToken} cacheNamespace={queryCacheNamespace} onSend={sendChatMessage} onAction={openChatAction} onLoadOlder={loadOperationOlderMessages} onQueryView={loadChatQueryView} onNavigate={navigateFromChat} onThreadSearch={searchOperationThreads} onThreadSelect={(thread: ChatThread) => openChatThread(thread)} onLoadMoreThreads={loadOperationMoreThreads} />
+                     {:else if currentVariant?.renderer === 'chart' && isPage(result)}
+                       <ChartView rows={result.rows} config={currentVariant.chart!} title={currentVariant.title} />
+                     {:else}<div class="result-heading"><h3>{isTask ? 'Launch result' : 'Result'}</h3><span>Rich JSON</span></div><pre class="result">{richJson(result)}</pre>{/if}
+                  {/if}
+                {:else}<div class="empty"><h2>Select an operation</h2><p>Choose an operation to inspect or run it.</p></div>{/if}
+              </section>
+            {:else}
             <DashboardBlock
               {block}
               contextKey={`${applicationId}:${workspaceId}:${blockKey}:${block.type === 'query' ? block.operation : ''}`}
               variant={blockVariant}
+               queryOperation={block.type === 'query' ? blockOperation : undefined}
+               mutationOperation={blockMutation}
+               mutationVariant={block.type === 'mutation-form' && blockMutation ? operationVariant(blockMutation, block.variant ?? operationView(blockMutation)?.default ?? '') : undefined}
+              editorOperation={collectionEditorMutation}
+              editorVariant={collectionEditorMutation && block.type === 'query' && blockVariant?.collection?.editor ? operationVariant(collectionEditorMutation, blockVariant.collection.editor.variant ?? operationView(collectionEditorMutation)?.default ?? '') : undefined}
               followToken={block.type === 'query' ? pageChatFollowTokens[blockKey] ?? 0 : 0}
               inputText={block.type === 'query' ? pageQueryInputs[blockKey] : undefined}
-              onInputChange={(value) => { if (block.type === 'query') editPageInput(blockKey, value); }}
-              result={block.type === 'query' ? pageQueryResults[blockKey] : undefined}
-              error={block.type === 'query' ? pageQueryErrors[blockKey] : ''}
-              loading={block.type === 'query' ? pageQueryLoading[blockKey] : false}
-              chatSending={block.type === 'query' ? pageChatSending[blockKey] : false}
+              onInputChange={(value: string) => { if (block.type === 'query') editPageInput(blockKey, value); }}
+               result={block.type === 'query' ? pageQueryStates[blockKey]?.result : block.type === 'resource' ? pageResourceStates[blockKey]?.result : undefined}
+               hasResult={block.type === 'query' ? pageQueryStates[blockKey]?.hasResult ?? false : block.type === 'resource' ? pageResourceStates[blockKey]?.hasResult ?? false : false}
+                queryState={block.type === 'query' ? pageQueryStates[blockKey] : undefined}
+                resourceState={block.type === 'resource' ? pageResourceStates[blockKey] : undefined}
+                scheduleManage={block.type === 'resource' && block.resource === 'schedules' && !!manifest?.capabilities?.schedulesManage}
+                scheduleDrafts={scheduleDrafts}
+                agentRuns={block.type === 'resource' && block.resource === 'agents' ? agentRuns : []}
+                selectedAgentRun={block.type === 'resource' && block.resource === 'agents' ? selectedAgentRun : null}
+                agentEvents={block.type === 'resource' && block.resource === 'agents' ? agentEvents : []}
+                agentEventsCursor={block.type === 'resource' && block.resource === 'agents' ? agentEventsCursor : null}
+                agentRunCursor={block.type === 'resource' && block.resource === 'agents' ? agentRunCursor : null}
+                agentStatusFilter={agentStatusFilter}
+                agentNameFilter={agentNameFilter}
+                agentActorFilter={agentActorFilter}
+                agentConversationFilter={agentConversationFilter}
+                canReadAllAgentRuns={!!manifest?.capabilities?.agentRunsReadAll}
+               error={block.type === 'query' ? pageQueryStates[blockKey]?.error?.message ?? '' : block.type === 'resource' ? pageResourceStates[blockKey]?.error?.message ?? '' : ''}
+               loading={block.type === 'query' ? pageQueryStates[blockKey]?.status === 'loading' || pageQueryStates[blockKey]?.status === 'refreshing' : block.type === 'resource' ? pageResourceStates[blockKey]?.status === 'loading' || pageResourceStates[blockKey]?.status === 'refreshing' : false}
+               chatSending={block.type === 'query' ? pageChatSending[blockKey] : false}
+                cacheNamespace={queryCacheNamespace}
+                onChatNavigate={navigateFromChat}
               hasPreviousPage={block.type === 'query' ? !!pageCursorStacks[blockKey]?.length : false}
-              onPage={block.type === 'query' ? (cursor) => pageCustomQuery(block, cursor) : undefined}
-              onRefresh={() => block.type === 'query' ? runPageQuery(block) : loadPageQueries()}
-              onChatSend={block.type === 'query' ? (text) => sendPageChatMessage(block, text) : undefined}
-              onLoadOlder={block.type === 'query' ? (cursor) => loadPageOlderMessages(block, cursor) : undefined}
+               onPage={block.type === 'query' ? (page?: { cursor?: string; offset?: number }) => pageCustomQuery(block, page) : undefined}
+                onFilter={block.type === 'query' ? (target: string, value: unknown) => pageCollectionFilter(block, target, value) : undefined}
+                onSave={block.type === 'query' ? (input: Record<string, unknown>) => savePageCollection(block, blockVariant?.collection, input) : undefined}
+                onEditorDirtyChange={block.type === 'query' && blockVariant?.collection?.editor ? (dirty: boolean) => setCollectionEditorDirty(currentPage.id, block.id, dirty) : undefined}
+                onRefresh={() => block.type === 'query' ? runPageQuery(block) : loadPageBlocks()}
+                onScheduleCreate={block.type === 'resource' && block.resource === 'schedules' && manifest?.capabilities?.schedulesManage ? () => openScheduleDialog(undefined) : undefined}
+                onScheduleDraft={block.type === 'resource' && block.resource === 'schedules' ? (id: string, field: 'cron' | 'timezone', value: string) => { scheduleDrafts[id] = { ...scheduleDrafts[id], [field]: value }; } : undefined}
+                onScheduleAction={block.type === 'resource' && block.resource === 'schedules' && manifest?.capabilities?.schedulesManage ? (schedule: Record<string, unknown>, action: 'save' | 'toggle' | 'delete') => { if (action === 'save') void saveSchedule(schedule); else if (action === 'toggle') void toggleSchedule(schedule); else void deleteSchedule(schedule.id); } : undefined}
+                onAgentFilter={block.type === 'resource' && block.resource === 'agents' ? (field: 'agent' | 'status' | 'actorId' | 'conversationId', value: string) => changeAgentFilter(field, value) : undefined}
+                onAgentSelect={block.type === 'resource' && block.resource === 'agents' ? (run: AgentRun) => void chooseAgentRun(run) : undefined}
+                onAgentApplyFilters={block.type === 'resource' && block.resource === 'agents' ? () => void applyAgentFilters() : undefined}
+                onAgentLoadMoreRuns={block.type === 'resource' && block.resource === 'agents' ? () => void loadAgentRuns(agentRunCursor ?? undefined) : undefined}
+                onAgentLoadMoreEvents={block.type === 'resource' && block.resource === 'agents' ? () => void loadMoreAgentEvents() : undefined}
+               onChatSend={block.type === 'query' ? (text: string) => sendPageChatMessage(block, text) : undefined}
+                onLoadOlder={block.type === 'query' ? (cursor: string) => loadPageOlderMessages(block, cursor) : undefined}
+                onChatQueryView={loadChatQueryView}
+                onThreadSearch={block.type === 'query' ? (value: string) => searchPageThreads(block, value) : undefined}
+                onThreadSelect={block.type === 'query' ? (thread: ChatThread) => openPageChatThread(block, thread) : undefined}
+                onLoadMoreThreads={block.type === 'query' ? (cursor: string) => loadPageMoreThreads(block, cursor) : undefined}
               onChatAction={openChatAction}
-              onOpen={() => block.type === 'resource' ? choosePage(block.resource) : block.type === 'mutation-form' ? openBlockOperation(block.operation, 'mutation', block.variant) : block.type === 'task-launcher' ? openBlockOperation(block.operation, 'task') : undefined}
-              onRowAction={(row, action) => { choosePage('operations'); editRow(row, action); }}
-            />
+               onOpen={() => block.type === 'resource' ? choosePage(block.resource) : block.type === 'task-launcher' ? openBlockOperation(block.operation, 'task') : undefined}
+               onMutationSubmit={(input: Record<string, unknown>) => blockMutation ? submitPageMutation(blockMutation, input) : Promise.reject(new Error('Mutation is not available.'))}
+               onRowAction={(row: Record<string, unknown>, action: NonNullable<OperationViews['variants'][string]['actions']>[number]) => { const executorPage = operationExecutorPageId(); if (!executorPage) error = 'No operation executor page is available.'; else if (choosePage(executorPage)) editRow(row, action); }}
+             />
+            {/if}
           {/each}
         </div>
-      {:else if section === 'operations'}
-        <div class="page-heading"><div><div class="eyebrow">APPLICATION CONSOLE</div><h1>Operations</h1><p>Explore validated operations available in this workspace.</p></div><span class="live-pill" class:offline={liveStatus === 'offline'} class:reconnecting={liveStatus === 'reconnecting'}><span></span> {liveStatus === 'connected' ? 'Live updates' : liveStatus === 'reconnecting' ? 'Reconnecting' : liveStatus === 'offline' ? 'Live updates offline' : 'Connecting'}</span></div>
-        {#if manifest}
-          <div class="workspace-grid">
-            <OperationList {operations} selected={selectedOperation} selectedKind={selectedOperationKind} protocolVersion={manifest.protocolVersion} onSelect={chooseOperation} />
-            <section class="panel detail-panel">
-              {#if currentOperation}
-                <div class="panel-heading detail-heading"><div><div class="eyebrow">{currentOperation.kind.toUpperCase()}</div><h2>{currentVariant?.title ?? currentOperation.name}</h2><p>{currentVariant?.subtitle ?? currentOperation.name}</p></div><span class="kind-tag">{currentOperation.kind}</span></div>
-                {#if currentOperation.ui?.variants && Object.keys(currentOperation.ui.variants).length > 1}
-                  <div class="variant-tabs">{#each Object.entries(currentOperation.ui.variants) as [name, variant]}<button class:chosen={selectedVariant === name} onclick={() => useVariant(name)}>{variant.title}</button>{/each}</div>
-                {/if}
-                {#if currentVariant?.helpText}<p class="help-text">{currentVariant.helpText}</p>{/if}
-                <OperationInput operation={currentOperation} variant={currentVariant} {inputText} onInputChange={editOperationInput} />
-                <div class="actions"><button class="primary" onclick={() => runOperation()} disabled={loading}>{loading ? 'Running…' : currentOperation.kind === 'query' ? 'Run query' : currentOperation.kind === 'mutation' ? 'Run mutation' : 'Launch task'}</button>{#if isTask && manifest?.capabilities?.schedulesManage}<button class="secondary" onclick={() => scheduleDialogOpen = true}>Schedule task</button>{/if}</div>
-                {#if result !== null}
-                  {#if currentVariant?.renderer === 'table' && isPage(result)}
-                    <div class="table-result"><div class="result-heading"><h3>{result.totalCount ?? result.rows.length} results</h3><span>LIVE</span></div>
-                        {#if result.rows.length}<DataTable rows={result.rows} columns={rowColumns(result.rows[0]!)} actions={currentVariant?.actions ?? []} display={displayCell} onAction={(row, action) => editRow(row, action)} />{:else}<div class="empty"><p>No rows returned.</p></div>{/if}
-                      {#if result.nextCursor || cursorStack.length}<div class="pagination"><button class="secondary" onclick={previousPage} disabled={!cursorStack.length}>Previous</button><button class="secondary" onclick={nextPage} disabled={!result.nextCursor}>Next page</button></div>{/if}
-                    </div>
-                  {:else if currentVariant?.renderer.startsWith('chat')}
-                    <ChatView variant={currentVariant} {result} {inputText} contextKey={`${applicationId}:${workspaceId}:${selectedOperationKind}:${selectedOperation}:${selectedVariant}`} sending={chatSending} followToken={chatFollowToken} onSend={sendChatMessage} onAction={openChatAction} onLoadOlder={loadOperationOlderMessages} />
-                  {:else}<div class="result-heading"><h3>{isTask ? 'Launch result' : 'Result'}</h3><span>Rich JSON</span></div><pre class="result">{richJson(result)}</pre>{/if}
-                {/if}
-              {:else}<div class="empty"><h2>Select an operation</h2><p>Choose an operation to inspect or run it.</p></div>{/if}
-            </section>
-          </div>
-        {:else}<div class="loading-card">Loading workspace manifest…</div>{/if}
-      {:else if section === 'tasks'}
-        <div class="page-heading"><div><div class="eyebrow">BACKGROUND WORK</div><h1>Task runs</h1><p>Inspect queued, running and completed tasks.</p></div><button class="secondary" onclick={() => void loadSection()}>Refresh</button></div>
-         <div class="panel data-panel">{#if runs.length}<div class="data-table"><div class="data-header"><span>Task</span><span>Status</span><span>Progress</span><span>Started</span></div>{#each runs as run}<div class="data-row"><strong>{String(run.operation)}</strong><span class="status" class:success={run.status === 'succeeded'}>{String(run.status)}</span><span>{run.progress == null ? '—' : `${run.progress}%`}</span><span>{String(run.startedAt ?? '')}</span></div>{#if run.result !== undefined || run.error}<details class="run-details"><summary>View result / error</summary><pre>{richJson(run.result ?? run.error)}</pre></details>{/if}{/each}</div>{:else}<div class="empty"><h2>No task runs yet</h2><p>Launch a task from Operations to see its run here.</p></div>{/if}</div>
-       {:else if section === 'agents'}
-         <div class="page-heading"><div><div class="eyebrow">AGENT OBSERVABILITY</div><h1>Agent runs</h1><p>Inspect authorized runs, tool calls, model steps, and results.</p></div><button class="secondary" onclick={() => void applyAgentFilters()}>Refresh</button></div>
-         <div class="agent-filters panel">
-           <label>Agent<input bind:value={agentNameFilter} placeholder="Any agent" /></label>
-           <label>Status<select bind:value={agentStatusFilter}><option value="">Any status</option><option value="queued">Queued</option><option value="running">Running</option><option value="succeeded">Succeeded</option><option value="failed">Failed</option><option value="interrupted">Interrupted</option></select></label>
-           {#if manifest?.capabilities?.agentRunsReadAll}<label>Actor ID<input bind:value={agentActorFilter} placeholder="Any actor" /></label>{/if}
-           <label>Conversation ID<input bind:value={agentConversationFilter} placeholder="Any conversation" /></label>
-           <button class="secondary" onclick={() => void applyAgentFilters()}>Filter</button>
-         </div>
-         <div class="agent-layout">
-           <section class="panel agent-run-list" aria-label="Agent run list">
-             {#if agentRuns.length}
-               {#each agentRuns as run (run.id)}
-                 <button class="agent-run-row" class:selected={selectedAgentRun?.id === run.id} onclick={() => void chooseAgentRun(run)}>
-                   <strong>{run.agent}</strong><span class="status" class:success={run.status === 'succeeded'}>{run.status}</span>
-                   <small>{run.actorId} · {new Date(run.createdAt).toLocaleString()}</small>
-                 </button>
-               {/each}
-               {#if agentRunCursor}<button class="text-button load-more" onclick={() => void loadAgentRuns(agentRunCursor ?? undefined)}>Load more runs</button>{/if}
-             {:else}<div class="empty"><h2>No agent runs</h2><p>Runs visible to your account will appear here.</p></div>{/if}
-           </section>
-           <section class="panel agent-run-detail">
-             {#if selectedAgentRun}
-               <div class="panel-heading"><div><div class="eyebrow">{selectedAgentRun.agent}</div><h2>Run details</h2><p>{selectedAgentRun.id}</p></div><span class="status" class:success={selectedAgentRun.status === 'succeeded'}>{selectedAgentRun.status}</span></div>
-               <dl class="agent-metadata"><div><dt>Actor</dt><dd>{selectedAgentRun.actorId}</dd></div><div><dt>Created</dt><dd>{new Date(selectedAgentRun.createdAt).toLocaleString()}</dd></div><div><dt>Duration</dt><dd>{selectedAgentRun.startedAt && selectedAgentRun.finishedAt ? `${Date.parse(selectedAgentRun.finishedAt) - Date.parse(selectedAgentRun.startedAt)} ms` : '—'}</dd></div>{#if selectedAgentRun.conversationId}<div><dt>Conversation</dt><dd>{selectedAgentRun.conversationId}</dd></div>{/if}</dl>
-               {#if selectedAgentRun.error}<div class="alert"><p>{selectedAgentRun.error.code}: {selectedAgentRun.error.message}</p></div>{/if}
-               {#if selectedAgentRun.result !== undefined}<details class="run-details" open><summary>Final result</summary><pre>{richJson(selectedAgentRun.result)}</pre></details>{/if}
-               <div class="agent-trace-heading"><h3>Trace</h3><button class="text-button" onclick={() => void chooseAgentRun(selectedAgentRun)}>Refresh trace</button></div>
-               {#if agentEvents.length}<ol class="agent-trace">{#each agentEvents as event (event.id)}<li><div><strong>{event.type}</strong><time>{new Date(event.createdAt).toLocaleTimeString()}</time></div>{#if event.data !== undefined}<pre>{richJson(event.data)}</pre>{/if}</li>{/each}</ol>
-               {:else}<div class="empty"><p>No trace events are currently visible.</p></div>{/if}
-               {#if agentEventsCursor}<button class="text-button load-more" onclick={() => void loadMoreAgentEvents()}>Load later trace events</button>{/if}
-             {:else}<div class="empty"><h2>Select an agent run</h2><p>Trace fields are filtered by your assigned capabilities.</p></div>{/if}
-           </section>
-         </div>
-       {:else if section === 'schedules'}
-        <div class="page-heading"><div><div class="eyebrow">AUTOMATION</div><h1>Schedules</h1><p>Manage recurring and one-off task schedules.</p></div><button class="secondary" onclick={() => void loadSection()}>Refresh</button></div>
-          <div class="panel data-panel">{#if schedules.length}<div class="data-table"><div class="data-header schedule-cols"><span>Task</span><span>Pattern</span><span>Timezone</span><span>Next run</span><span>{manifest?.capabilities?.schedulesManage ? 'Manage' : ''}</span></div>{#each schedules as schedule}<div class="data-row schedule-cols"><strong>{String(schedule.operation)}</strong>{#if schedule.kind === 'recurring'}<input aria-label={`Cron for ${schedule.operation}`} value={scheduleDrafts[String(schedule.id)]?.cron ?? String(schedule.cron)} oninput={(event) => scheduleDrafts[String(schedule.id)] = { ...scheduleDrafts[String(schedule.id)], cron: event.currentTarget.value }} disabled={!manifest?.capabilities?.schedulesManage} />{:else}<span>{String(schedule.runAt)}</span>{/if}<input aria-label={`Timezone for ${schedule.operation}`} value={scheduleDrafts[String(schedule.id)]?.timezone ?? String(schedule.timezone)} oninput={(event) => scheduleDrafts[String(schedule.id)] = { ...scheduleDrafts[String(schedule.id)], timezone: event.currentTarget.value }} disabled={!manifest?.capabilities?.schedulesManage} /><span>{String(schedule.nextRunAt ?? '—')}</span>{#if manifest?.capabilities?.schedulesManage}<span class="schedule-actions"><button class="text-button" onclick={() => void saveSchedule(schedule)}>Save</button><button class="text-button" onclick={() => void toggleSchedule(schedule)}>{schedule.enabled ? 'Disable' : 'Enable'}</button><button class="text-button" onclick={() => void deleteSchedule(schedule.id)}>Remove</button></span>{/if}</div>{#if schedule.lastSkipReason}<div class="skip-reason">{String(schedule.lastSkipReason)}</div>{/if}{/each}</div>{:else}<div class="empty"><h2>No schedules</h2><p>Choose a task operation and schedule it from the operations console.</p></div>{/if}</div>
       {:else}
-        <div class="page-heading"><div><div class="eyebrow">AUDIT</div><h1>Operation history</h1><p>Recent execution outcomes for this workspace.</p></div><button class="secondary" onclick={() => void loadSection()}>Refresh</button></div>
-        <div class="panel data-panel">{#if history.length}<div class="data-table"><div class="data-header"><span>Operation</span><span>Kind</span><span>Status</span><span>Actor</span><span>Duration</span></div>{#each history as entry}<div class="data-row"><strong>{String(entry.operation)}</strong><span>{String(entry.kind)}</span><span class="status" class:success={entry.status === 'succeeded'}>{String(entry.status)}</span><span>{String(entry.actorId)}</span><span>{entry.durationMs == null ? '—' : `${entry.durationMs} ms`}</span></div>{/each}</div>{:else}<div class="empty"><h2>No operation history</h2><p>Successful and failed operations will appear here.</p></div>{/if}</div>
+          <div class="empty"><h1>Page unavailable</h1><p>This page is not present in the current workspace manifest.</p></div>
       {/if}
     </div>
   </main>
 </div>
 
-{#if scheduleDialogOpen && currentOperation?.kind === 'task'}
+{#if scheduleDialogOpen && currentScheduleTask}
   <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) scheduleDialogOpen = false; }}>
     <dialog open class="schedule-modal" aria-labelledby="schedule-title">
-      <div class="panel-heading"><div><div class="eyebrow">AUTOMATION</div><h2 id="schedule-title">Schedule {currentOperation.name}</h2><p>Runs use this workspace and your current identity.</p></div><button class="text-button" onclick={() => scheduleDialogOpen = false} aria-label="Close">×</button></div>
+      <div class="panel-heading"><div><div class="eyebrow">AUTOMATION</div><h2 id="schedule-title">Schedule a task</h2><p>Runs use this workspace and your current identity.</p></div><button class="text-button" onclick={() => scheduleDialogOpen = false} aria-label="Close">×</button></div>
       <div class="schedule-form">
+        <label class="field-label">Task<select value={scheduleTaskOperation} onchange={(event) => chooseScheduleTask(event.currentTarget.value)}>{#each operations.filter((operation) => operation.kind === 'task') as task}<option value={task.name}>{task.name}</option>{/each}</select></label>
+        <OperationInput operation={currentScheduleTask} variant={operationVariant(currentScheduleTask, operationView(currentScheduleTask)?.default ?? '')} inputText={scheduleTaskInputText} onInputChange={(value: string) => scheduleTaskInputText = value} />
         <label class="field-label">Schedule type<select bind:value={scheduleKind}><option value="recurring">Recurring</option><option value="once">One time</option></select></label>
         {#if scheduleKind === 'recurring'}<label class="field-label">Cron expression<input bind:value={scheduleCron} placeholder="0 9 * * *" /><span>Five fields: minute hour day month weekday.</span></label>{:else}<label class="field-label">Run at<input type="datetime-local" bind:value={scheduleRunAt} required /></label>{/if}
         <label class="field-label">Timezone<input bind:value={scheduleTimezone} required /></label>

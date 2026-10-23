@@ -1,8 +1,11 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { ChatAction, ChatActionMapping, ChatContentPart, ChatMessage } from '@workcore/core';
+  import ChatQueryView from './ChatQueryView.svelte';
+  import ChatLayout from './ChatLayout.svelte';
+  import { safeChatUrl, safeMarkdown } from './chat-data.js';
 
-  type OlderPage = { messages: ChatMessage[]; previousCursor: string | null };
+  type OlderPage = { items: ChatMessage[]; previousCursor: string | null };
   let {
     messages = [],
     previousCursor = null,
@@ -14,6 +17,9 @@
     emptyMessage = 'No messages yet.',
     onLoadOlder,
     onAction,
+    onQueryView,
+    onNavigate,
+    cacheNamespace = 'default',
   } = $props<{
     messages?: ChatMessage[];
     previousCursor?: string | null;
@@ -21,10 +27,13 @@
     followToken?: number;
     resetKey?: string;
     activeRuns?: Array<{ runId: string; status: string }>;
-    actionMappings?: Partial<Record<'editMessage' | 'deleteMessage' | 'createThread' | 'renameThread' | 'archiveThread' | 'retryAgent', ChatActionMapping>>;
+    actionMappings?: Record<string, ChatActionMapping>;
     emptyMessage?: string;
     onLoadOlder?: (cursor: string) => Promise<OlderPage>;
     onAction?: (action: ChatAction, mapping: ChatActionMapping) => void;
+    onQueryView?: (query: string, view: string | undefined, input: unknown) => Promise<unknown>;
+    onNavigate?: (page: string, state: Record<string, string>) => void;
+    cacheNamespace?: string;
   }>();
 
   let scrollNode = $state<HTMLDivElement>();
@@ -120,7 +129,7 @@
     try {
       const page = await onLoadOlder(cursor);
       if (requestResetKey !== resetKey || requestGeneration !== paginationGeneration) return;
-      loadedOlder = mergeMessages(page.messages, loadedOlder);
+      loadedOlder = mergeMessages(page.items, loadedOlder);
       hasLoadedOlder = true;
       nextOlderCursor = page.previousCursor && page.previousCursor !== cursor ? page.previousCursor : null;
       await tick();
@@ -216,16 +225,26 @@
                 {#each section.parts as rawPart}
                   {@const part = partRecord(rawPart)}
                   {#if part.type === 'text'}<p class="chat-text">{String(part.text ?? '') || (statusText(message.status) === 'streaming' ? 'Assistant is thinking…' : '')}</p>
-                  {:else if part.type === 'image'}<figure class="chat-attachment"><img src={String(part.url)} alt={String(part.alt ?? '')} loading="lazy" /><figcaption>{String(part.alt ?? '')}</figcaption></figure>
-                  {:else if part.type === 'link'}<p class="chat-text"><a href={String(part.url)} target="_blank" rel="noopener noreferrer">{String(part.label ?? part.url)}</a></p>
-                  {:else if part.type === 'file'}<p class="chat-file"><a href={String(part.url)} target="_blank" rel="noopener noreferrer">{String(part.name ?? part.url)}</a>{#if part.mimeType}<small>{String(part.mimeType)}</small>{/if}</p>
+                  {:else if part.type === 'markdown'}<p class="chat-text chat-markdown">{@html safeMarkdown(String(part.content ?? ''))}</p>
+                  {:else if part.type === 'image'}
+                    {@const url = safeChatUrl(String(part.url ?? ''))}
+                    <figure class="chat-attachment">{#if url}<img src={url} alt={String(part.alt ?? '')} loading="lazy" />{/if}<figcaption>{String(part.alt ?? '')}</figcaption></figure>
+                  {:else if part.type === 'link'}
+                    {@const url = safeChatUrl(String(part.url ?? ''))}
+                    <p class="chat-text">{#if url}<a href={url} target="_blank" rel="noopener noreferrer">{String(part.label ?? part.url)}</a>{:else}{String(part.label ?? part.url ?? '')}{/if}</p>
+                  {:else if part.type === 'file'}
+                    {@const url = safeChatUrl(String(part.url ?? ''))}
+                    <p class="chat-file">{#if url}<a href={url} target="_blank" rel="noopener noreferrer">{String(part.name ?? part.url)}</a>{:else}{String(part.name ?? part.url ?? '')}{/if}{#if part.mimeType}<small>{String(part.mimeType)}</small>{/if}</p>
+                  {:else if part.type === 'navigation'}<button class="chat-navigation" type="button" disabled={!onNavigate} onclick={() => onNavigate?.(String(part.page), part.state && typeof part.state === 'object' ? part.state as Record<string, string> : {})}>{String(part.label ?? 'Open')}</button>
                   {:else if part.type === 'tool'}<details class="chat-tool"><summary>{String(part.name)} · {String(part.state)}</summary>{#if part.input !== undefined}<pre>{format(part.input)}</pre>{/if}{#if part.output !== undefined}<pre>{format(part.output)}</pre>{/if}</details>
+                  {:else if part.type === 'queryView'}<ChatQueryView part={part as unknown as { query: string; view?: string; input?: unknown; title?: string }} cacheScope={resetKey} {cacheNamespace} load={onQueryView} />
+                  {:else if part.type === 'customLayout'}<section class="chat-layout-block"><strong>{String(part.title ?? 'Custom layout')} · v{String(part.version)}</strong><ChatLayout layout={part.layout} version={Number(part.version)} /></section>
                   {:else}<details class="chat-tool"><summary>{String(part.type)} content</summary><pre>{format(rawPart)}</pre></details>{/if}
                 {/each}
                 {#if section.data !== undefined}<details class="chat-tool"><summary>Section data</summary><pre>{format(section.data)}</pre></details>{/if}
               </div>
             {/each}
-            {#if message.actions?.length}<div class="chat-actions">{#each message.actions as action (action.id)}{@const mapping = actionMappings[action.id as keyof typeof actionMappings]}{#if mapping}<button class="secondary" disabled={action.disabled} title={action.disabledReason ?? action.confirm} onclick={() => onAction?.(action, mapping)}>{action.label}</button>{/if}{/each}</div>{/if}
+            {#if message.actions?.length}<div class="chat-actions">{#each message.actions as action (action.id)}{@const mapping = actionMappings[action.id]}{#if mapping}<button class="secondary" disabled={action.disabled} title={action.disabledReason ?? action.confirm} onclick={() => onAction?.(action, mapping)}>{action.label}</button>{/if}{/each}</div>{/if}
             {#if message.data !== undefined}<details class="chat-tool"><summary>Message data</summary><pre>{format(message.data)}</pre></details>{/if}
           {/if}
         </article>

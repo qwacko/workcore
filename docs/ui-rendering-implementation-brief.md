@@ -1,6 +1,12 @@
 # Semantic UI implementation brief
 
-Status: proposed design and implementation handoff, not implemented API documentation. Updated 15 October 2026.
+Status: accepted migration direction; implementation in progress. This remains a design/acceptance brief, not API documentation. Updated 16 October 2026.
+
+## Migration direction (decision, 16 October 2026)
+
+Treat the existing admin as a feature and workflow inventory, not as the architecture to preserve. There are no deployed application instances that require the beta UI contract, so compatibility with the legacy page/variant rendering model is not a migration goal. Keep the valuable operation execution, authorization, Standard Schema validation, codecs, typed clients, and demonstrated workflows; replace the parallel legacy UI definition/rendering paths with one canonical semantic model used by both built-in and application-authored pages. Temporary adapters may ease the migration, but should not become a second permanent UI architecture. Prefer a deliberate beta breaking change over indefinitely maintaining two renderers/contracts when that materially simplifies the result.
+
+This supersedes compatibility language below wherever it would require retaining the old UI as a permanent source of truth. Preserve server/API behavior unless the migration demonstrates a specific need to change it. Once migrated, update the compatibility matrix, public authoring docs, and release notes to describe the new canonical contract.
 
 ## 1. Purpose and instructions to the implementing agent
 
@@ -28,7 +34,7 @@ Success is less application-specific frontend code with dependable data/form lif
 
 | Location | Relevant existing behaviour |
 | --- | --- |
-| `packages/core/src/index.ts` | `defineWorkspace`, inferred operations, `UiVariant`/`UiMetadata`, `AdminBlock`/`AdminPage`/`AdminConfiguration`, `validateDefinition`, `makeManifest`, permission filtering, HTTP execution and codecs |
+| `packages/core/src/index.ts` | `defineWorkspace`, inferred operations, `OperationViewVariant`/`OperationViews`, semantic `AdminBlock`/`AdminPage`/`AdminConfiguration`, `validateDefinition`, `makeManifest`, permission filtering, HTTP execution and codecs |
 | `packages/core/src/index.test.ts` | Runtime, manifest, permission, schema conversion, and definition-validation tests |
 | `packages/client/src/index.ts` | `WorkcoreManifest`, fetch transport, typed operation calls, query subscriptions |
 | `packages/admin/src/ui/App.svelte` | Navigation, query/form orchestration, page queries, cursors, invalidation, generation guards, task/resource/chat behaviour |
@@ -516,7 +522,9 @@ The shipped admin is precompiled. A descriptor cannot make it display an arbitra
 
 Escape text, validate link/image schemes and resource policies, and avoid direct raw-HTML rendering. Trusted custom code is not a sandboxed security boundary.
 
-## 13. Wire versioning, compatibility, and rich values
+## 13. Earlier wire-compatibility proposal (superseded)
+
+The section below records the earlier additive-compatibility exploration only. Decision 16 October 2026 at the top of this brief supersedes it: the beta admin uses manifest protocol v2, and semantic pages plus operation presentations are the only serialized UI contract. There is no legacy `pages`/operation-UI projection or protocol-v1 admin fallback.
 
 Do not silently mutate protocol-v1 legacy UI fields to contain callbacks, new block kinds, or structurally incompatible variants that an older admin will misinterpret.
 

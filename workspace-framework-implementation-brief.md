@@ -311,7 +311,7 @@ type Page<Row> = {
 ```
 
 - `query`: validated JSON result with a structured JSON viewer.
-- `tableQuery`: `Page<Row>` with declared row key, columns and optional row actions. Input defines bounded limit, cursor and supported filters/sort.
+- `cursorTableQuery` / `offsetTableQuery`: row-page output contracts for cursor and offset pagination. Input validators declare bounded limits and the matching cursor or offset fields; Zod adapters can construct these schemas.
 - Mutation/task forms: generated from input schemas, with validation and pending/result/error states.
 
 Named `ui.variants` can change title, subtitle, renderer, columns, help text and form layout. Omitting a selection uses `ui.default`; an unknown named variant is an error. A row action explicitly references a mutation, optional variant and bindings. Prefill only declared fields; use an explicit detail query when more edit data is needed. Required form fields must be collectable or supplied by validated bindings.

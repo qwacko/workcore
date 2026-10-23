@@ -1,9 +1,79 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createFetchTransport } from './index.js';
+import { createFetchTransport, validateSemanticInterface, type WorkcoreManifest } from './index.js';
 import type { JsonValue, WireCodec } from '@workcore/core';
 
 describe('fetch transport', () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it('validates semantic UI versions, features, references and safe field names', () => {
+    const manifest = {
+      protocolVersion: 2, applicationId: 'demo', operations: [
+        { name: 'rows', kind: 'query', input: { type: 'object', properties: { status: { type: 'string', enum: ['planned', 'complete'] } } }, output: {} },
+        { name: 'edit', kind: 'mutation', input: {}, output: {} },
+      ],
+      interface: { version: 1, requiredFeatures: ['collection-editor-v1', 'operation-views-v1'], operationViews: [{ operation: 'rows', kind: 'query', default: 'cards', variants: { cards: { title: 'Rows', renderer: 'table', rowKey: 'id', collection: { itemKey: 'id', paginationMode: 'offset', columns: [{ field: 'title', filter: { type: 'text', targetParam: 'search' } }], editor: { mutation: 'edit' } } } } }, { operation: 'edit', kind: 'mutation', default: 'form', variants: { form: { title: 'Edit', renderer: 'form' } } }], pages: [{ id: 'home', title: 'Home', state: { status: { type: 'select', label: 'Status', default: '', options: [{ value: '', label: 'All' }, { value: 'planned', label: 'Planned' }, { value: 'complete', label: 'Complete' }] } }, blocks: [{ id: 'rows', type: 'query', operation: 'rows', variant: 'cards', inputBindings: { status: { state: 'status' } } }] }] },
+    } as WorkcoreManifest;
+    expect(validateSemanticInterface(manifest)?.operationViews?.[0]?.default).toBe('cards');
+    expect(validateSemanticInterface(manifest)?.operationViews?.[0]?.variants.cards?.collection?.paginationMode).toBe('offset');
+    const invalidSelect = structuredClone(manifest);
+    invalidSelect.interface!.pages[0]!.state!.status = { type: 'select', label: 'Status', default: 'archived', options: [{ value: 'archived', label: 'Archived' }] };
+    expect(() => validateSemanticInterface(invalidSelect)).toThrow(/select state 'status' is incompatible with query input 'status'/);
+    expect(() => validateSemanticInterface({ ...manifest, interface: { ...manifest.interface!, pages: [{ id: 'home', title: 'Home', blocks: [{ id: 'rows', type: 'query', operation: 'rows', variant: 'missing' }] }] } })).toThrow(/unavailable query variant/);
+    expect(() => validateSemanticInterface({ ...manifest, interface: { ...manifest.interface!, requiredFeatures: ['unknown'] } })).toThrow(/Unsupported required semantic UI feature/);
+    const unsafe = structuredClone(manifest);
+    unsafe.interface!.operationViews[0]!.variants.cards.collection!.itemKey = '__proto__';
+    expect(() => validateSemanticInterface(unsafe)).toThrow(/invalid collection/);
+  });
+
+  it('requires paired operation catalog and executor blocks with the declared feature', () => {
+    const manifest = {
+      protocolVersion: 2, applicationId: 'demo', operations: [],
+      interface: { version: 1, requiredFeatures: ['operation-catalog-v1'], operationViews: [], pages: [{ id: 'operations', title: 'Operations', blocks: [
+        { id: 'catalog', type: 'operation-catalog', selection: 'main' },
+        { id: 'executor', type: 'operation-executor', selection: 'main' },
+      ] }] },
+    } as WorkcoreManifest;
+    expect(validateSemanticInterface(manifest)?.pages[0]?.blocks).toHaveLength(2);
+    const { interface: document } = manifest;
+    expect(() => validateSemanticInterface({ ...manifest, interface: { ...document!, pages: [{ ...document!.pages[0]!, blocks: [document!.pages[0]!.blocks[0]!] }] } })).toThrow(/requires one catalog and one executor/);
+  });
+
+  it('accepts validated chart operation presentations', () => {
+    const manifest = {
+      protocolVersion: 2,
+      applicationId: 'charts',
+      operations: [{
+        name: 'metrics', kind: 'query', input: { type: 'object', properties: {} },
+        output: {
+          type: 'object', properties: {
+            rows: { type: 'array', items: { type: 'object', properties: { day: { type: 'string' }, count: { type: 'integer' } } } },
+          },
+        },
+      }],
+      interface: { version: 1, requiredFeatures: ['operation-views-v1'], operationViews: [{ operation: 'metrics', kind: 'query', default: 'trend', variants: { trend: { title: 'Trend', renderer: 'chart', chart: { xField: 'day', yField: 'count' } } } }], pages: [] },
+    } as WorkcoreManifest;
+    expect(validateSemanticInterface(manifest).operationViews[0]?.variants.trend?.renderer).toBe('chart');
+    const invalid = structuredClone(manifest);
+    delete invalid.interface!.operationViews[0]!.variants.trend!.chart;
+    expect(() => validateSemanticInterface(invalid)).toThrow(/chart presentation .* is malformed/);
+  });
+
+  it('validates versioned custom component descriptors and their required feature', () => {
+    const manifest = {
+      protocolVersion: 2, applicationId: 'demo', operations: [],
+      interface: { version: 1, requiredFeatures: ['custom-placeholder-v1'], operationViews: [], defaultPage: 'home', pages: [{ id: 'home', title: 'Home', blocks: [
+        { id: 'chart', type: 'custom', component: 'demo/activity-chart', version: 1, props: { metric: 'count' } },
+      ] }] },
+    } as WorkcoreManifest;
+    expect(validateSemanticInterface(manifest)?.pages[0]?.blocks[0]).toMatchObject({ type: 'custom', component: 'demo/activity-chart' });
+    expect(() => validateSemanticInterface({ ...manifest, interface: { ...manifest.interface!, requiredFeatures: [] } })).toThrow(/custom-placeholder-v1/);
+    expect(() => validateSemanticInterface({ ...manifest, interface: { ...manifest.interface!, defaultPage: 'missing' } })).toThrow(/Semantic defaultPage/);
+    const invalid = structuredClone(manifest);
+    const custom = invalid.interface!.pages[0]!.blocks[0]!;
+    if (custom.type !== 'custom') throw new Error('Expected custom component descriptor');
+    custom.component = '../remote';
+    expect(() => validateSemanticInterface(invalid)).toThrow(/invalid custom component descriptor/);
+  });
 
   it('uses JSON operation endpoints and unwraps validated results', async () => {
     let received: RequestInit | undefined;
@@ -19,6 +89,37 @@ describe('fetch transport', () => {
     });
     expect(result.rows[0]?.id).toBe('a');
     expect(JSON.parse(String(received?.body))).toEqual({ applicationId: 'demo', workspaceId: 'one', operation: 'items', input: { limit: 10 } });
+  });
+
+  it('exposes only typed platform-resource endpoints and preserves structured errors', async () => {
+    const calls: Array<{ path: string; method: string; body?: unknown }> = [];
+    const transport = createFetchTransport({ baseUrl: '/resource-api', fetch: async (input, init) => {
+      const url = new URL(String(input), 'http://workcore.test');
+      calls.push({ path: `${url.pathname}${url.search}`, method: init?.method ?? 'GET', ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }) });
+      if (url.pathname === '/resource-api/tasks') return Response.json({ runs: [] });
+      if (url.pathname === '/resource-api/history') return Response.json({ entries: [] });
+      if (url.pathname === '/resource-api/schedules' && init?.method === 'POST') return Response.json({ schedule: { id: 's1' } });
+      if (url.pathname.startsWith('/resource-api/schedules/') && init?.method === 'PATCH') return Response.json({ schedule: { id: 's1' } });
+      if (url.pathname.startsWith('/resource-api/schedules/') && init?.method === 'DELETE') return Response.json({ ok: true });
+      return Response.json({ schedules: [] });
+    } });
+    const resources = transport.resources!;
+    await resources.taskRuns('demo app', 'workspace/one', 25);
+    await resources.history('demo app', 'workspace/one');
+    await resources.createSchedule('demo app', 'workspace/one', { operation: 'rebuild', input: { id: 'a1' }, kind: 'recurring', cron: '0 9 * * *', timezone: 'UTC' });
+    await resources.updateSchedule('demo app', 'workspace/one', 'id/with space', { enabled: false });
+    await resources.deleteSchedule('demo app', 'workspace/one', 'id/with space');
+    expect(calls.map(({ path, method }) => [path, method])).toEqual([
+      ['/resource-api/tasks?applicationId=demo+app&workspaceId=workspace%2Fone&limit=25', 'GET'],
+      ['/resource-api/history?applicationId=demo+app&workspaceId=workspace%2Fone&limit=50', 'GET'],
+      ['/resource-api/schedules', 'POST'],
+      ['/resource-api/schedules/id%2Fwith%20space?applicationId=demo+app&workspaceId=workspace%2Fone', 'PATCH'],
+      ['/resource-api/schedules/id%2Fwith%20space?applicationId=demo+app&workspaceId=workspace%2Fone', 'DELETE'],
+    ]);
+    expect(calls[2]?.body).toMatchObject({ operation: 'rebuild', input: { id: 'a1' }, kind: 'recurring' });
+
+    const forbidden = createFetchTransport({ fetch: async () => Response.json({ error: { code: 'FORBIDDEN', message: 'Schedule management denied' } }, { status: 403 }) });
+    await expect(forbidden.resources!.deleteSchedule('demo', 'workspace', 's1')).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
   });
 
   it('surfaces structured API errors', async () => {

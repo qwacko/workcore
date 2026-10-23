@@ -146,13 +146,16 @@ export type AgentDefinition<App, S extends AnySchema = AnySchema> = {
   maxOutputTokens?: number;
 };
 
-export interface UiVariant {
+export interface OperationViewVariant {
   title: string;
   subtitle?: string;
   helpText?: string;
-  renderer: 'table' | 'json' | 'form' | 'chat' | 'chat-messages' | 'chat-threads' | 'chat-thread';
+  renderer: 'table' | 'json' | 'chart' | 'form' | 'chat' | 'chat-messages' | 'chat-threads' | 'chat-thread';
   rowKey?: string;
   columns?: readonly string[];
+  chart?: { xField: string; yField: string; seriesField?: string };
+  /** Collection behavior attached to this query view; query views own their filters and editor. */
+  collection?: CollectionViewOptions;
   actions?: readonly {
     label: string;
     mutation: string;
@@ -161,28 +164,41 @@ export interface UiVariant {
   }[];
   layout?: Record<string, unknown>;
   chat?: {
-    sendMutation: string;
-    messageInput: string;
+    /** Omit composer settings for read-only chat/timeline views. */
+    sendMutation?: string;
+    messageInput?: string;
     conversationIdInput?: string;
     conversationQueryInput?: string;
     conversationIdPath?: string;
     conversationIdResultPath?: string;
+    placeholder?: string;
+    submitLabel?: string;
+    rows?: number;
+    /** Additional send-mutation inputs sourced from the current conversation/thread result. */
+    inputBindings?: Record<string, { fromConversation: string } | { fromThread: string } | { value: JsonValue }>;
     /** Optional mutation mappings for standard chat actions. Execution and authorization remain normal mutations. */
-    actions?: Partial<Record<'editMessage' | 'deleteMessage' | 'createThread' | 'renameThread' | 'archiveThread' | 'retryAgent', ChatActionMapping>>;
+    actions?: Record<string, ChatActionMapping>;
     autoScroll?: 'always' | 'when-near-bottom' | 'never';
   };
   /** Mutation mappings usable by message and thread list renderers without a composer. */
-  chatActions?: Partial<Record<'editMessage' | 'deleteMessage' | 'createThread' | 'renameThread' | 'archiveThread' | 'retryAgent', ChatActionMapping>>;
-  chatList?: { searchInput?: string; filterInput?: string; threadIdPath?: string; itemTitlePath?: string };
+  chatActions?: Record<string, ChatActionMapping>;
+  chatList?: { searchInput?: string; threadQuery?: string; threadIdInput?: string; detailVariant?: string };
 }
 
 export type ChatMessageStatus = { delivery?: 'pending' | 'sent' | 'failed'; visibility?: 'visible' | 'deleted' | 'hidden'; activity?: 'queued' | 'running' | 'complete' | 'interrupted' } & Record<string, JsonValue | undefined>;
 export type ChatContentPart =
   | { id?: string; type: 'text'; text: string }
+  | { id?: string; type: 'markdown'; content: string }
   | { id?: string; type: 'image'; url: string; alt?: string; mimeType?: string; data?: JsonValue }
   | { id?: string; type: 'file'; url: string; name: string; mimeType?: string; size?: number; data?: JsonValue }
   | { id?: string; type: 'link'; url: string; label?: string; data?: JsonValue }
+  /** Navigate to a manifest-declared page and update only that page's declared string state. */
+  | { id?: string; type: 'navigation'; page: string; label: string; state?: Record<string, string> }
   | { id?: string; type: 'tool'; name: string; state: 'input-available' | 'output-available' | 'output-error'; input?: JsonValue; output?: JsonValue }
+  /** A named, authorized Workcore query/view; inputs are validated by that query. */
+  | { id?: string; type: 'queryView'; query: string; view?: string; input?: JsonValue; title?: string }
+  /** Declarative, versioned layout data; never executable code. */
+  | { id?: string; type: 'customLayout'; version: number; layout: JsonValue; title?: string }
   | { id?: string; type: string; [key: string]: JsonValue | undefined };
 export type ChatMessageSection = { id: string; title?: string; parts: ChatContentPart[]; data?: JsonValue };
 export type ChatActor = { id: string; kind: 'person' | 'agent' | 'system' | string; name?: string; avatarUrl?: string; data?: JsonValue };
@@ -204,39 +220,87 @@ export type ChatMessage = {
   data?: JsonValue;
 };
 
-export type ChatAction = { id: string; label: string; mutation: string; variant?: string; input?: JsonValue; disabled?: boolean; disabledReason?: string; confirm?: string };
+export type ChatAction = { id: string; label: string; input?: JsonValue; disabled?: boolean; disabledReason?: string; confirm?: string };
 export type ChatActionMapping = { mutation: string; variant?: string; bind?: Record<string, { fromAction: string }> };
 export type ChatThread = { id: string; title?: string; description?: string; status?: string; createdAt?: string; updatedAt?: string; participants?: ChatActor[]; lastMessage?: ChatMessage; messageCount?: number; unreadCount?: number; actions?: ChatAction[]; data?: JsonValue };
 export type ChatPage<T, D = JsonValue> = { items: T[]; nextCursor: string | null; previousCursor?: string | null; totalCount?: number; data?: D };
-export type ChatMessagePage<D = JsonValue> = ChatPage<ChatMessage, D> & { messages?: ChatMessage[] };
-export type ChatThreadPage<D = JsonValue> = ChatPage<ChatThread, D> & { threads?: ChatThread[] };
-export type ChatQueryResult = {
-  conversation: { id: string; title?: string; revision?: number; data?: JsonValue } | null;
-  messages: ChatMessage[];
+export type ChatConversation = { id: string; title?: string; revision?: number; data?: JsonValue };
+export type ChatMessagePage<D = JsonValue, C extends ChatConversation = ChatConversation> = ChatPage<ChatMessage, D> & {
+  conversation?: C | null;
+  thread?: ChatThread | null;
   activeRuns?: Array<{ runId: string; status: string }>;
-  nextCursor?: string | null;
-  previousCursor?: string | null;
-  data?: JsonValue;
 };
+export type ChatThreadPage<D = JsonValue> = ChatPage<ChatThread, D>;
+export type ChatQueryResult<D = JsonValue, C extends ChatConversation = ChatConversation> = ChatMessagePage<D, C>;
 
 
-export interface UiMetadata {
+export interface OperationViews {
   default: string;
-  variants: Record<string, UiVariant>;
+  variants: Record<string, OperationViewVariant>;
 }
 
 export type AdminBlock =
-  | { id: string; type: 'query'; operation: string; variant?: string; input?: Record<string, unknown> }
+  | { id: string; type: 'operation-catalog'; selection: string }
+  | { id: string; type: 'operation-executor'; selection: string }
+   | { id: string; type: 'query'; operation: string; variant?: string; input?: Record<string, unknown>; inputBindings?: Record<string, { state: string }> }
   | { id: string; type: 'mutation-form'; operation: string; variant?: string; title?: string }
   | { id: string; type: 'task-launcher'; operation: string; title?: string }
+  | { id: string; type: 'custom'; component: string; version: number; title?: string; description?: string; props?: JsonValue }
   | { id: string; type: 'resource'; resource: 'tasks' | 'schedules' | 'history' | 'agents'; title?: string };
+
+/** Renderer-independent collection behavior attached to an operation view. */
+export interface CollectionViewOptions {
+  itemKey: string;
+  /** Field paths are dot-separated object keys with numeric array indices. */
+  columns: readonly { field: string; label?: string; display?: 'text' | 'number' | 'date' | 'datetime' | 'boolean' | 'badge'; editable?: boolean | { targetInput: string }; filter?: { type: 'text' | 'select'; targetParam?: string } }[];
+  titleField?: string;
+  subtitleField?: string;
+  /** Preferred layout for this named collection profile. */
+  presentation?: 'responsive' | 'table' | 'cards';
+  pagination?: boolean;
+  /** Pagination contract used by the query behind this collection. */
+  paginationMode?: 'cursor' | 'offset';
+  editor?: { mutation: string; variant?: string; identity?: { rowField: string; targetInput: string } };
+  /** Named mutations available from each row; these open the mutation's normal generated form. */
+  actions?: readonly NonNullable<OperationViewVariant['actions']>[number][];
+}
+
+export type CollectionViewOptionsFor<Mutations extends object> = Omit<CollectionViewOptions, 'editor'> & {
+  editor?: Omit<NonNullable<CollectionViewOptions['editor']>, 'mutation'> & { mutation: keyof Mutations & string };
+  actions?: readonly UiActionFor<Mutations>[];
+};
+
+/** Permission-projected named operation presentations consumed by semantic renderers. */
+export interface CompiledOperationPresentation extends OperationViews {
+  operation: string;
+  kind: OperationKind;
+}
+
+/** Canonical renderer-independent UI envelope for manifest protocol v2. */
+export interface SemanticInterfaceDocument {
+  version: 1;
+  requiredFeatures: string[];
+  pages: SemanticManifestPage[];
+  defaultPage?: string;
+  operationViews: CompiledOperationPresentation[];
+}
+
+export interface SemanticManifestPage extends Omit<AdminManifestPage, 'layout'> {
+  layout?: 'stacked' | 'two-column' | 'overview' | 'page' | 'stack' | 'grid';
+}
 
 export interface AdminPage {
   title: string;
   description?: string;
   layout?: 'stacked' | 'two-column' | 'overview';
+  /** Page-owned, JSON-safe state exposed as labelled controls and available to bound query inputs. */
+  state?: Record<string, AdminPageState>;
   blocks: readonly AdminBlock[];
 }
+
+export type AdminPageState =
+  | { type: 'text'; label: string; default: string }
+  | { type: 'select'; label: string; default: string; options: readonly { value: string; label: string }[] };
 
 export interface AdminConfiguration {
   builtins?: Partial<Record<'operations' | 'tasks' | 'schedules' | 'history' | 'agents', boolean>>;
@@ -245,16 +309,68 @@ export interface AdminConfiguration {
 }
 
 type AdminBlockFor<Queries extends string, Mutations extends string, Tasks extends string> =
-  | { id: string; type: 'query'; operation: Queries; variant?: string; input?: Record<string, unknown> }
+  | { id: string; type: 'operation-catalog'; selection: string }
+  | { id: string; type: 'operation-executor'; selection: string }
+   | { id: string; type: 'query'; operation: Queries; variant?: string; input?: Record<string, unknown>; inputBindings?: Record<string, { state: string }> }
   | { id: string; type: 'mutation-form'; operation: Mutations; variant?: string; title?: string }
   | { id: string; type: 'task-launcher'; operation: Tasks; title?: string }
+  | { id: string; type: 'custom'; component: string; version: number; title?: string; description?: string; props?: JsonValue }
   | { id: string; type: 'resource'; resource: 'tasks' | 'schedules' | 'history' | 'agents'; title?: string };
+
+type AdminBlockForPage<Queries extends string, Mutations extends string, Tasks extends string, StateNames extends string> =
+  | (Extract<AdminBlockFor<Queries, Mutations, Tasks>, { type: 'query' }> & { inputBindings?: Record<string, { state: StateNames }> })
+  | Exclude<AdminBlockFor<Queries, Mutations, Tasks>, { type: 'query' }>;
 
 type AdminConfigurationFor<Queries extends string, Mutations extends string, Tasks extends string> = Omit<AdminConfiguration, 'pages'> & {
   pages?: Record<string, Omit<AdminPage, 'blocks'> & { blocks: readonly AdminBlockFor<Queries, Mutations, Tasks>[] }>;
 };
 
-export interface AdminManifestPage extends AdminPage {
+type SemanticQueries<Queries extends object, Mutations extends object, Tasks extends object> = {
+  [Name in keyof Queries & string]: {
+    view<const Bindings extends Record<string, { state: string }> = Record<never, never>>(variant: string, options: Omit<Extract<AdminBlockFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>, { type: 'query' }>, 'type' | 'operation' | 'variant' | 'inputBindings'> & {
+      id: string; variant?: string; input?: SchemaInput<Queries[Name]>;
+      inputBindings?: Bindings;
+    }): Omit<Extract<AdminBlockFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>, { type: 'query' }>, 'inputBindings'> & { inputBindings?: Bindings };
+  };
+};
+type SemanticAuthoredPage<Queries extends object, Mutations extends object, Tasks extends object, State extends Record<string, AdminPageState>> = Omit<AdminPage, 'blocks' | 'state'> & {
+  state?: State;
+  blocks: readonly AdminBlockForPage<keyof Queries & string, keyof Mutations & string, keyof Tasks & string, keyof State & string>[];
+};
+
+function createSemanticAdminContext<Queries extends object, Mutations extends object, Tasks extends object>(
+  queryOperations: Partial<Record<keyof Queries & string, unknown>>,
+  mutationOperations: Partial<Record<keyof Mutations & string, unknown>>,
+  taskOperations: Partial<Record<keyof Tasks & string, unknown>>,
+): SemanticAdminContext<Queries, Mutations, Tasks> {
+  const queries = Object.fromEntries(Object.keys(queryOperations).map((name) => [name, {
+    view: (variant: string, options: Record<string, unknown>) => ({ ...options, type: 'query' as const, operation: name, variant }),
+  }])) as unknown as SemanticQueries<Queries, Mutations, Tasks>;
+  const mutations = Object.fromEntries(Object.keys(mutationOperations).map((name) => [name, { name }])) as SemanticMutations<Mutations>;
+  const tasks = Object.fromEntries(Object.keys(taskOperations).map((name) => [name, { name }])) as SemanticTasks<Tasks>;
+  return { ui: {
+    page: (page) => page,
+    operationCatalog: (value) => ({ ...value, type: 'operation-catalog' as const }),
+    operationExecutor: (value) => ({ ...value, type: 'operation-executor' as const }),
+  }, queries, mutations, tasks };
+}
+type SemanticMutations<Mutations extends object> = { [Name in keyof Mutations & string]: { readonly name: Name } };
+type SemanticTasks<Tasks extends object> = { [Name in keyof Tasks & string]: { readonly name: Name } };
+export interface SemanticAdminContext<Queries extends object, Mutations extends object, Tasks extends object> {
+  ui: {
+    page<State extends Record<string, AdminPageState> = Record<never, never>>(page: SemanticAuthoredPage<Queries, Mutations, Tasks, State>): SemanticAuthoredPage<Queries, Mutations, Tasks, State>;
+    operationCatalog(value: { id: string; selection: string }): Extract<AdminBlockFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>, { type: 'operation-catalog' }>;
+    operationExecutor(value: { id: string; selection: string }): Extract<AdminBlockFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>, { type: 'operation-executor' }>;
+  };
+  queries: SemanticQueries<Queries, Mutations, Tasks>;
+  mutations: SemanticMutations<Mutations>;
+  tasks: SemanticTasks<Tasks>;
+}
+type AdminAuthoring<Queries extends object, Mutations extends object, Tasks extends object> = AdminConfigurationFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>
+  | ((context: SemanticAdminContext<Queries, Mutations, Tasks>) => AdminConfigurationFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>);
+
+export interface AdminManifestPage extends Omit<AdminPage, 'layout'> {
+  layout?: AdminPage['layout'] | 'page' | 'stack' | 'grid';
   id: string;
   builtin?: boolean;
 }
@@ -264,7 +380,7 @@ type CommonDefinition<App, S extends AnySchema, O extends AnySchema, Kind extend
   output: O;
   permission?: Permission<App, OutputOf<S>>;
   api?: boolean;
-  ui?: UiMetadata;
+  views?: OperationViews;
   handler: (args: OperationCallContext<App, OutputOf<S>, Tools>) => OutputOf<O> | Promise<OutputOf<O>>;
   readonly kind?: Kind;
 };
@@ -314,15 +430,19 @@ type AgentMap<App, Inputs extends object, Queries extends object, Mutations exte
   }
 };
 type UiActionFor<Mutations extends object> = {
-  [Name in keyof Mutations & string]: Omit<NonNullable<UiVariant['actions']>[number], 'mutation' | 'bind'> & {
+  [Name in keyof Mutations & string]: Omit<NonNullable<OperationViewVariant['actions']>[number], 'mutation' | 'bind'> & {
     mutation: Name;
     bind?: SchemaInput<Mutations[Name]> extends object
       ? Partial<Record<keyof SchemaInput<Mutations[Name]> & string, { fromRow: string }>>
       : never;
   };
 }[keyof Mutations & string];
-type UiMetadataFor<Mutations extends object> = Omit<UiMetadata, 'variants'> & {
-  variants: Record<string, Omit<UiVariant, 'actions'> & { actions?: readonly UiActionFor<Mutations>[] }>;
+type OperationViewVariantFor<Mutations extends object> = Omit<OperationViewVariant, 'actions' | 'collection'> & {
+  actions?: readonly UiActionFor<Mutations>[];
+  collection?: CollectionViewOptionsFor<Mutations>;
+};
+type OperationViewsFor<Mutations extends object> = Omit<OperationViews, 'variants'> & {
+  variants: Record<string, OperationViewVariantFor<Mutations>>;
 };
 
 type DefinitionOperationCaller<
@@ -345,7 +465,7 @@ type DefinitionOperationMap<
     output: ValidationSchema<unknown, Outputs[K]>;
     permission?: Permission<App, SchemaOutput<NoInfer<Inputs[K]>>>;
     api?: boolean;
-    ui?: UiMetadataFor<Mutations>;
+    views?: OperationViewsFor<Mutations>;
     handler: (args: OperationCallContext<App, SchemaOutput<NoInfer<Inputs[K]>>, Tools>) => NoInfer<Outputs[K]> | Promise<NoInfer<Outputs[K]>>;
     readonly kind?: Kind;
   } & (Kind extends 'task' ? { triggers?: { mutations?: readonly (keyof Mutations & string)[]; mapInput?: (event: MutationSuccessEvent<keyof Mutations & string>) => SchemaInput<NoInfer<Inputs[K]>> } } : {});
@@ -361,7 +481,7 @@ type DefinedOperationMap<
     output: ValidationSchema<unknown, Outputs[K]>;
     permission?: Permission<App, SchemaOutput<Inputs[K]>>;
     api?: boolean;
-    ui?: UiMetadataFor<Mutations>;
+    views?: OperationViewsFor<Mutations>;
     handler: (args: OperationCallContext<App, SchemaOutput<Inputs[K]>, Tools>) => Outputs[K] | Promise<Outputs[K]>;
     readonly kind: Kind;
   } & (Kind extends 'task' ? { triggers?: { mutations?: readonly (keyof Mutations & string)[]; mapInput?: (event: MutationSuccessEvent<keyof Mutations & string>) => SchemaInput<Inputs[K]> } } : {});
@@ -392,7 +512,7 @@ type WorkspaceConfiguration<App, Id extends string,
   AuthSchema extends AnySchema | undefined,
 > = {
   id: Id;
-  admin?: AdminConfigurationFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>;
+  admin?: AdminAuthoring<Queries, Mutations, Tasks>;
   authorization?: AuthSchema extends AnySchema ? AuthorizationConfiguration<AuthSchema> : undefined;
   queries?: DefinitionOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>, NoInfer<Agents>>, 'query', NoInfer<Mutations>>;
   mutations?: DefinitionOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>, NoInfer<Agents>>, 'mutation', NoInfer<Mutations>>;
@@ -400,8 +520,113 @@ type WorkspaceConfiguration<App, Id extends string,
   agents?: AgentMap<App, Agents, Queries, Mutations, Tasks>;
 };
 
+function generatedCollectionView(inputSchema: AnySchema, outputSchema: AnySchema): CollectionViewOptions | undefined {
+  const output = getJsonSchema(outputSchema, 'output');
+  const outputProperties = output.properties && typeof output.properties === 'object' ? output.properties as Record<string, unknown> : {};
+  const rows = outputProperties.rows as { type?: unknown; items?: { properties?: Record<string, unknown> } } | undefined;
+  const input = getJsonSchema(inputSchema, 'input');
+  const inputProperties = input.properties && typeof input.properties === 'object' ? input.properties as Record<string, { type?: unknown; enum?: unknown }> : {};
+  const limit = inputProperties.limit as { type?: unknown; minimum?: unknown; maximum?: unknown } | undefined;
+  const itemProperties = rows?.items?.properties;
+  const cursorMode = !!outputProperties.nextCursor && inputProperties.cursor?.type === 'string';
+  const offset = inputProperties.offset as { type?: unknown; minimum?: unknown } | undefined;
+  const offsetMode = !!outputProperties.totalCount && offset?.type === 'integer' && typeof offset.minimum === 'number' && offset.minimum >= 0;
+  if (rows?.type !== 'array' || !itemProperties?.id || (!cursorMode && !offsetMode) || !limit
+    || !['integer', 'number'].includes(String(limit.type)) || typeof limit.minimum !== 'number' || limit.minimum < 1
+    || typeof limit.maximum !== 'number' || limit.maximum < limit.minimum || limit.maximum > 200) return undefined;
+  const required = (input.required as string[] | undefined) ?? [];
+  const columns = Object.entries(itemProperties).flatMap(([field, rawSchema]) => {
+    const schema = rawSchema as { type?: unknown; format?: unknown };
+    if (!['string', 'number', 'integer', 'boolean'].includes(String(schema.type))) return [];
+    const filter = inputProperties[field];
+    const optional = !required.includes(field);
+    return [{
+      field,
+      ...(schema.format === 'date-time' ? { display: 'datetime' as const } : schema.format === 'date' ? { display: 'date' as const } : schema.type === 'boolean' ? { display: 'boolean' as const } : schema.type === 'number' || schema.type === 'integer' ? { display: 'number' as const } : {}),
+      ...(filter?.type === 'string' && optional ? { filter: { type: 'text' as const } } : filter && Array.isArray(filter.enum) && optional ? { filter: { type: 'select' as const } } : {}),
+    }];
+  });
+  const title = columns.find((column) => column.field === 'title')
+    ?? columns.find((column) => column.field !== 'id' && (itemProperties[column.field] as { type?: unknown }).type === 'string');
+  return { itemKey: 'id', columns, ...(title ? { titleField: title.field } : {}), presentation: 'responsive', paginationMode: cursorMode ? 'cursor' : 'offset' };
+}
+
 function withOperationKind(operations: object | undefined, kind: OperationKind): Record<string, RuntimeOperation> {
-  return Object.fromEntries(Object.entries(operations ?? {}).map(([name, operation]) => [name, { ...(operation as object), kind }])) as Record<string, RuntimeOperation>;
+  return Object.fromEntries(Object.entries(operations ?? {}).map(([name, operation]) => [name, { ...operation, kind }])) as Record<string, RuntimeOperation>;
+}
+
+function compileQueryViews(operations: object | undefined): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(operations ?? {}).map(([name, raw]) => {
+    const operation = raw as { api?: boolean; input: AnySchema; output: AnySchema; views?: OperationViews };
+    if (operation.api !== true) return [name, raw];
+    const inferredCollection = generatedCollectionView(operation.input, operation.output);
+    if (!operation.views) {
+      return [name, { ...operation, views: inferredCollection
+        ? { default: 'table', variants: { table: { title: name, renderer: 'table', rowKey: inferredCollection.itemKey, columns: inferredCollection.columns.map(({ field }) => field), collection: inferredCollection } } }
+        : { default: 'json', variants: { json: { title: name, renderer: 'json' } } } }];
+    }
+    if (!inferredCollection) return [name, raw];
+    const variants = Object.fromEntries(Object.entries(operation.views.variants).map(([variantName, variant]) => {
+      if (variant.renderer !== 'table' || variant.collection) return [variantName, variant];
+      const selectedFields = variant.columns;
+      const collection = {
+        ...inferredCollection,
+        ...(variant.rowKey ? { itemKey: variant.rowKey } : {}),
+        columns: selectedFields?.length ? inferredCollection.columns.filter(({ field }) => selectedFields.includes(field)) : inferredCollection.columns,
+      };
+      return [variantName, { ...variant, collection }];
+    }));
+    return [name, { ...operation, views: { ...operation.views, variants } }];
+  }));
+}
+
+function assertSemanticJson(value: unknown, label: string, seen = new WeakSet<object>(), depth = 0): asserts value is JsonValue {
+  if (depth > 64) throw new Error(`${label} exceeds the maximum JSON nesting depth`);
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return;
+  if (typeof value !== 'object') throw new Error(`${label} must compile to strict JSON; found ${typeof value}`);
+  if (seen.has(value)) throw new Error(`${label} must not contain cycles`);
+  if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) throw new Error(`${label} must contain only plain JSON objects`);
+  seen.add(value);
+  if (Array.isArray(value)) for (const child of value) assertSemanticJson(child, label, seen, depth + 1);
+  else for (const [key, child] of Object.entries(value)) {
+    if (key === '__proto__' || key === 'prototype' || key === 'constructor') throw new Error(`${label} contains unsafe key '${key}'`);
+    assertSemanticJson(child, label, seen, depth + 1);
+  }
+  seen.delete(value);
+}
+
+function schemaAtCollectionPath(root: unknown, path: string): Record<string, unknown> | undefined {
+  const parts = path.split('.');
+  if (!parts.length || parts.some((part) => !part || part === '__proto__' || part === 'prototype' || part === 'constructor')) return undefined;
+  let current = root;
+  for (const part of parts) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
+    const schema = current as Record<string, unknown>;
+    if (schema.type === 'array' && /^(0|[1-9]\d*)$/.test(part) && schema.items && typeof schema.items === 'object') {
+      current = schema.items;
+      continue;
+    }
+    const properties = schema.properties;
+    if (!properties || typeof properties !== 'object' || Array.isArray(properties) || !Object.hasOwn(properties, part)) return undefined;
+    current = (properties as Record<string, unknown>)[part];
+  }
+  return current && typeof current === 'object' && !Array.isArray(current) ? current as Record<string, unknown> : undefined;
+}
+
+function validateCollectionActions(definition: RuntimeDefinition, actions: CollectionViewOptions['actions'] | undefined, rowSchema: unknown, label: string): void {
+  for (const action of actions ?? []) {
+    const mutation = definition.mutations?.[action.mutation];
+    if (!action.label || !mutation || mutation.api !== true) throw new Error(`${label} references unavailable row action mutation '${action.mutation}'`);
+    if (action.variant && !mutation.views?.variants[action.variant]) throw new Error(`${label} references unknown mutation view '${action.mutation}/${action.variant}'`);
+    const mutationSchema = getJsonSchema(mutation.input, 'input');
+    const inputs = mutationSchema.properties && typeof mutationSchema.properties === 'object' ? mutationSchema.properties as Record<string, { type?: unknown; format?: unknown }> : {};
+    for (const [target, binding] of Object.entries(action.bind ?? {})) {
+      const source = binding && schemaAtCollectionPath(rowSchema, binding.fromRow);
+      const targetSchema = inputs[target];
+      if (!targetSchema || !source) throw new Error(`${label} has an unresolved row action mapping '${binding?.fromRow} → ${target}'`);
+      if (source.type !== targetSchema.type || (source.format && targetSchema.format && source.format !== targetSchema.format)) throw new Error(`${label} has an incompatible row action mapping '${binding.fromRow} → ${target}'`);
+    }
+  }
 }
 
 export function defineWorkspace<App>() {
@@ -413,13 +638,17 @@ export function defineWorkspace<App>() {
     const Agents extends object = {},
     const AuthSchema extends AnySchema | undefined = undefined,
   >(definition: WorkspaceConfiguration<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>): WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>> => {
-    const queries = withOperationKind(definition.queries, 'query');
+    const queryDefinitions = compileQueryViews(definition.queries);
+    const queries = withOperationKind(queryDefinitions, 'query');
     const mutations = withOperationKind(definition.mutations, 'mutation');
     const tasks = withOperationKind(definition.tasks, 'task');
     const agents = definition.agents ?? {};
+    const admin = typeof definition.admin === 'function'
+      ? definition.admin(createSemanticAdminContext<Queries, Mutations, Tasks>(definition.queries ?? {}, definition.mutations ?? {}, definition.tasks ?? {}))
+      : definition.admin;
     const runtimeDefinition: RuntimeDefinition = {
       id: definition.id,
-      ...(definition.admin === undefined ? {} : { admin: definition.admin }),
+      ...(admin === undefined ? {} : { admin }),
       ...(definition.authorization === undefined ? {} : { authorization: definition.authorization as AuthorizationDefinition }),
       queries,
       mutations,
@@ -427,7 +656,7 @@ export function defineWorkspace<App>() {
       agents: agents as Record<string, RuntimeAgent>,
     };
     validateDefinition(runtimeDefinition);
-    const workspace = { ...definition, queries, mutations, tasks, agents };
+    const workspace = { ...definition, admin, queries, mutations, tasks, agents };
     Object.defineProperty(workspace, 'registerApplication', {
       enumerable: false,
       value: (options: ApplicationRegistrationOptions<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>>>) => registerApplicationInternal<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>>>(runtimeDefinition, options),
@@ -439,15 +668,19 @@ export function defineWorkspace<App>() {
 export function query<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryOptions<App, S, O, Tools>): QueryDefinition<App, S, O, Tools> {
   return { ...options, kind: 'query' };
 }
-type RendererMetadata<R extends UiVariant['renderer']> = { default: string; variants: Record<string, Omit<UiVariant, 'renderer'> & { renderer: R }> };
-type QueryWithOutput<App, S extends AnySchema, O extends AnySchema, Tools, RequiredOutput, Renderer extends UiVariant['renderer']> = Omit<QueryOptions<App, S, O, Tools>, 'ui'> & { ui?: RendererMetadata<Renderer> } & (OutputOf<O> extends RequiredOutput ? unknown : never);
-export function tableQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryWithOutput<App, S, O, Tools, { rows: unknown[]; nextCursor: string | null }, 'table' | 'json'>): QueryDefinition<App, S, O, Tools> {
+type RendererMetadata<R extends OperationViewVariant['renderer']> = { default: string; variants: Record<string, Omit<OperationViewVariant, 'renderer'> & { renderer: R }> };
+type QueryWithOutput<App, S extends AnySchema, O extends AnySchema, Tools, RequiredOutput, Renderer extends OperationViewVariant['renderer']> = Omit<QueryOptions<App, S, O, Tools>, 'views'> & { views?: RendererMetadata<Renderer> } & (OutputOf<O> extends RequiredOutput ? unknown : never);
+export type CursorTablePage<Row> = { rows: Row[]; nextCursor: string | null };
+export type OffsetTablePage<Row> = { rows: Row[]; totalCount: number };
+export function cursorTableQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: Omit<QueryOptions<App, S, O, Tools>, 'views'> & (OutputOf<O> extends CursorTablePage<unknown> ? unknown : never)): Omit<QueryDefinition<App, S, O, Tools>, 'views'> & { readonly kind: 'query' } {
+  return { ...options, kind: 'query' };
+}
+export function offsetTableQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: Omit<QueryOptions<App, S, O, Tools>, 'views'> & (OutputOf<O> extends OffsetTablePage<unknown> ? unknown : never)): Omit<QueryDefinition<App, S, O, Tools>, 'views'> & { readonly kind: 'query' } {
   return { ...options, kind: 'query' };
 }
 /** Typed query-definition conveniences. They share the ordinary query execution and validation pipeline. */
-export function chatMessageQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryWithOutput<App, S, O, Tools, { items: unknown[]; nextCursor: string | null }, 'chat' | 'chat-messages' | 'json'>): QueryDefinition<App, S, O, Tools> { return { ...options, kind: 'query' }; }
+export function chatMessageQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryWithOutput<App, S, O, Tools, { items: unknown[]; nextCursor: string | null }, 'chat' | 'chat-messages' | 'chat-thread' | 'json'>): QueryDefinition<App, S, O, Tools> { return { ...options, kind: 'query' }; }
 export function chatThreadQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryWithOutput<App, S, O, Tools, { items: unknown[]; nextCursor: string | null }, 'chat-threads' | 'json'>): QueryDefinition<App, S, O, Tools> { return { ...options, kind: 'query' }; }
-export function chatThreadDetailQuery<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryWithOutput<App, S, O, Tools, { thread: unknown; messages: unknown[] }, 'chat-thread' | 'chat' | 'json'>): QueryDefinition<App, S, O, Tools> { return { ...options, kind: 'query' }; }
 export function mutation<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: MutationOptions<App, S, O, Tools>): MutationDefinition<App, S, O, Tools> {
   return { ...options, kind: 'mutation' };
 }
@@ -491,7 +724,7 @@ export type RuntimeOperation = {
   output: AnySchema;
   permission?: Permission<unknown, unknown>;
   api?: boolean;
-  ui?: UiMetadata;
+  views?: OperationViews;
   handler: (args: OperationCallContext<unknown, unknown>) => unknown | Promise<unknown>;
 };
 
@@ -1640,7 +1873,12 @@ async function eventStream(request: Request, scope: Scope, actor: Actor, registr
 async function makeManifest(registration: ApplicationRegistration, actor: Actor, scope: Scope, options: PlatformOptions) {
   const definition = registration.definition;
   const operations: Array<Record<string, unknown>> = [];
+  const operationViews: CompiledOperationPresentation[] = [];
   const visibleMutations = new Set<string>();
+  const visibleQueries = new Set<string>();
+  for (const [name, def] of Object.entries(definition.queries ?? {})) {
+    if (def.api === true && await permissionVisible(registration, def, actor, scope, options)) visibleQueries.add(name);
+  }
   for (const [name, def] of Object.entries(definition.mutations ?? {})) {
     if (def.api === true && await permissionVisible(registration, def, actor, scope, options)) visibleMutations.add(name);
   }
@@ -1649,24 +1887,42 @@ async function makeManifest(registration: ApplicationRegistration, actor: Actor,
       if (def.api !== true || !await permissionVisible(registration, def, actor, scope, options)) continue;
       const inputSchema = getJsonSchema(def.input, 'input');
       const outputSchema = getJsonSchema(def.output, 'output');
-      const ui = def.ui ? {
-        ...def.ui,
-         variants: Object.fromEntries(Object.entries(def.ui.variants).map(([variantName, variant]) => {
-            const { chat, chatActions, ...safeVariant } = variant;
-            const safeChat = chat ? {
+       const views = def.views ? {
+         ...def.views,
+          variants: Object.fromEntries(Object.entries(def.views.variants).map(([variantName, variant]) => {
+              const { chat, chatActions, chatList, ...safeVariant } = variant;
+             const safeCollection = variant.collection ? (() => {
+               const { editor, actions = [], ...collectionFields } = variant.collection;
+               const visibleActions = actions.filter((action) => visibleMutations.has(action.mutation));
+               return {
+                 ...collectionFields,
+                 ...(editor && visibleMutations.has(editor.mutation) ? { editor } : {}),
+                 ...(visibleActions.length ? { actions: visibleActions } : {}),
+               };
+             })() : undefined;
+             const safeChat = chat ? {
               ...chat,
               ...(chat.actions ? { actions: Object.fromEntries(Object.entries(chat.actions).filter(([, mapping]) => visibleMutations.has(mapping.mutation))) } : {}),
             } : undefined;
-            const safeChatActions = chatActions ? Object.fromEntries(Object.entries(chatActions).filter(([, mapping]) => visibleMutations.has(mapping.mutation))) : undefined;
+             const safeChatActions = chatActions ? Object.fromEntries(Object.entries(chatActions).filter(([, mapping]) => visibleMutations.has(mapping.mutation))) : undefined;
+             const safeChatList = chatList ? (() => {
+               const { threadQuery, ...listOptions } = chatList;
+               return threadQuery && visibleQueries.has(threadQuery) ? chatList : listOptions;
+             })() : undefined;
             return [variantName, {
-             ...safeVariant,
-             ...(variant.actions ? { actions: variant.actions.filter((action) => visibleMutations.has(action.mutation)) } : {}),
-              ...(safeChatActions ? { chatActions: safeChatActions } : {}),
-              ...(safeChat && visibleMutations.has(safeChat.sendMutation) ? { chat: safeChat } : {}),
+              ...safeVariant,
+              ...(variant.actions ? { actions: variant.actions.filter((action) => visibleMutations.has(action.mutation)) } : {}),
+               ...(safeCollection ? { collection: safeCollection } : {}),
+               ...(safeChatActions ? { chatActions: safeChatActions } : {}),
+               ...(safeChatList ? { chatList: safeChatList } : {}),
+               ...(safeChat && (!safeChat.sendMutation || visibleMutations.has(safeChat.sendMutation)) ? { chat: safeChat } : {}),
            }];
          })),
-      } : null;
-      operations.push({ name, kind, input: inputSchema, output: outputSchema, ui });
+      } : undefined;
+      operationViews.push(views && def.views
+        ? { operation: name, kind, default: def.views.default, variants: views.variants }
+        : { operation: name, kind, default: kind === 'query' ? 'json' : 'form', variants: { [kind === 'query' ? 'json' : 'form']: { title: name, renderer: kind === 'query' ? 'json' : 'form' } } });
+      operations.push({ name, kind, input: inputSchema, output: outputSchema });
     }
   }
   const builtinEnabled = (id: 'operations' | 'tasks' | 'schedules' | 'history' | 'agents') => definition.admin?.builtins?.[id] !== false;
@@ -1683,19 +1939,35 @@ async function makeManifest(registration: ApplicationRegistration, actor: Actor,
     agentToolPayloadsRead: await canCapability(registration, options, actor, scope, 'workcore.agents.toolPayloads.read', undefined),
   };
   const pages: AdminManifestPage[] = [];
-  if (builtinEnabled('operations') && operations.length) pages.push({ id: 'operations', title: 'Operations', description: 'Explore validated operations available in this workspace.', layout: 'stacked', blocks: [], builtin: true });
-  if (builtinEnabled('tasks') && capabilities.tasksRead) pages.push({ id: 'tasks', title: 'Task runs', description: 'Inspect queued, running and completed tasks.', blocks: [{ id: 'task-runs', type: 'resource', resource: 'tasks' }], builtin: true });
-  if (builtinEnabled('schedules') && capabilities.schedulesRead) pages.push({ id: 'schedules', title: 'Schedules', description: 'Manage recurring and one-off task schedules.', blocks: [{ id: 'schedules', type: 'resource', resource: 'schedules' }], builtin: true });
-  if (builtinEnabled('history') && capabilities.historyRead) pages.push({ id: 'history', title: 'History', description: 'Recent execution outcomes for this workspace.', blocks: [{ id: 'history', type: 'resource', resource: 'history' }], builtin: true });
-  if (builtinEnabled('agents') && options.services.agentRuns && capabilities.agentRunsRead) pages.push({ id: 'agents', title: 'Agent runs', description: 'Inspect agent execution status and authorized trace details.', blocks: [{ id: 'agent-runs', type: 'resource', resource: 'agents' }], builtin: true });
+  if (builtinEnabled('operations') && operations.length) pages.push({
+    id: 'operations', title: 'Operations', description: 'Explore validated operations available in this workspace.', layout: 'two-column', builtin: true,
+    blocks: [
+      { id: 'operation-catalog', type: 'operation-catalog', selection: 'operation' },
+      { id: 'operation-executor', type: 'operation-executor', selection: 'operation' },
+    ],
+  });
+  if (builtinEnabled('tasks') && capabilities.tasksRead) pages.push({ id: 'tasks', title: 'Task runs', description: 'Inspect queued, running and completed tasks.', blocks: [{ id: 'task-runs', type: 'resource', resource: 'tasks', title: 'Task runs' }], builtin: true });
+  if (builtinEnabled('schedules') && capabilities.schedulesRead) pages.push({ id: 'schedules', title: 'Schedules', description: 'Manage recurring and one-off task schedules.', blocks: [{ id: 'schedules', type: 'resource', resource: 'schedules', title: 'Schedules' }], builtin: true });
+  if (builtinEnabled('history') && capabilities.historyRead) pages.push({ id: 'history', title: 'History', description: 'Recent execution outcomes for this workspace.', blocks: [{ id: 'history', type: 'resource', resource: 'history', title: 'History' }], builtin: true });
+  if (builtinEnabled('agents') && options.services.agentRuns && capabilities.agentRunsRead) pages.push({ id: 'agents', title: 'Agent runs', description: 'Inspect agent execution status and authorized trace details.', blocks: [{ id: 'agent-runs', type: 'resource', resource: 'agents', title: 'Agent runs' }], builtin: true });
   for (const [id, page] of Object.entries(definition.admin?.pages ?? {})) {
-    const blocks = page.blocks.filter((block) => block.type === 'resource'
+    const blocks = page.blocks.filter((block) => block.type === 'custom' ? true : block.type === 'resource'
       ? (block.resource === 'tasks' ? capabilities.tasksRead : block.resource === 'schedules' ? capabilities.schedulesRead : block.resource === 'history' ? capabilities.historyRead : Boolean(options.services.agentRuns && capabilities.agentRunsRead))
+      : block.type === 'operation-catalog' || block.type === 'operation-executor'
+        ? operations.length > 0
       : operations.some((operation) => operation.name === block.operation && ((block.type === 'query' && operation.kind === 'query') || (block.type === 'mutation-form' && operation.kind === 'mutation') || (block.type === 'task-launcher' && operation.kind === 'task'))));
-    if (blocks.length) pages.push({ id, ...page, blocks });
+     if (blocks.length) pages.push({ id, ...page, blocks });
   }
-  const defaultPage = pages.some((page) => page.id === definition.admin?.defaultPage) ? definition.admin!.defaultPage : pages[0]?.id;
-  return { protocolVersion: 1, schemaDialect: 'https://json-schema.org/draft/2020-12/schema', applicationId: definition.id, operations, pages, capabilities, ...(defaultPage ? { defaultPage } : {}) };
+  const semanticPages = pages.map((page) => ({ ...page, layout: normalizeSemanticLayout(page.layout) }));
+  const semanticDefaultPage = semanticPages.some((page) => page.id === definition.admin?.defaultPage) ? definition.admin!.defaultPage : semanticPages[0]?.id;
+  const hasOperationComposition = semanticPages.some((page) => page.blocks.some((block) => block.type === 'operation-catalog' || block.type === 'operation-executor'));
+  const hasCollections = operationViews.some((view) => Object.values(view.variants).some((variant) => !!variant.collection));
+  const hasCustomBlocks = semanticPages.some((page) => page.blocks.some((block) => block.type === 'custom'));
+  return { protocolVersion: 2, schemaDialect: 'https://json-schema.org/draft/2020-12/schema', applicationId: definition.id, operations, interface: { version: 1, requiredFeatures: [...(operationViews.length ? ['operation-views-v1'] : []), ...(hasCollections ? ['collection-editor-v1'] : []), ...(hasOperationComposition ? ['operation-catalog-v1'] : []), ...(hasCustomBlocks ? ['custom-placeholder-v1'] : [])], pages: semanticPages, ...(semanticDefaultPage ? { defaultPage: semanticDefaultPage } : {}), operationViews }, capabilities };
+}
+
+function normalizeSemanticLayout(layout: AdminManifestPage['layout']): 'stack' | 'grid' | 'page' {
+  return layout === 'two-column' || layout === 'overview' ? 'grid' : layout === 'stacked' ? 'stack' : 'page';
 }
 
 async function permissionVisible(registration: ApplicationRegistration, definition: RuntimeOperation, actor: Actor, scope: Scope, options: PlatformOptions) {
@@ -1778,15 +2050,63 @@ export function validateDefinition(definition: RuntimeDefinition) {
     pageNames.add(pageId);
     if (!page.title || !Array.isArray(page.blocks)) throw new Error(`Admin page '${pageId}' requires a title and blocks`);
     if (page.layout && !['stacked', 'two-column', 'overview'].includes(page.layout)) throw new Error(`Admin page '${pageId}' has an unsupported layout '${page.layout}'`);
+    for (const [stateName, state] of Object.entries(page.state ?? {})) {
+      if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(stateName) || !state.label || typeof state.default !== 'string') throw new Error(`Admin page '${pageId}' has an invalid state declaration '${stateName}'`);
+      if (state.type === 'text') continue;
+      if (state.type !== 'select' || !Array.isArray(state.options) || !state.options.length) throw new Error(`Admin page '${pageId}' state '${stateName}' must be text or a select with options`);
+      const optionValues = new Set<string>();
+      for (const option of state.options) {
+        if (!option || typeof option.value !== 'string' || typeof option.label !== 'string' || optionValues.has(option.value)) throw new Error(`Admin page '${pageId}' state '${stateName}' has invalid or duplicate select options`);
+        optionValues.add(option.value);
+      }
+      if (!optionValues.has(state.default)) throw new Error(`Admin page '${pageId}' state '${stateName}' default must match one of its select options`);
+    }
     const blockIds = new Set<string>();
+    const catalogSelections = new Set<string>();
+    const executorSelections = new Set<string>();
     for (const block of page.blocks) {
       if (!block.id || blockIds.has(block.id)) throw new Error(`Admin page '${pageId}' has a missing or duplicate block id '${block.id}'`);
       blockIds.add(block.id);
+      if (block.type === 'operation-catalog' || block.type === 'operation-executor') {
+        if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(block.selection)) throw new Error(`Admin page '${pageId}' block '${block.id}' has an invalid operation selection key`);
+        const selections = block.type === 'operation-catalog' ? catalogSelections : executorSelections;
+        if (selections.has(block.selection)) throw new Error(`Admin page '${pageId}' has duplicate ${block.type} selection '${block.selection}'`);
+        selections.add(block.selection);
+        continue;
+      }
       if (block.type === 'resource') continue;
+      if (block.type === 'custom') {
+        if (!/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*\/[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(block.component) || !Number.isSafeInteger(block.version) || block.version < 1) throw new Error(`Admin page '${pageId}' block '${block.id}' has an invalid custom component reference`);
+        if (block.props !== undefined) assertSemanticJson(block.props, `admin page '${pageId}' block '${block.id}' custom props`);
+        continue;
+      }
       const expected = block.type === 'query' ? definition.queries?.[block.operation] : block.type === 'mutation-form' ? definition.mutations?.[block.operation] : definition.tasks?.[block.operation];
       if (!expected) throw new Error(`Admin page '${pageId}' block '${block.id}' references an unknown ${block.type} operation '${block.operation}'`);
       if (expected.api !== true) throw new Error(`Admin page '${pageId}' block '${block.id}' references '${block.operation}', which is not exposed to the admin API`);
-      if (block.variant && !expected.ui?.variants[block.variant]) throw new Error(`Admin page '${pageId}' block '${block.id}' references unknown variant '${block.variant}'`);
+       const hasOperationView = Boolean(block.variant && expected.views && Object.hasOwn(expected.views.variants, block.variant));
+       if (block.variant && !hasOperationView) throw new Error(`Admin page '${pageId}' block '${block.id}' references unknown variant '${block.variant}'`);
+      if (block.type === 'query' && block.inputBindings) {
+        const inputSchema = getJsonSchema(expected.input, 'input');
+        const inputProperties = inputSchema.properties && typeof inputSchema.properties === 'object' ? inputSchema.properties as Record<string, { type?: unknown }> : {};
+        for (const [target, binding] of Object.entries(block.inputBindings)) {
+          if (!binding || typeof binding !== 'object' || !('state' in binding) || typeof binding.state !== 'string') throw new Error(`Admin page '${pageId}' block '${block.id}' has an invalid binding for query input '${target}'`);
+          if (!inputProperties[target]) throw new Error(`Admin page '${pageId}' block '${block.id}' binds unknown query input '${target}'`);
+           if (inputProperties[target]?.type !== 'string') throw new Error(`Admin page '${pageId}' block '${block.id}' text state binding requires string query input '${target}'`);
+           if (Object.hasOwn(block.input ?? {}, target)) throw new Error(`Admin page '${pageId}' block '${block.id}' query input '${target}' cannot be both literal and state-bound`);
+           if (!Object.hasOwn(page.state ?? {}, binding.state)) throw new Error(`Admin page '${pageId}' block '${block.id}' references unknown page state '${binding.state}'`);
+           const state = page.state?.[binding.state];
+           const targetSchema = inputProperties[target] as { enum?: unknown };
+           if (state?.type === 'select') {
+             const allowedValues = new Set(Array.isArray(targetSchema.enum) ? targetSchema.enum.filter((entry): entry is string => typeof entry === 'string') : []);
+             const required = ((inputSchema.required as string[] | undefined) ?? []).includes(target);
+             if (!Array.isArray(targetSchema.enum) || state.options.some((option) => option.value !== '' && !allowedValues.has(option.value))) throw new Error(`Admin page '${pageId}' block '${block.id}' select state '${binding.state}' options must match query enum input '${target}'`);
+             if (state.options.some((option) => option.value === '') && required) throw new Error(`Admin page '${pageId}' block '${block.id}' select state '${binding.state}' cannot clear required query input '${target}'`);
+           }
+        }
+      }
+    }
+    for (const selection of new Set([...catalogSelections, ...executorSelections])) {
+      if (!catalogSelections.has(selection) || !executorSelections.has(selection)) throw new Error(`Admin page '${pageId}' operation selection '${selection}' requires one catalog and one executor`);
     }
   }
   const builtInPages = ['operations', 'tasks', 'schedules', 'history', 'agents'] as const;
@@ -1799,12 +2119,12 @@ export function validateDefinition(definition: RuntimeDefinition) {
         getJsonSchema(operation.input, 'input');
         getJsonSchema(operation.output, 'output');
       }
-      if (operation.ui) {
-        if (!operation.ui.variants[operation.ui.default]) throw new Error(`${kind} '${name}' default UI variant '${operation.ui.default}' does not exist`);
-        for (const [variantName, variant] of Object.entries(operation.ui.variants)) {
+      if (operation.views) {
+        if (!operation.views.variants[operation.views.default]) throw new Error(`${kind} '${name}' default view '${operation.views.default}' does not exist`);
+        for (const [variantName, variant] of Object.entries(operation.views.variants)) {
           if (kind === 'query' && variant.renderer === 'form') throw new Error(`Query '${name}' cannot use form renderer '${variantName}'`);
-          if (kind === 'query' && variant.renderer === 'chat') {
-            if (!variant.chat?.sendMutation) throw new Error(`Chat query '${name}' renderer '${variantName}' must declare chat.sendMutation`);
+          if (kind === 'query' && variant.chat?.sendMutation) {
+            if (!variant.chat.messageInput) throw new Error(`Chat query '${name}' renderer '${variantName}' must declare chat.messageInput with chat.sendMutation`);
             const chatMutation = definition.mutations?.[variant.chat.sendMutation];
             if (!chatMutation) throw new Error(`Chat query '${name}' references unknown send mutation '${variant.chat.sendMutation}'`);
             const inputProperties = getJsonSchema(chatMutation.input, 'input').properties as Record<string, unknown> | undefined;
@@ -1814,16 +2134,31 @@ export function validateDefinition(definition: RuntimeDefinition) {
               const queryProperties = getJsonSchema(operation.input, 'input').properties as Record<string, unknown> | undefined;
               if (!queryProperties?.[variant.chat.conversationQueryInput]) throw new Error(`Chat query '${name}' references unknown query input '${variant.chat.conversationQueryInput}'`);
             }
+            for (const inputName of Object.keys(variant.chat.inputBindings ?? {})) {
+              if (!inputProperties?.[inputName]) throw new Error(`Chat query '${name}' binds unknown send input '${inputName}' on '${variant.chat.sendMutation}'`);
+            }
             const requiredSendFields = (getJsonSchema(chatMutation.input, 'input').required as string[] | undefined) ?? [];
-            const supportedSendFields = new Set([variant.chat.messageInput, ...(variant.chat.conversationIdInput ? [variant.chat.conversationIdInput] : [])]);
+            const supportedSendFields = new Set([variant.chat.messageInput, ...(variant.chat.conversationIdInput ? [variant.chat.conversationIdInput] : []), ...Object.keys(variant.chat.inputBindings ?? {})]);
             const unsupportedRequiredField = requiredSendFields.find((field) => !supportedSendFields.has(field));
             if (unsupportedRequiredField) throw new Error(`Chat query '${name}' send mutation '${variant.chat.sendMutation}' has unsupported required input '${unsupportedRequiredField}'`);
+          }
+          if (kind === 'query' && variant.chatList) {
+            const listInputProperties = getJsonSchema(operation.input, 'input').properties as Record<string, unknown> | undefined;
+            if (variant.chatList.searchInput && !listInputProperties?.[variant.chatList.searchInput]) throw new Error(`Chat list '${name}.${variantName}' references unknown search input '${variant.chatList.searchInput}'`);
+            if (variant.chatList.threadQuery) {
+              const detail = definition.queries?.[variant.chatList.threadQuery];
+              if (!detail || detail.api !== true) throw new Error(`Chat list '${name}.${variantName}' references unknown or unexposed thread query '${variant.chatList.threadQuery}'`);
+              const detailProperties = getJsonSchema(detail.input, 'input').properties as Record<string, unknown> | undefined;
+              const threadInput = variant.chatList.threadIdInput ?? 'threadId';
+              if (!detailProperties?.[threadInput]) throw new Error(`Chat list '${name}.${variantName}' references unknown thread input '${threadInput}' on '${variant.chatList.threadQuery}'`);
+              if (variant.chatList.detailVariant && !detail.views?.variants[variant.chatList.detailVariant]) throw new Error(`Chat list '${name}.${variantName}' references unknown detail variant '${variant.chatList.detailVariant}' on '${variant.chatList.threadQuery}'`);
+            }
           }
           for (const [actionName, mapping] of Object.entries({ ...variant.chatActions, ...variant.chat?.actions })) {
             const actionMutation = definition.mutations?.[mapping.mutation];
             if (!actionMutation) throw new Error(`Query '${name}' action '${actionName}' references unknown mutation '${mapping.mutation}'`);
             if (actionMutation.api !== true) throw new Error(`Query '${name}' action '${actionName}' mutation '${mapping.mutation}' must be exposed to the admin API`);
-            if (mapping.variant && !actionMutation.ui?.variants[mapping.variant]) throw new Error(`Query '${name}' action '${actionName}' references unknown variant '${mapping.variant}' on mutation '${mapping.mutation}'`);
+            if (mapping.variant && !actionMutation.views?.variants[mapping.variant]) throw new Error(`Query '${name}' action '${actionName}' references unknown variant '${mapping.variant}' on mutation '${mapping.mutation}'`);
             const actionProperties = getJsonSchema(actionMutation.input, 'input').properties as Record<string, unknown> | undefined;
             for (const inputName of Object.keys(mapping.bind ?? {})) {
               if (!actionProperties?.[inputName]) throw new Error(`Query '${name}' action '${actionName}' binds unknown input '${inputName}' on mutation '${mapping.mutation}'`);
@@ -1831,24 +2166,87 @@ export function validateDefinition(definition: RuntimeDefinition) {
           }
           if (kind !== 'query' && variant.renderer !== 'form' && variant.renderer !== 'json') throw new Error(`${kind} '${name}' must use a form/json renderer`);
           let rowProperties: Record<string, unknown> | undefined;
+          let rowsItemSchema: unknown;
+          if (variant.renderer === 'chart') {
+            if (kind !== 'query' || !variant.chart || typeof variant.chart.xField !== 'string' || typeof variant.chart.yField !== 'string') throw new Error(`Chart view '${name}/${variantName}' requires a query and xField/yField configuration`);
+            const output = getJsonSchema(operation.output, 'output');
+            const rows = (output.properties as Record<string, unknown> | undefined)?.rows as { type?: unknown; items?: { properties?: Record<string, unknown> } } | undefined;
+            if (rows?.type !== 'array' || !rows.items?.properties) throw new Error(`Chart query '${name}' must return rows[]`);
+            const xField = schemaAtCollectionPath(rows.items, variant.chart.xField) as { type?: unknown } | undefined;
+            const yField = schemaAtCollectionPath(rows.items, variant.chart.yField) as { type?: unknown } | undefined;
+            const seriesField = variant.chart.seriesField ? schemaAtCollectionPath(rows.items, variant.chart.seriesField) : true;
+            if (!xField || !yField || (yField.type !== 'number' && yField.type !== 'integer') || !seriesField) throw new Error(`Chart view '${name}/${variantName}' references invalid x/y/series fields`);
+            rowProperties = rows.items.properties;
+            rowsItemSchema = rows.items;
+          }
           if (variant.renderer === 'table') {
             const output = getJsonSchema(operation.output, 'output');
             const outputProperties = output.properties as Record<string, unknown> | undefined;
             const rows = outputProperties?.rows as { type?: unknown; items?: { properties?: Record<string, unknown> } } | undefined;
             if (rows?.type !== 'array' || !rows.items?.properties) throw new Error(`Table query '${name}' must return a JSON Schema Page with rows[]`);
-            if (!outputProperties?.nextCursor) throw new Error(`Table query '${name}' must return Page.nextCursor`);
             const inputProperties = getJsonSchema(operation.input, 'input').properties as Record<string, { type?: unknown; minimum?: unknown; maximum?: unknown }> | undefined;
             const limit = inputProperties?.limit;
             if (!limit || (limit.type !== 'integer' && limit.type !== 'number') || typeof limit.minimum !== 'number' || limit.minimum < 1 || typeof limit.maximum !== 'number' || limit.maximum < limit.minimum || limit.maximum > 200) throw new Error(`Table query '${name}' input must define a bounded numeric limit of at most 200`);
-            if (inputProperties?.cursor?.type !== 'string') throw new Error(`Table query '${name}' input must define a string cursor`);
+            const cursorPagination = !!outputProperties?.nextCursor && inputProperties?.cursor?.type === 'string';
+            const offset = inputProperties?.offset;
+            const offsetPagination = !!outputProperties?.totalCount && offset?.type === 'integer' && typeof offset.minimum === 'number' && offset.minimum >= 0;
+            if (!cursorPagination && !offsetPagination) throw new Error(`Table query '${name}' must declare either cursor pagination (cursor/nextCursor) or offset pagination (offset/totalCount)`);
+            if (variant.collection?.paginationMode && variant.collection.paginationMode !== (cursorPagination ? 'cursor' : 'offset')) throw new Error(`Table variant '${variantName}' pagination mode does not match query '${name}' schema`);
             rowProperties = rows.items.properties;
+            rowsItemSchema = rows.items;
             if (!variant.rowKey || !rowProperties[variant.rowKey]) throw new Error(`Table variant '${variantName}' must declare a rowKey present in query '${name}' output`);
             for (const column of variant.columns ?? []) if (!rowProperties[column]) throw new Error(`Table column '${column}' is not present in query '${name}' output`);
+          }
+          if (variant.collection) {
+            const collection = variant.collection;
+            if (kind !== 'query' || variant.renderer !== 'table' || !rowProperties || !rowsItemSchema) throw new Error(`Collection options on '${kind} ${name}/${variantName}' require a table query view`);
+            if (!collection.itemKey || !schemaAtCollectionPath(rowsItemSchema, collection.itemKey)) throw new Error(`Collection view '${name}/${variantName}' has unknown itemKey '${collection.itemKey}'`);
+            if (collection.presentation !== undefined && !['responsive', 'table', 'cards'].includes(collection.presentation)) throw new Error(`Collection view '${name}/${variantName}' has invalid presentation '${collection.presentation}'`);
+            if (collection.paginationMode !== undefined && !['cursor', 'offset'].includes(collection.paginationMode)) throw new Error(`Collection view '${name}/${variantName}' has invalid pagination mode '${collection.paginationMode}'`);
+            const queryInput = getJsonSchema(operation.input, 'input');
+            const queryProperties = queryInput.properties as Record<string, { type?: unknown; enum?: unknown }> | undefined;
+            for (const column of collection.columns) {
+              const source = schemaAtCollectionPath(rowsItemSchema, column.field);
+              if (!source) throw new Error(`Collection view '${name}/${variantName}' references missing result field '${column.field}'`);
+              const filter = column.filter;
+              if (filter) {
+                if (filter.type !== 'text' && filter.type !== 'select') throw new Error(`Collection view '${name}/${variantName}' has unsupported filter type '${String(filter.type)}'`);
+                const targetName = filter.targetParam ?? column.field;
+                const target = queryProperties?.[targetName];
+                if (!target || (filter.type === 'text' && target.type !== 'string') || (filter.type === 'select' && !Array.isArray(target.enum))) throw new Error(`Collection view '${name}/${variantName}' has incompatible filter target '${targetName}'`);
+                if (((queryInput.required as string[] | undefined) ?? []).includes(targetName)) throw new Error(`Collection view '${name}/${variantName}' filter target '${targetName}' must be optional`);
+              }
+            }
+            for (const field of [collection.titleField, collection.subtitleField]) if (field && !schemaAtCollectionPath(rowsItemSchema, field)) throw new Error(`Collection view '${name}/${variantName}' references missing presentation field '${field}'`);
+            validateCollectionActions(definition, collection.actions, rowsItemSchema, `Collection view '${name}/${variantName}'`);
+            if (collection.editor) {
+              const editor = collection.editor;
+              const mutation = definition.mutations?.[editor.mutation];
+              if (!mutation || mutation.api !== true) throw new Error(`Collection view '${name}/${variantName}' references unavailable editor mutation '${editor.mutation}'`);
+              if (editor.variant && !mutation.views?.variants[editor.variant]) throw new Error(`Collection view '${name}/${variantName}' references unknown editor variant '${editor.variant}'`);
+              const editorInput = getJsonSchema(mutation.input, 'input');
+              const editorProperties = editorInput.properties as Record<string, { type?: unknown; format?: unknown; default?: unknown }> | undefined;
+              const identity = editor.identity ?? { rowField: collection.itemKey, targetInput: 'id' };
+              const identitySource = schemaAtCollectionPath(rowsItemSchema, identity.rowField) as { type?: unknown; format?: unknown } | undefined;
+              const identityTarget = editorProperties?.[identity.targetInput];
+              if (!identitySource || !identityTarget || identitySource.type !== identityTarget.type || (identitySource.format && identityTarget.format && identitySource.format !== identityTarget.format)) throw new Error(`Collection view '${name}/${variantName}' has an invalid identity mapping '${identity.rowField} → ${identity.targetInput}'`);
+              const mapped = new Set([identity.targetInput]);
+              for (const column of collection.columns) {
+                const targetName = column.editable === true ? column.field : typeof column.editable === 'object' ? column.editable.targetInput : undefined;
+                if (!targetName) continue;
+                const source = schemaAtCollectionPath(rowsItemSchema, column.field) as { type?: unknown; format?: unknown } | undefined;
+                const target = editorProperties?.[targetName];
+                if (!source || !target || source.type !== target.type || (source.format && target.format && source.format !== target.format)) throw new Error(`Collection view '${name}/${variantName}' has incompatible field mapping '${column.field} → ${targetName}'`);
+                mapped.add(targetName);
+              }
+              const unmapped = ((editorInput.required as string[] | undefined) ?? []).find((key) => !mapped.has(key) && editorProperties?.[key]?.default === undefined);
+              if (unmapped) throw new Error(`Collection view '${name}/${variantName}' editor requires unmapped input '${unmapped}'`);
+            }
           }
           for (const action of variant.actions ?? []) {
             if (!mutationNames.has(action.mutation)) throw new Error(`UI action references unknown mutation '${action.mutation}'`);
             const target = definition.mutations?.[action.mutation];
-            if (action.variant && !target?.ui?.variants[action.variant]) throw new Error(`UI action references unknown variant '${action.variant}' on mutation '${action.mutation}'`);
+            if (action.variant && !target?.views?.variants[action.variant]) throw new Error(`UI action references unknown variant '${action.variant}' on mutation '${action.mutation}'`);
             const mutationInput = target ? getJsonSchema(target.input, 'input').properties as Record<string, unknown> | undefined : undefined;
             for (const [field, binding] of Object.entries(action.bind ?? {})) {
               if (!mutationInput?.[field]) throw new Error(`Row action binding '${field}' is not a declared input field on mutation '${action.mutation}'`);

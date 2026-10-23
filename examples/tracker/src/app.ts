@@ -1,4 +1,5 @@
 import { defineWorkspace, type AgentRunAdapter, type Scope } from '@workcore/core';
+import { chatMessageZodQuery, chatSchemaHelper, cursorTableZodQuery } from '@workcore/schema-zod';
 import { z } from 'zod';
 import { roleCanUseWorkcoreCapability } from './demo-workspaces.js';
 
@@ -24,37 +25,18 @@ const trackerAuthorizationContext = z.object({ userId: z.string(), role: z.enum(
 export type TrackerAuthorization = z.output<typeof trackerAuthorizationContext>;
 const dateSchema = z.date().meta({ type: 'string', format: 'date-time', 'x-workcore-runtimeType': 'date' });
 const activityRow = z.object({ id: z.string(), title: z.string(), status: z.enum(['planned', 'complete']), updatedAt: dateSchema });
-const activityPage = z.object({
-  rows: z.array(activityRow),
-  nextCursor: z.string().nullable(),
-  totalCount: z.number(),
-});
 const activitySchema = activityRow;
 const dateEchoInput = z.object({ at: dateSchema.meta({ default: '2026-10-12T10:00:00.000Z' }) });
 const dateTimeTextInput = z.object({ at: z.iso.datetime().meta({ default: '2026-10-12T10:00:00.000Z' }) });
 const dateOutput = dateSchema;
 const richValueOutput = z.custom<Record<string, unknown>>((value): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)).meta({ type: 'object' });
-const listInput = z.object({
-  limit: z.number().int().min(1).max(100).default(25),
-  cursor: z.string().optional(),
-  status: z.enum(['planned', 'complete']).optional(),
-  search: z.string().max(120).optional(),
-});
+const activityFilters = z.object({ status: z.enum(['planned', 'complete']).optional(), search: z.string().max(120).optional() });
 const editInput = z.object({ id: z.string().min(1), title: z.string().min(1).max(120), status: z.enum(['planned', 'complete']) });
 const emptyInput = z.object({});
 const summarySchema = z.object({ total: z.number(), complete: z.number(), planned: z.number() });
-const conversationInput = z.object({ conversationId: z.string().optional() });
-const chatMessageSchema = z.object({
-  id: z.string(),
-  role: z.enum(['user', 'assistant']),
-  createdAt: z.iso.datetime(),
-  status: z.enum(['complete', 'streaming', 'failed']),
-  runId: z.string().optional(),
-  parts: z.array(z.object({ type: z.literal('text'), text: z.string() })),
-});
-const conversationOutput = z.object({
-  conversation: z.object({ id: z.string(), title: z.string() }).nullable(),
-  messages: z.array(chatMessageSchema),
+const chatSchemas = chatSchemaHelper({
+  messageStatus: z.enum(['complete', 'streaming', 'failed']),
+  conversation: z.object({ id: z.string(), title: z.string() }),
   activeRuns: z.array(z.object({ runId: z.string(), status: z.string() })),
 });
 const sendMessageInput = z.object({ message: z.string().trim().min(1).max(2_000), conversationId: z.string().optional() });
@@ -67,41 +49,74 @@ const successOutput = z.object({ ok: z.boolean() });
 
 export const tracker = defineWorkspace<TrackerContext>()({
   id: 'tracker',
-  admin: {
+  admin: ({ ui, queries, mutations }) => ({
     defaultPage: 'operations',
     pages: {
-      activityDashboard: {
+      activityDashboard: ui.page({
         title: 'Activity dashboard',
         description: 'A focused view assembled from the workspace operation catalog.',
         layout: 'two-column',
         blocks: [
-          { id: 'recent-activities', type: 'query', operation: 'activities', variant: 'basic', input: { limit: 10 } },
-          { id: 'edit-activity', type: 'mutation-form', operation: 'editActivity', title: 'Edit an activity' },
+          queries.activities.view('basic', { id: 'recent-activities', input: { limit: 10 } }),
+          { id: 'standalone-activity-editor', type: 'mutation-form', operation: mutations.editActivity.name, title: 'Edit an activity' },
         ],
-      },
-      miloCampfire: {
+      }),
+      activitySearch: ui.page({
+        title: 'Activity search',
+        description: 'Page-owned search and status controls are bound into the activities query input.',
+        layout: 'stacked',
+        state: {
+          searchText: { type: 'text', label: 'Search activities', default: '' },
+          status: { type: 'select', label: 'Activity status', default: '', options: [
+            { value: '', label: 'All statuses' },
+            { value: 'planned', label: 'Planned' },
+            { value: 'complete', label: 'Complete' },
+          ] },
+        },
+        blocks: [queries.activities.view('basic', {
+          id: 'search-results',
+          input: { limit: 25 },
+          inputBindings: { search: { state: 'searchText' }, status: { state: 'status' } },
+        })],
+      }),
+      miloCampfire: ui.page({
         title: "Milo's Campfire",
         description: 'A friendly, outdoors-loving trail buddy. Conversations are saved to your tracker workspace.',
         layout: 'stacked',
-        blocks: [{ id: 'milo-chat', type: 'query', operation: 'assistantConversation', variant: 'chat', input: {} }],
-      },
+        blocks: [queries.assistantConversation.view('chat', { id: 'milo-chat', input: {} })],
+      }),
+      workspaceHistory: ui.page({
+        title: 'Workspace history',
+        description: 'A custom page composed with the platform history resource.',
+        layout: 'stacked',
+        blocks: [{ id: 'history-resource', type: 'resource', resource: 'history', title: 'Recent activity' }],
+      }),
+      operationWorkbench: ui.page({
+        title: 'Operation workbench',
+        description: 'An application-authored operation catalog and checked executor composition.',
+        layout: 'two-column',
+        blocks: [ui.operationCatalog({ id: 'available-operations', selection: 'workbench' }), ui.operationExecutor({ id: 'operation-runner', selection: 'workbench' })],
+      }),
+      rendererExtension: ui.page({
+        title: 'Renderer extension',
+        description: 'A versioned, renderer-independent custom component descriptor.',
+        layout: 'stacked',
+        blocks: [{ id: 'activity-summary', type: 'custom', component: 'tracker/activity-summary', version: 1, title: 'Activity summary', description: 'A custom renderer can replace this placeholder with an activity summary.', props: { query: 'activities' } }],
+      }),
     },
-  },
+  }),
   authorization: {
     context: trackerAuthorizationContext,
     check: ({ auth, permission }) => auth.isAdmin || auth.role === 'owner' || permission === 'activities.read' || permission === 'assistant.chat' || permission === 'notes.read' || (permission.startsWith('workcore.') && roleCanUseWorkcoreCapability(auth.role, permission)),
   },
   queries: {
-    assistantConversation: {
-      input: conversationInput,
-      output: conversationOutput,
-      permission: 'assistant.chat',
-      api: true,
-      ui: {
+    assistantConversation: chatMessageZodQuery<TrackerContext>()({
+      ...chatSchemas,
+      views: {
         default: 'chat',
         variants: {
           chat: {
-            title: "Milo's Campfire",
+            title: "Milo's Campfires",
             subtitle: 'A friendly trail buddy for whatever is on your mind.',
             renderer: 'chat',
             chat: {
@@ -115,11 +130,13 @@ export const tracker = defineWorkspace<TrackerContext>()({
           },
         },
       },
+      permission: 'assistant.chat',
+      api: true,
       handler: async ({ ctx, input }) => {
         const conversation = input.conversationId
           ? await ctx.app.conversations.get(ctx.scope, ctx.actor.id, input.conversationId)
           : await ctx.app.conversations.latest(ctx.scope, ctx.actor.id);
-        if (!conversation) return { conversation: null, messages: [], activeRuns: [] };
+        if (!conversation) return { conversation: null, items: [], activeRuns: [], nextCursor: null };
         const storedMessages = await ctx.app.conversations.listMessages(ctx.scope, ctx.actor.id, conversation.id, 100);
         const activeRuns: Array<{ runId: string; status: string }> = [];
         const messages: ConversationMessage[] = [];
@@ -137,20 +154,23 @@ export const tracker = defineWorkspace<TrackerContext>()({
             messages.push({ ...message, status: 'failed', text: message.text || 'I hit a snag on that turn. Please try again.' });
           }
         }
+        const projectedMessages = messages.map((message) => ({
+          id: message.id,
+          type: 'message' as const,
+          role: message.role,
+          createdAt: message.createdAt.toISOString(),
+          status: message.status,
+          ...(message.runId ? { runId: message.runId } : {}),
+          parts: [{ type: 'text' as const, text: message.text }],
+        }));
         return {
           conversation,
-          messages: messages.map((message) => ({
-            id: message.id,
-            role: message.role,
-            createdAt: message.createdAt.toISOString(),
-            status: message.status,
-            ...(message.runId ? { runId: message.runId } : {}),
-            parts: [{ type: 'text' as const, text: message.text }],
-          })),
+          items: projectedMessages,
           activeRuns,
+          nextCursor: null,
         };
       },
-    },
+    }),
     conversationHistory: {
       input: conversationHistoryInput,
       output: conversationHistoryOutput,
@@ -158,26 +178,31 @@ export const tracker = defineWorkspace<TrackerContext>()({
       handler: async ({ ctx, input }) => (await ctx.app.conversations.listMessages(ctx.scope, ctx.actor.id, input.conversationId, 12)).map(({ role, text }) => ({ role, text })),
     },
     activities: {
-      input: listInput,
-      output: activityPage,
-      permission: 'activities.read',
-      api: true,
-      ui: {
-        default: 'basic',
+      ...cursorTableZodQuery<TrackerContext, typeof activityFilters.shape, typeof activityRow>({
+        input: activityFilters,
+        row: activityRow,
+        defaultLimit: 25,
+        maxLimit: 100,
+        permission: 'activities.read',
+        api: true,
+        handler: ({ ctx, input }) => ctx.app.activities.list(ctx.scope, input),
+      }),
+      views: {
+        default: 'manage',
         variants: {
-          basic: { title: 'Activities', renderer: 'table', rowKey: 'id', columns: ['title', 'status', 'updatedAt'], actions: [{ label: 'Edit activity', mutation: 'editActivity', variant: 'basic', bind: { id: { fromRow: 'id' } } }] },
+          basic: { title: 'Activities', renderer: 'table', rowKey: 'id', columns: ['title', 'status', 'updatedAt'], collection: { itemKey: 'id', titleField: 'title', subtitleField: 'status', columns: [{ field: 'title', editable: true, filter: { type: 'text', targetParam: 'search' } }, { field: 'status', display: 'badge', editable: true }, { field: 'updatedAt', display: 'datetime', editable: false }], actions: [{ label: 'Edit activity', mutation: 'editActivity', variant: 'basic', bind: { id: { fromRow: 'id' } } }], editor: { mutation: 'editActivity', variant: 'basic', identity: { rowField: 'id', targetInput: 'id' } } } },
           compact: { title: 'Recent activities', subtitle: 'Latest workspace activity', renderer: 'table', rowKey: 'id', columns: ['title', 'status'] },
+          manage: { title: 'Manage activities', renderer: 'table', rowKey: 'id', columns: ['title', 'status', 'updatedAt'], collection: { itemKey: 'id', titleField: 'title', subtitleField: 'status', columns: [{ field: 'title', editable: true, filter: { type: 'text', targetParam: 'search' } }, { field: 'status', editable: true, filter: { type: 'select' } }, { field: 'updatedAt', display: 'datetime', editable: false }], actions: [{ label: 'Edit activity', mutation: 'editActivity', variant: 'basic', bind: { id: { fromRow: 'id' } } }], editor: { mutation: 'editActivity', variant: 'basic' } } },
           dataOnly: { title: 'Activity data', renderer: 'json' },
         },
       },
-      handler: ({ ctx, input }) => ctx.app.activities.list(ctx.scope, input),
     },
     dateRoundTrip: {
       input: dateEchoInput,
       output: dateOutput,
       permission: 'activities.read',
       api: true,
-      ui: { default: 'basic', variants: { basic: { title: 'Date round trip', renderer: 'json' } } },
+      views: { default: 'basic', variants: { basic: { title: 'Date round trip', renderer: 'json' } } },
       handler: ({ input }) => input.at,
     },
     dateTimeText: {
@@ -185,7 +210,7 @@ export const tracker = defineWorkspace<TrackerContext>()({
       output: z.string(),
       permission: 'activities.read',
       api: true,
-      ui: { default: 'basic', variants: { basic: { title: 'Date-time text', renderer: 'json' } } },
+      views: { default: 'basic', variants: { basic: { title: 'Date-time text', renderer: 'json' } } },
       handler: ({ input }) => input.at,
     },
     richValues: {
@@ -193,7 +218,7 @@ export const tracker = defineWorkspace<TrackerContext>()({
       output: richValueOutput,
       permission: 'activities.read',
       api: true,
-      ui: { default: 'basic', variants: { basic: { title: 'Rich value viewer', renderer: 'json' } } },
+      views: { default: 'basic', variants: { basic: { title: 'Rich value viewer', renderer: 'json' } } },
       handler: () => {
         const value: Record<string, unknown> = { big: 42n, map: new Map([['key', 'value']]), set: new Set(['member']) };
         value.self = value;
@@ -248,7 +273,7 @@ export const tracker = defineWorkspace<TrackerContext>()({
       output: activitySchema,
       permission: 'activities.write',
       api: true,
-      ui: { default: 'basic', variants: { basic: { title: 'Edit activity', renderer: 'form' } } },
+      views: { default: 'basic', variants: { basic: { title: 'Edit activity', renderer: 'form' } } },
       handler: ({ ctx, input }) => ctx.app.activities.update(ctx.scope, input),
     }
   },
@@ -259,7 +284,7 @@ export const tracker = defineWorkspace<TrackerContext>()({
       permission: 'summary.refresh',
       api: true,
       triggers: { mutations: ['editActivity'] },
-      ui: { default: 'basic', variants: { basic: { title: 'Refresh summary', renderer: 'form' } } },
+      views: { default: 'basic', variants: { basic: { title: 'Refresh summary', renderer: 'form' } } },
       handler: async ({ ctx, operations }) => {
         await ctx.services.tasks.reportProgress(0);
         const activities: Activity[] = [];

@@ -39,7 +39,7 @@ export const identity = defineWorkspace<IdentityContext>()({
       output: z.object({ rows: z.array(identityUser), nextCursor: z.string().nullable(), totalCount: z.number() }),
       permission: 'identity.users.read',
       api: true,
-      ui: { default: 'basic', variants: { basic: { title: 'Users', renderer: 'table', rowKey: 'id', columns: ['username', 'name', 'email', 'role'], actions: [
+      views: { default: 'basic', variants: { basic: { title: 'Users', renderer: 'table', rowKey: 'id', columns: ['username', 'name', 'email', 'role'], actions: [
         { label: 'Change name', mutation: 'setUserName', variant: 'basic', bind: { id: { fromRow: 'id' }, name: { fromRow: 'name' } } },
         { label: 'Change role', mutation: 'setUserRole', variant: 'basic', bind: { id: { fromRow: 'id' }, role: { fromRow: 'role' } } },
       ] } } },
@@ -61,7 +61,7 @@ export const identity = defineWorkspace<IdentityContext>()({
       output: identityUser,
       permission: 'identity.users.manage',
       api: true,
-      ui: { default: 'basic', variants: { basic: { title: 'Change user name', renderer: 'form' } } },
+      views: { default: 'basic', variants: { basic: { title: 'Change user name', renderer: 'form' } } },
       handler: async ({ ctx, input }) => {
         const updated = await ctx.app.auth.api.adminUpdateUser({
           body: { userId: input.id, data: { name: input.name } },
@@ -75,7 +75,7 @@ export const identity = defineWorkspace<IdentityContext>()({
       output: identityUser,
       permission: 'identity.users.manage',
       api: true,
-      ui: { default: 'basic', variants: { basic: { title: 'Change account role', renderer: 'form' } } },
+      views: { default: 'basic', variants: { basic: { title: 'Change account role', renderer: 'form' } } },
       handler: async ({ ctx, input }) => {
         const headers = requireHeaders(ctx.request);
         if (input.role === 'user') {

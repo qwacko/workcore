@@ -21,6 +21,7 @@
     "@workcore/client": "workspace:*",
     "@workcore/codec-superjson": "workspace:*",
     "@workcore/core": "workspace:*",
+    "@workcore/schema-zod": "workspace:*",
     "@openrouter/ai-sdk-provider": "^2.10.0",
     "ai": "^6.0.0",
     "better-auth": "^1.7.7",

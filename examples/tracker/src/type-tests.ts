@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { tracker, type TrackerContext } from './app.js';
 
 const client = createClient<typeof tracker>({ transport: createFetchTransport({ codec: superjsonCodec() }), applicationId: 'tracker', workspaceId: 'personal-alice' });
+const trackerCollectionEditor: keyof typeof tracker.mutations = tracker.queries.activities.views!.variants.basic!.collection!.editor!.mutation;
+void trackerCollectionEditor;
 void client.query('activities', { limit: 10 });
 void client.query('activities', { limit: 10 }).then((page) => {
   const firstId: string | undefined = page.rows[0]?.id;
@@ -176,7 +178,7 @@ defineWorkspace<TrackerContext>()({
     read: {
       input: z.object({}),
       output: z.string(),
-      ui: { default: 'basic', variants: { basic: {
+      views: { default: 'basic', variants: { basic: {
         title: 'Read', renderer: 'json',
         actions: [
           { label: 'Bad action',
@@ -191,6 +193,51 @@ defineWorkspace<TrackerContext>()({
       } } },
       handler: () => 'ok',
     },
+  },
+});
+
+defineWorkspace<TrackerContext>()({
+  id: 'invalid-semantic-collection-operation',
+  mutations: { save: { input: z.object({ id: z.string() }), output: z.string(), handler: () => 'saved' } },
+  queries: { rows: {
+    input: z.object({}), output: z.object({ rows: z.array(z.object({ id: z.string() })), nextCursor: z.string().nullable() }),
+    views: { default: 'table', variants: { table: { title: 'Rows', renderer: 'table', rowKey: 'id', collection: {
+      itemKey: 'id', columns: [],
+      // @ts-expect-error Collection editor mutations are checked against this workspace's mutation catalog.
+      editor: { mutation: 'missingMutation' },
+    } } } },
+    handler: () => ({ rows: [], nextCursor: null }),
+  } },
+});
+
+defineWorkspace<TrackerContext>()({
+  id: 'semantic-admin-callback-inference',
+  queries: { rows: {
+    input: z.object({ limit: z.number(), search: z.string().optional() }),
+    output: z.object({ rows: z.array(z.object({ id: z.string() })), nextCursor: z.string().nullable() }),
+    views: { default: 'compact', variants: { compact: { title: 'Compact', renderer: 'table', rowKey: 'id', collection: { itemKey: 'id', columns: [] } } } },
+    handler: () => ({ rows: [], nextCursor: null }),
+  } },
+  mutations: { save: { input: z.object({ id: z.string() }), output: z.string(), handler: () => 'saved' } },
+  admin: ({ ui, queries, mutations }) => {
+    const rows = queries.rows.view('compact', { id: 'rows', input: { limit: 10 } });
+    const boundRows = queries.rows.view('compact', { id: 'bound-rows', input: { limit: 10 }, inputBindings: { search: { state: 'term' } } });
+    // @ts-expect-error Query handles are inferred from this definition's catalog.
+    queries.missing;
+    // @ts-expect-error Query callback inputs use the schema's accepted input type.
+    queries.rows.view('compact', { id: 'bad-input', input: { limit: 'many' } });
+    const overview = ui.page({ title: 'Overview', state: { term: { type: 'text', label: 'Search', default: '' } }, blocks: [rows, boundRows, { id: 'save', type: 'mutation-form', operation: mutations.save.name }] });
+    const operationConsole = ui.page({ title: 'Catalog console', layout: 'two-column', blocks: [
+      ui.operationCatalog({ id: 'catalog', selection: 'main' }),
+      ui.operationExecutor({ id: 'runner', selection: 'main' }),
+    ] });
+    const invalidReference = ui.page({ title: 'Invalid reference', state: { term: { type: 'text', label: 'Search', default: '' } }, blocks: [
+      // @ts-expect-error State references are scoped to the containing page.
+      queries.rows.view('compact', { id: 'bad-reference', input: { limit: 10 }, inputBindings: { search: {
+        state: 'missing',
+      } } }),
+    ] });
+    return { pages: { overview, operationConsole, invalidReference } };
   },
 });
 

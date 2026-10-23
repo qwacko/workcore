@@ -441,7 +441,7 @@ describe('Workcore HTTP runtime', () => {
     const response = await handler(new Request('http://localhost/api/manifest?applicationId=counter&workspaceId=one', { headers: { 'x-actor': 'alice' } }));
     expect(response.status).toBe(200);
     const manifest = await response.json() as { protocolVersion: number; schemaDialect: string; operations: Array<{ name: string }> };
-    expect(manifest.protocolVersion).toBe(1);
+    expect(manifest.protocolVersion).toBe(2);
     expect(manifest.schemaDialect).toContain('2020-12');
     expect(manifest.operations.map(({ name }) => name)).toEqual(['value', 'increment', 'update']);
   });
@@ -451,9 +451,12 @@ describe('Workcore HTTP runtime', () => {
     const app = defineWorkspace<AppContext>()({
       id: 'dash',
       admin: {
-        defaultPage: 'overview',
+        defaultPage: 'custom-only',
         builtins: { schedules: false, agents: false },
-        pages: { overview: { title: 'Overview', layout: 'two-column', blocks: [{ id: 'count', type: 'query', operation: 'value', input: {} }, { id: 'edit', type: 'mutation-form', operation: 'increment' }, { id: 'schedule-resource', type: 'resource', resource: 'schedules' }] } },
+        pages: {
+          overview: { title: 'Overview', layout: 'two-column', blocks: [{ id: 'count', type: 'query', operation: 'value', input: {} }, { id: 'edit', type: 'mutation-form', operation: 'increment' }, { id: 'schedule-resource', type: 'resource', resource: 'schedules' }, { id: 'trend', type: 'custom', component: 'dash/trend', version: 1, props: { metric: 'count' } }] },
+          'custom-only': { title: 'Custom renderer', blocks: [{ id: 'chart', type: 'custom', component: 'dash/chart', version: 2 }] },
+        },
       },
       queries: { value: { input: objectSchema, output: numberSchema, api: true, permission: 'read', handler: ({ ctx }) => ctx.app.value.current } },
       mutations: { increment: { input: objectSchema, output: numberSchema, api: true, permission: 'write', handler: ({ ctx }) => ++ctx.app.value.current } },
@@ -465,10 +468,106 @@ describe('Workcore HTTP runtime', () => {
       services,
     });
     const manifest = await (await platform.httpHandler({ apiBasePath: '/api' })(req('/manifest?applicationId=dash&workspaceId=one'))).json();
-    expect(manifest.defaultPage).toBe('overview');
-    expect(manifest.pages.map((page: { id: string }) => page.id)).toEqual(['operations', 'tasks', 'overview']);
-    expect(manifest.pages.at(-1).blocks.map((block: { id: string }) => block.id)).toEqual(['count', 'edit', 'schedule-resource']);
+    expect(manifest.interface.defaultPage).toBe('custom-only');
+    expect(manifest.interface.pages.map((page: { id: string }) => page.id)).toEqual(['operations', 'tasks', 'overview', 'custom-only']);
+    expect(manifest.interface.pages.find((page: { id: string }) => page.id === 'overview').blocks.map((block: { id: string }) => block.id)).toEqual(['count', 'edit', 'schedule-resource', 'trend']);
+    expect(manifest.interface).toMatchObject({ version: 1, requiredFeatures: ['operation-views-v1', 'operation-catalog-v1', 'custom-placeholder-v1'] });
+    expect(manifest).not.toHaveProperty('pages');
+    expect(manifest.operations[0]).not.toHaveProperty('ui');
+    expect(manifest.interface.operationViews).toHaveLength(manifest.operations.length);
+    expect(manifest.interface.pages[0]).toMatchObject({ id: 'operations', blocks: [{ id: 'operation-catalog', type: 'operation-catalog', selection: 'operation' }, { id: 'operation-executor', type: 'operation-executor', selection: 'operation' }] });
+    expect(manifest.interface.pages[1]).toMatchObject({ id: 'tasks' });
+    expect(manifest.interface.pages.find((page: { id: string }) => page.id === 'overview')).toMatchObject({ layout: 'grid' });
+    expect(manifest.interface.pages.find((page: { id: string }) => page.id === 'overview').blocks.at(-1)).toMatchObject({ type: 'custom', component: 'dash/trend', version: 1, props: { metric: 'count' } });
+    expect(manifest.interface.defaultPage).toBe('custom-only');
+    expect(manifest.interface.pages.at(-1)).toMatchObject({ id: 'custom-only', blocks: [{ type: 'custom', component: 'dash/chart', version: 2 }] });
     expect(manifest.capabilities).toMatchObject({ tasksRead: true, schedulesRead: true, schedulesManage: true, historyRead: false });
+  });
+
+  it('projects collection editors only when the actor can see the declared mutation', async () => {
+    const services = createMemoryState({ workspaces: [{ applicationId: 'semantic', id: 'one', name: 'One', actors: ['owner', 'reader'] }] });
+    const queryInput = schema<Record<string, unknown>>((value): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value));
+    queryInput['~standard'].jsonSchema.input = () => ({ type: 'object', properties: { search: { type: 'string' }, status: { type: 'string', enum: ['planned', 'complete'] }, limit: { type: 'integer', minimum: 1, maximum: 100 }, cursor: { type: 'string' } } });
+    const queryOutput = schema<{ rows: Array<{ id: string; title: string; status: string; updatedAt: Date; owner: { name: string } }>; nextCursor: string | null }>((value): value is { rows: Array<{ id: string; title: string; status: string; updatedAt: Date; owner: { name: string } }>; nextCursor: string | null } => !!value && typeof value === 'object');
+    queryOutput['~standard'].jsonSchema.output = () => ({ type: 'object', properties: { rows: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' }, status: { type: 'string' }, updatedAt: { type: 'string', format: 'date-time' }, owner: { type: 'object', properties: { name: { type: 'string' } } } } } }, nextCursor: { type: ['string', 'null'] } } });
+    const editInput = schema<Record<string, unknown>>((value): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value));
+    editInput['~standard'].jsonSchema.input = () => ({ type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' }, status: { type: 'string', enum: ['planned', 'complete'] } }, required: ['id', 'title', 'status'] });
+    const app = defineWorkspace<AppContext>()({
+      id: 'semantic',
+      admin: { pages: { activity: { title: 'Activity', blocks: [{ id: 'activities', type: 'query', operation: 'activities', variant: 'manage' }] } } },
+      queries: { activities: {
+        input: queryInput, output: queryOutput, api: true, permission: 'activities.read', handler: () => ({ rows: [], nextCursor: null }),
+        views: { default: 'manage', variants: { manage: { title: 'Manage', renderer: 'table', rowKey: 'id', collection: { itemKey: 'id', columns: [{ field: 'title', editable: true }, { field: 'status', editable: true }, { field: 'owner.name', editable: false }], actions: [{ label: 'Edit activity', mutation: 'editActivity', bind: { id: { fromRow: 'id' } } }], editor: { mutation: 'editActivity' } } } } },
+      } },
+      mutations: { editActivity: { input: editInput, output: objectSchema, api: true, permission: 'activities.write', handler: () => ({}) } },
+    });
+    const platform = createPlatform({
+      applications: [app.registerApplication({ createAppContext: () => ({ value: { current: 0 } }) })],
+      auth: { authenticate: (request) => ({ id: request.headers.get('x-actor') ?? 'reader' }) },
+      authorise: ({ actor, permission }) => permission === 'activities.read' || (actor.id === 'owner' && permission === 'activities.write'),
+      services,
+    });
+    const handler = platform.httpHandler({ apiBasePath: '/api' });
+    const getManifest = async (actor: string) => (await handler(new Request('http://localhost/api/manifest?applicationId=semantic&workspaceId=one', { headers: { 'x-actor': actor } }))).json();
+    const owner = await getManifest('owner');
+    const reader = await getManifest('reader');
+    expect(owner.interface.requiredFeatures).toContain('collection-editor-v1');
+    expect(owner.interface.pages.find((page: { id: string }) => page.id === 'activity').blocks[0].variant).toBe('manage');
+
+    expect(owner.interface.operationViews.find((view: { operation: string }) => view.operation === 'activities').variants.manage.collection.editor.mutation).toBe('editActivity');
+    expect(owner.interface.operationViews.find((view: { operation: string }) => view.operation === 'activities').variants.manage.collection.actions).toMatchObject([{ mutation: 'editActivity' }]);
+    expect(Object.keys(owner.interface.operationViews.find((view: { operation: string }) => view.operation === 'activities').variants)).toEqual(['manage']);
+    expect(reader.interface.operationViews.find((view: { operation: string }) => view.operation === 'activities').variants.manage.collection).not.toHaveProperty('editor');
+    expect(reader.interface.operationViews.find((view: { operation: string }) => view.operation === 'activities').variants.manage.collection).not.toHaveProperty('actions');
+    expect(reader.operations.map((operation: { name: string }) => operation.name)).toEqual(['activities']);
+    expect(() => defineWorkspace<AppContext>()({
+      id: 'invalid-nested-collection-path',
+      queries: { activities: { input: queryInput, output: queryOutput, api: true, views: { default: 'table', variants: { table: { title: 'Table', renderer: 'table', rowKey: 'id', collection: { itemKey: 'id', columns: [{ field: 'owner.missing' }] } } } }, handler: () => ({ rows: [], nextCursor: null }) } },
+    })).toThrow(/Collection view 'activities\/table' references missing result field 'owner\.missing'/);
+    expect(() => defineWorkspace<AppContext>()({
+      id: 'invalid-collection-filter-type',
+      queries: { activities: { input: queryInput, output: queryOutput, api: true, views: { default: 'table', variants: { table: { title: 'Table', renderer: 'table', rowKey: 'id', collection: { itemKey: 'id', columns: [{ field: 'title', filter: { type: 'substring' } as never }] } } } }, handler: () => ({ rows: [], nextCursor: null }) } },
+    })).toThrow(/unsupported filter type 'substring'/);
+  });
+
+  it('allows page query blocks to reference operation view variants', () => {
+    const input = schema<{ limit: number; cursor?: string; status?: 'planned' | 'complete' }>((value): value is { limit: number; cursor?: string; status?: 'planned' | 'complete' } => !!value && typeof value === 'object' && typeof (value as { limit?: unknown }).limit === 'number');
+    input['~standard'].jsonSchema.input = () => ({ type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, cursor: { type: 'string' }, status: { type: 'string', enum: ['planned', 'complete'] } }, required: ['limit'] });
+    const output = schema<{ rows: Array<{ id: string }>; nextCursor: string | null }>((value): value is { rows: Array<{ id: string }>; nextCursor: string | null } => !!value && typeof value === 'object');
+    output['~standard'].jsonSchema.output = () => ({ type: 'object', properties: { rows: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } }, nextCursor: { type: ['string', 'null'] } } });
+    const app = defineWorkspace<AppContext>()({
+      id: 'operation-view-only',
+      queries: {
+        rows: {
+          input, output, api: true, handler: () => ({ rows: [], nextCursor: null }),
+          views: { default: 'cards', variants: { cards: { title: 'Cards', renderer: 'table', rowKey: 'id', collection: { itemKey: 'id', columns: [{ field: 'id' }] } } } },
+        },
+      },
+      admin: ({ ui, queries }) => ({ pages: { overview: ui.page({
+        title: 'Overview',
+        state: { status: { type: 'select', label: 'Status', default: '', options: [{ value: '', label: 'All' }, { value: 'planned', label: 'Planned' }, { value: 'complete', label: 'Complete' }] } },
+        blocks: [queries.rows.view('cards', { id: 'rows', input: { limit: 10 }, inputBindings: { status: { state: 'status' } } })],
+      }) } }),
+    });
+    expect(app.admin?.pages?.overview?.blocks[0]).toMatchObject({ type: 'query', operation: 'rows', variant: 'cards' });
+    expect(() => defineWorkspace<AppContext>()({
+      id: 'invalid-enum-state-binding',
+      queries: { rows: { input, output, api: true, handler: () => ({ rows: [], nextCursor: null }) } },
+      admin: { pages: { overview: {
+        title: 'Overview',
+        state: { status: { type: 'select', label: 'Status', default: 'archived', options: [{ value: 'archived', label: 'Archived' }] } },
+        blocks: [{ id: 'rows', type: 'query', operation: 'rows', input: { limit: 10 }, inputBindings: { status: { state: 'status' } } }],
+      } } },
+    })).toThrow(/select state 'status' options must match query enum input 'status'/);
+  });
+
+  it('infers an offset table view from bounded offset and totalCount schemas', () => {
+    const input = schema<{ limit: number; offset: number }>((value): value is { limit: number; offset: number } => !!value && typeof value === 'object');
+    input['~standard'].jsonSchema.input = () => ({ type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, offset: { type: 'integer', minimum: 0 } }, required: ['limit', 'offset'] });
+    const output = schema<{ rows: Array<{ id: string; title: string }>; totalCount: number }>((value): value is { rows: Array<{ id: string; title: string }>; totalCount: number } => !!value && typeof value === 'object');
+    output['~standard'].jsonSchema.output = () => ({ type: 'object', properties: { rows: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' } } } }, totalCount: { type: 'integer', minimum: 0 } } });
+    const app = defineWorkspace<AppContext>()({ id: 'offset-table', queries: { rows: { input, output, api: true, handler: () => ({ rows: [], totalCount: 0 }) } } });
+    expect(app.queries.rows.views).toMatchObject({ default: 'table', variants: { table: { renderer: 'table', collection: { paginationMode: 'offset' } } } });
   });
 
   it('publishes agent observability capabilities and strips unauthorized chat send metadata', async () => {
@@ -481,8 +580,8 @@ describe('Workcore HTTP runtime', () => {
       id: 'chat-app',
       queries: {
         conversation: {
-          input: chatQueryInput, output: objectSchema, api: true, permission: 'chat.read', handler: () => ({ conversation: { id: 'thread-1' }, messages: [] }),
-          ui: { default: 'chat', variants: { chat: { title: 'Conversation', renderer: 'chat', chat: { sendMutation: 'sendMessage', messageInput: 'message', conversationIdInput: 'conversationId', conversationQueryInput: 'conversationId' } } } },
+          input: chatQueryInput, output: objectSchema, api: true, permission: 'chat.read', handler: () => ({ conversation: { id: 'thread-1' }, items: [], nextCursor: null }),
+          views: { default: 'chat', variants: { chat: { title: 'Conversation', renderer: 'chat', chat: { sendMutation: 'sendMessage', messageInput: 'message', conversationIdInput: 'conversationId', conversationQueryInput: 'conversationId' } } } },
         },
       },
       mutations: { sendMessage: { input: sendInput, output: objectSchema, api: true, permission: 'chat.send', handler: () => ({ runId: 'run-1' }) } },
@@ -494,13 +593,32 @@ describe('Workcore HTTP runtime', () => {
       services,
     });
     const response = await platform.httpHandler({ apiBasePath: '/api' })(req('/manifest?applicationId=chat-app&workspaceId=one'));
-    const manifest = await response.json() as { pages: Array<{ id: string }>; capabilities: Record<string, boolean>; operations: Array<{ name: string; ui: { variants: Record<string, { renderer: string; chat?: unknown }> } | null }> };
-    expect(manifest.pages.map((page) => page.id)).toContain('agents');
+    const manifest = await response.json() as { interface: { requiredFeatures: string[]; pages: Array<{ id: string; blocks?: Array<{ id: string; type: string; resource?: string; title?: string }> }>; operationViews: Array<{ operation: string; kind: string; default: string; variants: Record<string, { renderer: string; chat?: unknown }> }> }; capabilities: Record<string, boolean>; operations: Array<{ name: string }> };
+    expect(manifest.interface.pages.map((page) => page.id)).toContain('agents');
+    expect(manifest.interface.pages.find((page) => page.id === 'agents')?.blocks).toEqual([{ id: 'agent-runs', type: 'resource', resource: 'agents', title: 'Agent runs' }]);
     expect(manifest.capabilities.agentRunsRead).toBe(true);
     expect(manifest.capabilities.agentToolPayloadsRead).toBe(false);
     expect(manifest.operations.map((operation) => operation.name)).toEqual(['conversation']);
-    expect(manifest.operations[0]?.ui?.variants.chat).toMatchObject({ renderer: 'chat' });
-    expect(manifest.operations[0]?.ui?.variants.chat).not.toHaveProperty('chat');
+    expect(manifest.interface.operationViews[0]?.variants.chat).toMatchObject({ renderer: 'chat' });
+    expect(manifest.interface.operationViews[0]?.variants.chat).not.toHaveProperty('chat');
+    expect(manifest.interface.requiredFeatures).toContain('operation-views-v1');
+    expect(manifest.interface.operationViews[0]?.variants.chat).toMatchObject({ renderer: 'chat' });
+    expect(manifest.interface.operationViews[0]?.variants.chat).not.toHaveProperty('chat');
+  });
+
+  it('allows a read-only chat view without declaring a send mutation', () => {
+    const app = defineWorkspace<AppContext>()({
+      id: 'read-only-chat',
+      queries: {
+        timeline: {
+          input: objectSchema,
+          output: objectSchema,
+          handler: () => ({ items: [], nextCursor: null }),
+          views: { default: 'timeline', variants: { timeline: { title: 'Timeline', renderer: 'chat', chatActions: {} } } },
+        },
+      },
+    });
+    expect(app.queries.timeline.views?.variants.timeline?.renderer).toBe('chat');
   });
 
   it('rejects unknown admin operation references at definition time', () => {
@@ -508,6 +626,10 @@ describe('Workcore HTTP runtime', () => {
       id: 'invalid-admin',
       admin: { pages: { overview: { title: 'Overview', blocks: [{ id: 'bad', type: 'query', operation: 'missing' }] } } },
     })).toThrow(/unknown query operation 'missing'/);
+    expect(() => defineWorkspace<AppContext>()({
+      id: 'unpaired-operation-catalog',
+      admin: { pages: { overview: { title: 'Overview', blocks: [{ id: 'catalog', type: 'operation-catalog', selection: 'main' }] } } },
+    })).toThrow(/requires one catalog and one executor/);
   });
 
   it('distinguishes event delivery failure from a committed mutation and does not trigger work', async () => {
