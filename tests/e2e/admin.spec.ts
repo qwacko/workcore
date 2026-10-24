@@ -32,8 +32,8 @@ test('admin supports editing and streams the update to another authorized client
 
   await alice.getByLabel('Workspace').selectOption('team');
   await bob.getByLabel('Workspace').selectOption('team');
-  await alice.locator('.operation-row').filter({ hasText: 'Activities' }).click();
-  await bob.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await alice.locator('.operation-row').filter({ hasText: 'activities.list' }).click();
+  await bob.locator('.operation-row').filter({ hasText: 'activities.list' }).click();
   await expect(alice.getByRole('table')).toBeVisible();
   await expect(bob.getByRole('table')).toBeVisible();
 
@@ -55,7 +55,7 @@ test('admin supports editing and streams the update to another authorized client
   await expect(bob.getByRole('table').getByText(updatedTitle)).toBeVisible({ timeout: 8_000 });
 
   const denied = await bob.request.post(`${baseURL}/workcore/api/query`, {
-    data: { applicationId: 'tracker', workspaceId: 'personal-alice', operation: 'activities', input: {} },
+    data: { applicationId: 'tracker', workspaceId: 'personal-alice', operation: 'activities.list', input: {} },
   });
   expect(denied.status()).toBe(403);
   await aliceContext.close();
@@ -75,11 +75,11 @@ test('the admin renders configured custom pages from operation metadata', async 
   await expect(page.getByRole('heading', { name: 'Activity dashboard', exact: true })).toBeVisible();
   await expect(page.getByRole('table')).toBeVisible();
   await page.getByText('Query input (JSON)').click();
-  await page.getByLabel('Input for activities').fill(JSON.stringify({ limit: 1 }, null, 2));
+  await page.getByLabel('Input for activities.list').fill(JSON.stringify({ limit: 1 }, null, 2));
   await page.getByRole('button', { name: 'Run query' }).click();
   await expect(page.getByRole('table').getByRole('row')).toHaveCount(2);
   await expect(page.getByRole('button', { name: 'Submit mutation' })).toBeVisible();
-  await page.getByLabel('Input for activities').fill(JSON.stringify({ limit: 10 }, null, 2));
+  await page.getByLabel('Input for activities.list').fill(JSON.stringify({ limit: 10 }, null, 2));
   await page.getByRole('button', { name: 'Run query' }).click();
   await page.locator('.row-actions button[aria-label^="Edit title"]').first().click();
   await expect(page.getByRole('heading', { name: 'Edit record' })).toBeVisible();
@@ -94,6 +94,31 @@ test('the admin renders configured custom pages from operation metadata', async 
   await expect(page.getByRole('heading', { name: 'Activity dashboard', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Edit activity' }).first().click();
   await expect(page.getByRole('heading', { name: 'Edit activity' })).toBeVisible();
+});
+
+test('the tracker composes activity updates and live summaries into Milo on a shared overview page', async ({ page }) => {
+  await login(page, 'alice');
+  const call = async (path: string, operation: string, input: unknown) => {
+    const response = await page.request.post(`/workcore/api/${path}`, {
+      headers: { 'x-workcore-codec': testCodec.id },
+      data: JSON.parse(encodeWire({ applicationId: 'tracker', workspaceId: 'personal-alice', operation, input })),
+    });
+    expect(response.ok()).toBeTruthy();
+    return decodeWire(await response.json()).result;
+  };
+  const activities = (await call('query', 'activities.list', { limit: 100 })).rows as Array<{ id: string; title: string; status: string }>;
+  const first = activities[0]!;
+  const title = `Composed trail update ${Date.now()}`;
+  await call('mutate', 'activities.edit', { id: first.id, title, status: first.status });
+  await page.getByRole('button', { name: /Workspace overview/ }).click();
+  await expect(page.getByRole('table')).toContainText(title);
+  await page.getByLabel('Message').fill('What changed?');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.locator('.chat-message:not(.user-message)').last()).toContainText(title, { timeout: 8000 });
+  await page.getByLabel('Message').fill('How are my activities looking?');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  const complete = activities.filter((activity) => activity.status === 'complete').length;
+  await expect(page.locator('.chat-message:not(.user-message)').last()).toContainText(`${activities.length} activities: ${complete} complete and ${activities.length - complete} planned`, { timeout: 8000 });
 });
 
 test('page mutation forms submit through the authorized operation and refresh their query', async ({ page }) => {
@@ -113,7 +138,7 @@ test('page mutation forms submit through the authorized operation and refresh th
 
 test('operation default view uses its query-owned collection configuration', async ({ page }) => {
   await login(page, 'alice');
-  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.locator('.operation-row').filter({ hasText: 'activities.list' }).click();
   await expect(page.getByRole('button', { name: 'Manage activities', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Run query' }).click();
   await expect(page.getByLabel('Filter title')).toBeVisible();
@@ -126,7 +151,7 @@ test('operation default view uses its query-owned collection configuration', asy
 
 test('authored JSON variant renders JSON without adding inferred picker variants', async ({ page }) => {
   await login(page, 'alice');
-  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.locator('.operation-row').filter({ hasText: 'activities.list' }).click();
   await page.getByRole('button', { name: 'Activity data', exact: true }).click();
   await page.getByRole('button', { name: 'Run query' }).click();
   await expect(page.locator('.result')).toContainText('rows');
@@ -134,7 +159,7 @@ test('authored JSON variant renders JSON without adding inferred picker variants
 
 test('linked mutation actions prefill matching row fields by schema', async ({ page }) => {
   await login(page, 'alice');
-  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.locator('.operation-row').filter({ hasText: 'activities.list' }).click();
   await page.getByRole('button', { name: 'Run query' }).click();
   await page.locator('.row-actions').getByRole('button', { name: /Edit activity:/ }).first().click();
   await expect(page.getByRole('heading', { name: 'Edit activity', exact: true })).toBeVisible();
@@ -146,7 +171,7 @@ test('linked mutation actions prefill matching row fields by schema', async ({ p
 
 test('Operations exposes authored named views in its variant picker', async ({ page }) => {
   await login(page, 'alice');
-  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.locator('.operation-row').filter({ hasText: 'activities.list' }).click();
   await page.getByRole('button', { name: 'Manage activities', exact: true }).click();
   await page.getByRole('button', { name: 'Run query' }).click();
   await expect(page.getByLabel('Filter title')).toBeVisible();
@@ -155,7 +180,7 @@ test('Operations exposes authored named views in its variant picker', async ({ p
 
 test('collection filter changes confirm and discard dirty editor drafts', async ({ page }) => {
   await login(page, 'alice');
-  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.locator('.operation-row').filter({ hasText: 'activities.list' }).click();
   await page.locator('.row-actions button[aria-label^="Edit title"]').first().click();
   const title = page.locator('.collection-editor .generated-form input[type="text"]').last();
   await title.fill('Unsaved activity draft');
@@ -176,7 +201,7 @@ test('collection filter changes confirm and discard dirty editor drafts', async 
 
 test('page navigation confirms before discarding a dirty collection editor', async ({ page }) => {
   await login(page, 'alice');
-  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.locator('.operation-row').filter({ hasText: 'activities.list' }).click();
   await page.locator('.row-actions button[aria-label^="Edit title"]').first().click();
   const title = page.locator('.collection-editor .generated-form input[type="text"]').last();
   await title.fill('Draft preserved on canceled navigation');
@@ -232,7 +257,7 @@ test('application-authored operation catalog and executor use checked manifest o
   await login(page, 'alice');
   await page.getByRole('button', { name: 'Operation workbench' }).click();
   await expect(page.getByRole('heading', { name: 'Operation workbench', exact: true })).toBeVisible();
-  await page.locator('.operation-row').filter({ hasText: 'Activities' }).click();
+  await page.locator('.operation-row').filter({ hasText: 'activities.list' }).click();
   await page.getByRole('button', { name: 'Run query' }).click();
   await expect(page.getByRole('table')).toBeVisible();
 });
@@ -458,14 +483,14 @@ test('custom query responses from a previous workspace visit cannot overwrite cu
   let matchingRequests = 0;
   await page.route('**/api/query', async (route) => {
     const input = decodeWire(route.request().postDataJSON());
-    if (input.operation !== 'activities' || input.workspaceId !== 'personal-alice' || input.input.limit !== 1) return route.continue();
+    if (input.operation !== 'activities.list' || input.workspaceId !== 'personal-alice' || input.input.limit !== 1) return route.continue();
     const old = matchingRequests++ === 0;
     if (old) { entered.resolve(); await release.promise; }
-    await route.fulfill({ contentType: 'application/json', body: encodeWire({ result: { rows: [{ id: 'regression', title: old ? 'STALE_WORKSPACE_RESULT' : 'CURRENT_WORKSPACE_RESULT', status: 'planned', updatedAt: new Date() }], nextCursor: null } }) });
+    await route.fulfill({ contentType: 'application/json', body: encodeWire({ executionId: old ? 'stale-execution' : 'current-execution', result: { rows: [{ id: 'regression', title: old ? 'STALE_WORKSPACE_RESULT' : 'CURRENT_WORKSPACE_RESULT', status: 'planned', updatedAt: new Date() }], nextCursor: null } }) });
   });
   try {
     await page.getByText('Query input (JSON)').click();
-    await page.getByLabel('Input for activities').fill('{"limit":1}');
+    await page.getByLabel('Input for activities.list').fill('{"limit":1}');
     await page.getByRole('button', { name: 'Run query', exact: true }).click();
     await entered.promise;
     await page.getByLabel('Workspace').selectOption('team');
@@ -473,7 +498,7 @@ test('custom query responses from a previous workspace visit cannot overwrite cu
     await page.getByLabel('Workspace').selectOption('personal-alice');
     await expect(page.getByRole('table')).toBeVisible();
     await page.getByText('Query input (JSON)').click();
-    await page.getByLabel('Input for activities').fill('{"limit":1}');
+    await page.getByLabel('Input for activities.list').fill('{"limit":1}');
     await page.getByRole('button', { name: 'Run query', exact: true }).click();
     await expect(page.getByRole('table')).toContainText('CURRENT_WORKSPACE_RESULT');
     const staleResponse = page.waitForResponse(async (response) => response.url().endsWith('/api/query') && (await response.text()).includes('STALE_WORKSPACE_RESULT'));
@@ -490,14 +515,14 @@ test('custom launchers distinguish query, mutation and task operations with the 
     const manifest = decodeWire(await response.json()) as WorkcoreManifest;
     const input = { type: 'object', properties: {} };
     manifest.operations.push(
-      { kind: 'mutation', name: 'activities', input, output: input },
-      { kind: 'task', name: 'activities', input, output: input },
+      { kind: 'mutation', name: 'activities.list', input, output: input },
+      { kind: 'task', name: 'activities.list', input, output: input },
     );
     manifest.interface.operationViews.push(
-      { operation: 'activities', kind: 'mutation', default: 'form', variants: { form: { title: 'Same-name mutation', renderer: 'form' } } },
-      { operation: 'activities', kind: 'task', default: 'form', variants: { form: { title: 'Same-name task', renderer: 'form' } } },
+      { operation: 'activities.list', kind: 'mutation', default: 'form', variants: { form: { title: 'Same-name mutation', renderer: 'form' } } },
+      { operation: 'activities.list', kind: 'task', default: 'form', variants: { form: { title: 'Same-name task', renderer: 'form' } } },
     );
-    manifest.interface.pages.push({ id: 'namespace-test', title: 'Namespace test', blocks: [{ id: 'mutation', type: 'mutation-form', operation: 'activities' }, { id: 'task', type: 'task-launcher', operation: 'activities' }] });
+    manifest.interface.pages.push({ id: 'namespace-test', title: 'Namespace test', blocks: [{ id: 'mutation', type: 'mutation-form', operation: 'activities.list' }, { id: 'task', type: 'task-launcher', operation: 'activities.list' }] });
     await route.fulfill({ contentType: 'application/json', body: encodeWire(manifest) });
   });
   await login(page, 'alice');
@@ -551,19 +576,19 @@ test('tasks run once in the worker and schedules can be managed', async ({ page,
   await page.getByRole('button', { name: 'Schedule task' }).click();
   await page.getByRole('button', { name: 'Create schedule' }).click();
   await expect(page.getByRole('heading', { name: 'Schedules', level: 1 })).toBeVisible();
-  const cron = page.getByLabel('Cron for refreshSummary');
+  const cron = page.getByLabel('Cron for activities.refreshSummary');
   await expect(cron).toHaveValue('0 9 * * *');
   await cron.fill('30 8 * * *');
   await page.getByRole('button', { name: 'Task runs' }).click();
   await page.getByRole('button', { name: 'Schedules' }).click();
-  await expect(page.getByLabel('Cron for refreshSummary')).toHaveValue('30 8 * * *');
+  await expect(page.getByLabel('Cron for activities.refreshSummary')).toHaveValue('30 8 * * *');
   await page.getByRole('button', { name: 'Save' }).click();
-  await expect(page.getByLabel('Cron for refreshSummary')).toHaveValue('30 8 * * *');
+  await expect(page.getByLabel('Cron for activities.refreshSummary')).toHaveValue('30 8 * * *');
   await page.getByRole('button', { name: 'Disable' }).click();
   await expect(page.getByRole('button', { name: 'Enable' })).toBeVisible();
   await page.getByRole('button', { name: 'Remove' }).click();
   await page.getByRole('button', { name: 'Create schedule' }).click();
-  await expect(page.getByRole('dialog').getByLabel('Task')).toHaveValue('refreshSummary');
+  await expect(page.getByRole('dialog').getByLabel('Task')).toHaveValue('activities.refreshSummary');
   await page.getByRole('dialog').getByRole('button', { name: 'Create schedule' }).click();
   await expect(page.locator('.schedule-resource-card')).toHaveCount(1);
   await page.locator('.schedule-resource-card').getByRole('button', { name: 'Remove' }).click();

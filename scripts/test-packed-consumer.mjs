@@ -49,7 +49,7 @@ try {
   }, null, 2));
   await writeFile(join(consumer, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, skipLibCheck: true }, include: ['index.ts'] }, null, 2));
   await writeFile(join(consumer, 'index.ts'), `
-import { defineWorkspace } from '@workcore/core';
+import { defineWorkspace, defineApplication, defineModule, composeApplication } from '@workcore/core';
 import { createFileState, createFileWorkspaces } from '@workcore/adapters/file';
 import { createPostgresState, migratePostgres } from '@workcore/adapters/postgres';
 import { createRedisEvents } from '@workcore/adapters/redis';
@@ -68,6 +68,24 @@ void chatSchemas.input.parse({ types: ['prompt'] });
 const app = defineWorkspace<{ add(value: number): number }>()({ id: 'consumer', queries: { read: { input: schema, output: schema, api: true, permission: 'read', handler: ({ ctx, input }) => ({ value: ctx.app.add(input.value) }) } } });
 const client = createClient<typeof app>({ transport: createFetchTransport({}), applicationId: 'consumer', workspaceId: 'one' });
 void client.query('read', { value: 2 });
+const transformed = defineApplication()({ id: 'transformed', queries: {
+  read: { input: z.object({}), output: z.string().transform(Number).pipe(z.number()), api: true, permission: [], handler: () => '42' },
+  internal: { input: z.object({}), output: z.string(), permission: [], handler: () => 'internal' },
+} });
+const transformedClient = createClient<typeof transformed>({ transport: createFetchTransport(), applicationId: 'transformed', workspaceId: 'one' });
+void transformedClient.queryDetailed('read', {}).then(({ result }) => { const value: number = result; void value; });
+// @ts-expect-error Internal operations remain excluded after packing.
+void transformedClient.query('internal', {});
+const module = defineModule<{}, { value: () => Promise<string> }>()({ id: 'module', requires: { value: true }, queries: {
+  read: { input: z.object({}), output: z.string(), api: true, permission: [], handler: ({ dependencies }) => dependencies.value() },
+} });
+const composed = composeApplication<{}>()({ id: 'composed', modules: { first: module }, dependencies: { first: () => ({ value: async () => 'packed' }) } });
+const composedClient = createClient<typeof composed>({ transport: createFetchTransport(), applicationId: 'composed', workspaceId: 'one' });
+void composedClient.query('first.read', {}).then((result) => { const value: string = result; void value; });
+// @ts-expect-error Required module wiring remains required in installed declarations.
+composeApplication<{}>()({ id: 'missing', modules: { first: module } });
+// @ts-expect-error Namespaced client calls remain checked after packing.
+void composedClient.query('read', {});
 const services = createPostgresState({ pool: {} as never });
 void services.tasks;
 void createRedisEvents({ publisher: {} as never, subscriber: {} as never });
@@ -89,6 +107,8 @@ void createRedisEvents;
   run('pnpm', ['exec', 'tsc', '-p', 'tsconfig.json'], consumer);
   const smoke = `import { createAdminHandler } from '@workcore/admin/server'; const h=createAdminHandler({basePath:'/mounted/admin'}); const r=await h(new Request('http://localhost/mounted/admin')); const html=await r.text(); if(r.status!==200||!html.includes('/mounted/admin/assets/')) throw new Error('admin route/assets failed'); const assetPath=new URL(html.match(/src="([^"]+\.js)"/)?.[1]??'', 'http://localhost').pathname; const asset=await h(new Request('http://localhost'+assetPath)); if(asset.status!==200) throw new Error('packed admin asset missing'); console.log('packed admin route and asset verified');`;
   run('node', ['--input-type=module', '-e', smoke], consumer);
+  const compositionSmoke = `import { defineModule, composeApplication, createPlatform, createMemoryState } from '@workcore/core'; import { z } from 'zod'; const part=defineModule()({id:'part',queries:{read:{input:z.object({}),output:z.string(),api:true,permission:[],handler:()=> 'packed module'}}}); const app=composeApplication()({id:'packed',modules:{part}}); const services=createMemoryState({workspaces:[{applicationId:'packed',id:'one',name:'One',actors:['demo']}]}); const h=createPlatform({applications:[app.registerApplication({createAppContext:()=>({})})],auth:{authenticate:()=>({id:'demo'})},services}).httpHandler(); const r=await h(new Request('http://localhost/workcore/api/query',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({applicationId:'packed',workspaceId:'one',operation:'part.read',input:{}})})); if(r.status!==200||(await r.json()).result!=='packed module') throw new Error('Packed composition failed'); console.log('packed composition verified');`;
+  run('node', ['--input-type=module', '-e', compositionSmoke], consumer);
   console.log('Packed consumer type and runtime checks passed.');
 } finally {
   await rm(temporary, { recursive: true, force: true });

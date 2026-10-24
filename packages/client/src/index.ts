@@ -1,4 +1,4 @@
-import type { AgentRun, AgentRunStatus, AgentTraceEvent, DefinitionAt, HistoryEntry, InputFor, OutputFor, QueryNames, MutationNames, ScheduleEntry, TaskRun, TaskNames, OperationViews as CoreOperationViews, SemanticInterfaceDocument } from '@workcore/core';
+import type { AgentRun, AgentRunStatus, AgentTraceEvent, DefinitionAt, HistoryEntry, InputFor, OutputFor, PublicOperationNames, ScheduleEntry, TaskRun, ValidationIssue, OperationViews as CoreOperationViews, SemanticInterfaceDocument } from '@workcore/core';
 import { jsonWireCodec, type JsonValue, type WireCodec } from '@workcore/core';
 
 export type TransportRequest = {
@@ -7,10 +7,16 @@ export type TransportRequest = {
   workspaceId: string;
   operation: string;
   input: unknown;
+  signal?: AbortSignal;
+  correlationId?: string;
 };
+
+export type OperationResponse<T> = { result: T; executionId?: string; correlationId?: string; deliveryWarnings: string[] };
+export type CallOptions = Pick<TransportRequest, 'signal' | 'correlationId'>;
 
 export type WorkcoreTransport = {
   request<T>(request: TransportRequest): Promise<T>;
+  requestDetailed?<T>(request: TransportRequest): Promise<OperationResponse<T>>;
   manifest(applicationId: string, workspaceId: string): Promise<WorkcoreManifest>;
   applications(): Promise<Array<{ id: string; workspaceCount: number }>>;
   workspaces(applicationId: string): Promise<Array<{ id: string; name: string }>>;
@@ -45,6 +51,7 @@ export type AgentRunFilter = { limit?: number; cursor?: string; agent?: string; 
 
 export type WorkcoreManifest = {
   protocolVersion: 2;
+  schemaDialect?: string;
   applicationId: string;
   operations: Array<{
     name: string;
@@ -191,26 +198,48 @@ function isSemanticJson(value: unknown, seen = new WeakSet<object>(), depth = 0)
   return valid;
 }
 
-export function createFetchTransport(options: { baseUrl?: string; fetch?: typeof fetch; credentials?: RequestCredentials; onWarning?: (code: string) => void; codec?: WireCodec }): WorkcoreTransport {
+export type SubscriptionSource = Pick<EventSource, 'onopen' | 'onmessage' | 'onerror' | 'close'>;
+export type FetchTransportOptions = {
+  baseUrl?: string;
+  fetch?: typeof fetch;
+  credentials?: RequestCredentials;
+  headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>);
+  eventSource?: (url: string, init: EventSourceInit) => SubscriptionSource;
+  onWarning?: (code: string) => void;
+  codec?: WireCodec;
+};
+
+export function createFetchTransport(options: FetchTransportOptions = {}): WorkcoreTransport {
   const fetcher = options.fetch ?? fetch;
   const baseUrl = (options.baseUrl ?? '/workcore/api').replace(/\/$/, '');
   const codec = options.codec ?? jsonWireCodec;
   if (!codec.id) throw new TypeError('Wire codecs must provide a non-empty id');
   if (codec.id === jsonWireCodec.id && codec !== jsonWireCodec) throw new TypeError("The 'json' codec id is reserved for jsonWireCodec");
-  async function json<T>(url: string, init?: RequestInit): Promise<T> {
-    const headers = new Headers(init?.headers);
+  async function json<T>(url: string, init?: RequestInit, readHeaders?: (headers: Headers, status: number) => void): Promise<T> {
+    const headers = new Headers(typeof options.headers === 'function' ? await options.headers() : options.headers);
+    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
     headers.set('x-workcore-codec', codec.id);
     const response = await fetcher(url, { credentials: options.credentials ?? 'same-origin', ...init, headers });
-    const data = await response.json().catch(() => ({})) as unknown;
+    readHeaders?.(response.headers, response.status);
+    let data: unknown;
+    try { data = await response.json(); }
+    catch { throw new WorkcoreClientError('INVALID_RESPONSE', 'Server response was not valid JSON', response.status, { correlationId: response.headers.get('x-correlation-id') ?? undefined }); }
+    const decode = (payload: JsonValue) => {
+      try { return codec.decode(payload); }
+      catch { throw new WorkcoreClientError('WIRE_DECODING_FAILED', `Could not decode server response with '${codec.id}'`, response.status, { correlationId: response.headers.get('x-correlation-id') ?? undefined }); }
+    };
     if (!response.ok) {
       let decoded = data;
-      if (codec.id !== 'json' && isCodecEnvelope(data, codec.id)) decoded = codec.decode((data as { payload: JsonValue }).payload);
-      const payload = decoded as { error?: { code?: string; message?: string } };
-      throw new WorkcoreClientError(payload.error?.code ?? 'HTTP_ERROR', payload.error?.message ?? `Request failed (${response.status})`, response.status);
+      if (codec.id !== 'json' && isCodecEnvelope(data, codec.id)) decoded = decode(data.payload);
+      const payload = decoded && typeof decoded === 'object' ? decoded as { error?: { code?: string; message?: string; correlationId?: string; issues?: ValidationIssue[] } } : {};
+      throw new WorkcoreClientError(payload.error?.code ?? 'HTTP_ERROR', payload.error?.message ?? `Request failed (${response.status})`, response.status, {
+        correlationId: payload.error?.correlationId ?? response.headers.get('x-correlation-id') ?? undefined,
+        issues: payload.error?.issues,
+      });
     }
     if (codec.id === 'json') return data as T;
-    if (!isCodecEnvelope(data, codec.id)) throw new WorkcoreClientError('WIRE_CODEC_MISMATCH', `Server response did not use '${codec.id}'`, response.status);
-    return codec.decode((data as { payload: JsonValue }).payload) as T;
+    if (!isCodecEnvelope(data, codec.id)) throw new WorkcoreClientError('WIRE_CODEC_MISMATCH', `Server response did not use '${codec.id}'`, response.status, { correlationId: response.headers.get('x-correlation-id') ?? undefined });
+    return decode(data.payload) as T;
   }
   const operationBody = (value: unknown) => {
     if (codec.id === 'json') return JSON.stringify(jsonWireCodec.encode(value));
@@ -222,18 +251,30 @@ export function createFetchTransport(options: { baseUrl?: string; fetch?: typeof
     workspaceId,
     ...(limit === undefined ? {} : { limit: String(limit) }),
   });
+  const requestDetailed = async <T>({ path, applicationId, workspaceId, operation, input, signal, correlationId }: TransportRequest): Promise<OperationResponse<T>> => {
+    let responseCorrelationId: string | undefined;
+    let responseStatus = 200;
+    const response = await json<unknown>(`${baseUrl}/${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...(correlationId ? { 'x-correlation-id': correlationId } : {}) },
+      ...(signal ? { signal } : {}), body: operationBody({ applicationId, workspaceId, operation, input }),
+    }, (headers, status) => { responseCorrelationId = headers.get('x-correlation-id') ?? undefined; responseStatus = status; });
+    if (!response || typeof response !== 'object' || Array.isArray(response)) throw new WorkcoreClientError('INVALID_RESPONSE', 'Expected an operation response object', responseStatus, { correlationId: responseCorrelationId });
+    const envelope = response as Record<string, unknown>;
+    if (path === 'enqueue' ? typeof envelope.runId !== 'string' || !envelope.runId : !Object.hasOwn(envelope, 'result') || typeof envelope.executionId !== 'string' || !envelope.executionId) throw new WorkcoreClientError('INVALID_RESPONSE', 'Malformed operation success envelope', responseStatus, { correlationId: responseCorrelationId });
+    const warnings = Array.isArray(envelope.deliveryWarnings)
+      ? envelope.deliveryWarnings.filter((warning): warning is string => typeof warning === 'string')
+      : typeof envelope.deliveryWarning === 'string' ? [envelope.deliveryWarning] : [];
+    for (const warning of warnings) options.onWarning?.(warning);
+    return {
+      result: (path === 'enqueue' ? { runId: envelope.runId } : envelope.result) as T,
+      ...(typeof envelope.executionId === 'string' ? { executionId: envelope.executionId } : {}),
+      ...(typeof envelope.correlationId === 'string' ? { correlationId: envelope.correlationId } : responseCorrelationId ? { correlationId: responseCorrelationId } : {}),
+      deliveryWarnings: warnings,
+    };
+  };
   return {
-    request: async ({ path, applicationId, workspaceId, operation, input }) => {
-      const response = await json<Record<string, unknown>>(`${baseUrl}/${path}`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: operationBody({ applicationId, workspaceId, operation, input }),
-      });
-      const warnings = Array.isArray(response.deliveryWarnings)
-        ? response.deliveryWarnings.filter((warning): warning is string => typeof warning === 'string')
-        : typeof response.deliveryWarning === 'string' ? [response.deliveryWarning] : [];
-      for (const warning of warnings) options.onWarning?.(warning);
-      return ('result' in response ? response.result : response) as never;
-    },
+    request: async <T>(request: TransportRequest) => (await requestDetailed<T>(request)).result,
+    requestDetailed,
     manifest: async (applicationId, workspaceId) => json(`${baseUrl}/manifest?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`),
     applications: async () => (await json<{ applications: Array<{ id: string; workspaceCount: number }> }>(`${baseUrl}/applications`)).applications,
     workspaces: async (applicationId) => (await json<{ workspaces: Array<{ id: string; name: string }> }>(`${baseUrl}/workspaces?applicationId=${encodeURIComponent(applicationId)}`)).workspaces,
@@ -253,7 +294,9 @@ export function createFetchTransport(options: { baseUrl?: string; fetch?: typeof
     agentRun: async (applicationId, workspaceId, runId) => (await json<{ run: AgentRun }>(`${baseUrl}/agent-runs/${encodeURIComponent(runId)}?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`)).run,
     agentRunEvents: async (applicationId, workspaceId, runId, after = 0, limit = 50) => json(`${baseUrl}/agent-runs/${encodeURIComponent(runId)}/events?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}&after=${after}&limit=${limit}`),
     subscribe: (applicationId, workspaceId, callbacks) => {
-      const source = new EventSource(`${baseUrl}/events?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`, { withCredentials: true });
+      if (!options.eventSource && options.credentials === 'omit') throw new TypeError('Native EventSource cannot omit same-origin cookies; supply eventSource for this credential policy');
+      const factory = options.eventSource ?? ((url: string, init: EventSourceInit) => new EventSource(url, init));
+      const source = factory(`${baseUrl}/events?applicationId=${encodeURIComponent(applicationId)}&workspaceId=${encodeURIComponent(workspaceId)}`, { withCredentials: options.credentials === 'include' });
       let connected = false;
       source.onopen = () => { if (connected) callbacks.onReconnect?.(); else callbacks.onReady?.(); connected = true; };
       source.onmessage = (message) => {
@@ -267,15 +310,28 @@ export function createFetchTransport(options: { baseUrl?: string; fetch?: typeof
 }
 
 export class WorkcoreClientError extends Error {
-  constructor(readonly code: string, message: string, readonly status: number) { super(message); this.name = 'WorkcoreClientError'; }
+  readonly correlationId: string | undefined;
+  readonly issues: ValidationIssue[] | undefined;
+  constructor(readonly code: string, message: string, readonly status: number, details: { correlationId?: string | undefined; issues?: ValidationIssue[] | undefined } = {}) {
+    super(message); this.name = 'WorkcoreClientError';
+    this.correlationId = details.correlationId;
+    this.issues = details.issues;
+  }
 }
 
 export function createClient<D>(options: { transport: WorkcoreTransport; applicationId: string; workspaceId: string }) {
-  const request = <T>(path: 'query' | 'mutate' | 'enqueue', operation: string, input: unknown) => options.transport.request<T>({ path, applicationId: options.applicationId, workspaceId: options.workspaceId, operation, input });
+  const request = <T>(path: 'query' | 'mutate' | 'enqueue', operation: string, input: unknown, call?: CallOptions) => options.transport.request<T>({ path, applicationId: options.applicationId, workspaceId: options.workspaceId, operation, input, ...call });
+  const detailed = <T>(path: 'query' | 'mutate' | 'enqueue', operation: string, input: unknown, call?: CallOptions) => {
+    if (!options.transport.requestDetailed) throw new TypeError('This transport does not support detailed operation responses');
+    return options.transport.requestDetailed<T>({ path, applicationId: options.applicationId, workspaceId: options.workspaceId, operation, input, ...call });
+  };
   return {
-    query: <N extends QueryNames<D>>(operation: N, input: InputFor<DefinitionAt<D, 'query', N>>) => request<OutputFor<DefinitionAt<D, 'query', N>>>('query', operation, input),
-    mutate: <N extends MutationNames<D>>(operation: N, input: InputFor<DefinitionAt<D, 'mutation', N>>) => request<OutputFor<DefinitionAt<D, 'mutation', N>>>('mutate', operation, input),
-    enqueue: <N extends TaskNames<D>>(operation: N, input: InputFor<DefinitionAt<D, 'task', N>>) => request<{ runId: string }>('enqueue', operation, input),
+    query: <N extends PublicOperationNames<D, 'query'>>(operation: N, input: InputFor<DefinitionAt<D, 'query', N>>, call?: CallOptions) => request<OutputFor<DefinitionAt<D, 'query', N>>>('query', operation, input, call),
+    mutate: <N extends PublicOperationNames<D, 'mutation'>>(operation: N, input: InputFor<DefinitionAt<D, 'mutation', N>>, call?: CallOptions) => request<OutputFor<DefinitionAt<D, 'mutation', N>>>('mutate', operation, input, call),
+    enqueue: <N extends PublicOperationNames<D, 'task'>>(operation: N, input: InputFor<DefinitionAt<D, 'task', N>>, call?: CallOptions) => request<{ runId: string }>('enqueue', operation, input, call),
+    queryDetailed: <N extends PublicOperationNames<D, 'query'>>(operation: N, input: InputFor<DefinitionAt<D, 'query', N>>, call?: CallOptions) => detailed<OutputFor<DefinitionAt<D, 'query', N>>>('query', operation, input, call),
+    mutateDetailed: <N extends PublicOperationNames<D, 'mutation'>>(operation: N, input: InputFor<DefinitionAt<D, 'mutation', N>>, call?: CallOptions) => detailed<OutputFor<DefinitionAt<D, 'mutation', N>>>('mutate', operation, input, call),
+    enqueueDetailed: <N extends PublicOperationNames<D, 'task'>>(operation: N, input: InputFor<DefinitionAt<D, 'task', N>>, call?: CallOptions) => detailed<{ runId: string }>('enqueue', operation, input, call),
     agentRuns: (filter?: AgentRunFilter) => {
       if (!options.transport.agentRuns) throw new Error('This transport does not support built-in agent run inspection');
       return options.transport.agentRuns(options.applicationId, options.workspaceId, filter);
@@ -288,7 +344,7 @@ export function createClient<D>(options: { transport: WorkcoreTransport; applica
       if (!options.transport.agentRunEvents) throw new Error('This transport does not support built-in agent run inspection');
       return options.transport.agentRunEvents(options.applicationId, options.workspaceId, runId, after, limit);
     },
-    subscribe: <N extends QueryNames<D>>(operation: N, input: InputFor<DefinitionAt<D, 'query', N>>, callbacks: { onData(data: OutputFor<DefinitionAt<D, 'query', N>>): void; onError(error: Error): void }) => {
+    subscribe: <N extends PublicOperationNames<D, 'query'>>(operation: N, input: InputFor<DefinitionAt<D, 'query', N>>, callbacks: { onData(data: OutputFor<DefinitionAt<D, 'query', N>>): void; onError(error: Error): void }) => {
       let disposed = false;
       let generation = 0;
       let inFlight = false;

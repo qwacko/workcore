@@ -19,10 +19,14 @@ import { user } from './db/schema.js';
 import { activityStore, seedActivityData } from './tracker-data.js';
 import { conversationStore } from './conversation-data.js';
 import { miloDemoEngine } from './milo-demo-engine.js';
+import { migrateTrackerCompositionFile } from './migrate-composition.js';
 import { roleCanUseWorkcoreCapability } from './demo-workspaces.js';
 import { seedIdentityAndWorkspaces, sqliteWorkspaceAdapter, workspaceRole } from './workspace-data.js';
 
-const fileState = createFileState({ path: resolve(process.env.WORKCORE_STATE ?? 'data/workcore-state.json'), workspaces: [] });
+const statePath = resolve(process.env.WORKCORE_STATE ?? 'data/workcore-state.json');
+const stateBackup = await migrateTrackerCompositionFile(statePath);
+if (stateBackup) console.info(`Migrated tracker operation names for module composition; original state saved to ${stateBackup}`);
+const fileState = createFileState({ path: statePath, workspaces: [] });
 const modelId = process.env.WORKCORE_AGENT_MODEL ?? 'anthropic/claude-3.5-sonnet';
 const openrouter = process.env.OPENROUTER_API_KEY
   ? createOpenRouter({ apiKey: process.env.OPENROUTER_API_KEY })
@@ -85,7 +89,6 @@ const platform = createPlatform({
   trustedOrigins: workcoreTrustedOrigins,
   wireCodecs: [workcoreCodec],
   services,
-  admin: { basePath: '/workcore/admin', handle: admin },
   liveRefreshMs: 30_000,
 });
 
@@ -95,7 +98,7 @@ const authPage = `<!doctype html><html><head><meta charset="utf-8"><meta name="v
   document.querySelector('#login').addEventListener('submit', async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const error = document.querySelector('#error'); error.textContent = ''; try { const response = await fetch('/api/auth/sign-in/username', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); const result = await response.json(); if (!response.ok) throw new Error(result.message || 'Sign in failed'); location.assign('/workcore/admin'); } catch (cause) { error.textContent = cause.message || 'Sign in failed'; } });
   </script></body></html>`;
 
-const apiHandler = platform.httpHandler();
+const apiHandler = platform.httpHandler({ admin: { basePath: '/workcore/admin', handle: admin } });
 const app = new Hono();
 app.get('/', (context) => context.html(authPage));
 app.get('/login', (context) => context.html(authPage));

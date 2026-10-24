@@ -18,6 +18,12 @@ Open <http://127.100.0.10:3000> and sign in with one of the local accounts shown
 
 Browse the [Workcore documentation site](https://qwacko.github.io/workcore/) or run it locally with `pnpm docs:dev`.
 
+For a small existing-app integration rather than the full demo, start with [Minimal integration](docs/minimal-integration.md). See [configuration](docs/configuration.md), [authorization](docs/authorization.md), and the [HTTP/live protocol](docs/protocol.md) for the supported contracts. `defineApplication` is the preferred name for an operation catalog; `defineWorkspace` remains a compatible alias. Workspace instances are selected by `{ applicationId, workspaceId }`.
+
+Reusable modules can be defined independently with `defineModule` and assembled with `composeApplication`. [Module composition](docs/composition.md) covers typed synchronous dependencies, optional awaited callbacks, namespaced operations/KV, and shared admin/client/worker integration without a separate event bus.
+
+The main tracker demonstrates this directly: `examples/tracker/src/app.ts` composes `modules/activities.ts` and `modules/assistant.ts`. Milo reads a checked activity summary through a required dependency, and activity edits invoke an optional assistant-update callback. **Workspace overview** combines both modules; identity remains a separate application. Existing local task/schedule state is backed up and migrated to qualified operation names before startup—stop old demo processes first. See the [upgrade notes](docs/composition.md#upgrading-the-existing-local-tracker-demo).
+
 The tracker example uses Better Auth with its username plugin and Drizzle on SQLite. The user, account, session, workspace membership, and activity tables live in `data/workcore.sqlite` (override with `WORKCORE_DATABASE`). User registration is disabled at the host route; the three accounts are seeded for local demonstration. Workcore's task, schedule, history, KV, logger, and event services remain file-backed in `data/workcore-state.json`. This composition is a realistic single-process example, not a production deployment recipe; change the demo passwords and secret before exposing it.
 
 ## Packages
@@ -27,6 +33,7 @@ The tracker example uses Better Auth with its username plugin and Drizzle on SQL
 | `@workcore/core` | Definitions, checked runtime, HTTP/SSE endpoints and adapter contracts |
 | `@workcore/adapters` | Explicit memory and local file implementations for the core adapter contracts |
 | `@workcore/client` | Browser-safe typed client and fetch/SSE transport |
+| `@workcore/schema-zod` | Optional Zod table and chat schema/operation helpers |
 | `@workcore/ai-sdk` | Optional Vercel AI SDK engine for queued Workcore agents |
 | `@workcore/codec-superjson` | Optional SuperJSON wire codec for rich values such as `Date` |
 | `@workcore/codec-devalue` | Optional devalue wire codec for its supported rich-value set |

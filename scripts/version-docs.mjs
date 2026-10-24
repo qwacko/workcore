@@ -23,7 +23,16 @@ if (alreadyExists) {
       const sourcePath = resolve(from, entry.name);
       const targetPath = resolve(to, entry.name);
       if (entry.isDirectory()) await copyDocs(sourcePath, targetPath);
-      else if (entry.isFile()) await cp(sourcePath, targetPath);
+      else if (entry.isFile() && entry.name.endsWith('.md')) {
+        let markdown = await readFile(sourcePath, 'utf8');
+        // Freeze executable examples into the snapshot rather than leaving includes
+        // pointing at the current source tree (or a broken relative archive path).
+        for (const match of markdown.matchAll(/^<<<\s+(\S+\.(ts|js|json))\s*$/gm)) {
+          const snippet = await readFile(resolve(from, match[1]), 'utf8');
+          markdown = markdown.replace(match[0], `\`\`\`${match[2]}\n${snippet.trimEnd()}\n\`\`\``);
+        }
+        await writeFile(targetPath, markdown);
+      } else if (entry.isFile()) await cp(sourcePath, targetPath);
     }
   }
   await copyDocs(source, destination);
@@ -38,7 +47,14 @@ if (alreadyExists) {
     }
   }
   await rewriteMarkdownLinks(destination);
-  const archivedIndex = `# Workcore v${version}\n\nThis is the documentation snapshot for the Workcore core release **${version}**. It is kept as published; see the [latest documentation](/) for current guidance.\n\n## Pages\n\n- [Getting started](./getting-started)\n- [Authoring](./authoring)\n- [Architecture and security](./architecture)\n- [Production deployment](./production-deployment)\n`;
+  const pages = [];
+  for (const entry of (await readdir(destination, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isFile() || !entry.name.endsWith('.md') || entry.name === 'index.md') continue;
+    const markdown = await readFile(resolve(destination, entry.name), 'utf8');
+    const title = /^#\s+(.+)$/m.exec(markdown)?.[1] ?? entry.name.slice(0, -3);
+    pages.push(`- [${title}](./${entry.name.slice(0, -3)})`);
+  }
+  const archivedIndex = `# Workcore v${version}\n\nThis is the documentation snapshot for the Workcore core release **${version}**. It is kept as published; see the [latest documentation](/) for current guidance.\n\n## Pages\n\n${pages.join('\n')}\n`;
   await writeFile(resolve(destination, 'index.md'), archivedIndex);
   console.log(`Created docs/versions/${version} from the current documentation.`);
 }

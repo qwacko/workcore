@@ -135,6 +135,8 @@ export type AgentCallContext<App, Input> = {
 };
 export type AgentDefinition<App, S extends AnySchema = AnySchema> = {
   input: S;
+  /** Increment when persisted handler-facing input becomes incompatible. Defaults to 1. */
+  version?: number;
   permission?: Permission<App, OutputOf<S>>;
   tools: readonly AgentTool[];
   model: string;
@@ -378,10 +380,11 @@ export interface AdminManifestPage extends Omit<AdminPage, 'layout'> {
 type CommonDefinition<App, S extends AnySchema, O extends AnySchema, Kind extends OperationKind, Tools = OperationCaller> = {
   input: S;
   output: O;
+  version?: number;
   permission?: Permission<App, OutputOf<S>>;
   api?: boolean;
   views?: OperationViews;
-  handler: (args: OperationCallContext<App, OutputOf<S>, Tools>) => OutputOf<O> | Promise<OutputOf<O>>;
+  handler: (args: OperationCallContext<App, OutputOf<S>, Tools>) => InputOf<O> | Promise<InputOf<O>>;
   readonly kind?: Kind;
 };
 
@@ -441,56 +444,58 @@ type OperationViewVariantFor<Mutations extends object> = Omit<OperationViewVaria
   actions?: readonly UiActionFor<Mutations>[];
   collection?: CollectionViewOptionsFor<Mutations>;
 };
-type OperationViewsFor<Mutations extends object> = Omit<OperationViews, 'variants'> & {
+export type OperationViewsFor<Mutations extends object> = Omit<OperationViews, 'variants'> & {
   variants: Record<string, OperationViewVariantFor<Mutations>>;
 };
 
 type DefinitionOperationCaller<
-  Queries extends object, QueryOutputs extends Record<keyof Queries, unknown>,
-  Mutations extends object, MutationOutputs extends Record<keyof Mutations, unknown>,
-  Tasks extends object, TaskOutputs extends Record<keyof Tasks, unknown>,
+  Queries extends object, QueryOutputs extends Record<keyof Queries, AnySchema>,
+  Mutations extends object, MutationOutputs extends Record<keyof Mutations, AnySchema>,
+  Tasks extends object, TaskOutputs extends Record<keyof Tasks, AnySchema>,
   Agents extends object,
 > = {
-  query<N extends keyof Queries & string>(name: N, input: SchemaInput<Queries[N]>): Promise<QueryOutputs[N]>;
-  mutate<N extends keyof Mutations & string>(name: N, input: SchemaInput<Mutations[N]>): Promise<MutationOutputs[N]>;
+  query<N extends keyof Queries & string>(name: N, input: SchemaInput<Queries[N]>): Promise<OutputOf<QueryOutputs[N]>>;
+  mutate<N extends keyof Mutations & string>(name: N, input: SchemaInput<Mutations[N]>): Promise<OutputOf<MutationOutputs[N]>>;
   enqueue<N extends keyof Tasks & string>(name: N, input: SchemaInput<Tasks[N]>): Promise<{ runId: string }>;
   enqueueAgent<N extends keyof Agents & string>(name: N, input: SchemaInput<Agents[N]>, options?: { conversationId?: string }): Promise<{ runId: string }>;
 };
 
 type DefinitionOperationMap<
-  App, Inputs extends object, Outputs extends Record<keyof Inputs, unknown>, Tools, Kind extends OperationKind, Mutations extends object,
+  App, Inputs extends object, Outputs extends Record<keyof Inputs, AnySchema>, Tools, Kind extends OperationKind, Mutations extends object,
 > = {
   [K in keyof Inputs]: {
     input: Inputs[K];
-    output: ValidationSchema<unknown, Outputs[K]>;
+    output: Outputs[K];
+    version?: number;
     permission?: Permission<App, SchemaOutput<NoInfer<Inputs[K]>>>;
     api?: boolean;
     views?: OperationViewsFor<Mutations>;
-    handler: (args: OperationCallContext<App, SchemaOutput<NoInfer<Inputs[K]>>, Tools>) => NoInfer<Outputs[K]> | Promise<NoInfer<Outputs[K]>>;
+    handler: (args: OperationCallContext<App, SchemaOutput<NoInfer<Inputs[K]>>, Tools>) => InputOf<NoInfer<Outputs[K]>> | Promise<InputOf<NoInfer<Outputs[K]>>>;
     readonly kind?: Kind;
   } & (Kind extends 'task' ? { triggers?: { mutations?: readonly (keyof Mutations & string)[]; mapInput?: (event: MutationSuccessEvent<keyof Mutations & string>) => SchemaInput<NoInfer<Inputs[K]>> } } : {});
 } & {
-  [K in keyof Outputs]: { output: ValidationSchema<unknown, Outputs[K]> };
+  [K in keyof Outputs]: { output: Outputs[K] };
 };
 
 type DefinedOperationMap<
-  App, Inputs extends object, Outputs extends Record<keyof Inputs, unknown>, Tools, Kind extends OperationKind, Mutations extends object,
+  App, Inputs extends object, Outputs extends Record<keyof Inputs, AnySchema>, Tools, Kind extends OperationKind, Mutations extends object,
 > = {
   [K in keyof Inputs]: {
     input: Inputs[K];
-    output: ValidationSchema<unknown, Outputs[K]>;
+    output: Outputs[K];
+    version?: number;
     permission?: Permission<App, SchemaOutput<Inputs[K]>>;
     api?: boolean;
     views?: OperationViewsFor<Mutations>;
-    handler: (args: OperationCallContext<App, SchemaOutput<Inputs[K]>, Tools>) => Outputs[K] | Promise<Outputs[K]>;
+    handler: (args: OperationCallContext<App, SchemaOutput<Inputs[K]>, Tools>) => InputOf<Outputs[K]> | Promise<InputOf<Outputs[K]>>;
     readonly kind: Kind;
   } & (Kind extends 'task' ? { triggers?: { mutations?: readonly (keyof Mutations & string)[]; mapInput?: (event: MutationSuccessEvent<keyof Mutations & string>) => SchemaInput<Inputs[K]> } } : {});
 };
 
 type DefinedWorkspace<App, Id extends string,
-  Queries extends object, QueryOutputs extends Record<keyof Queries, unknown>,
-  Mutations extends object, MutationOutputs extends Record<keyof Mutations, unknown>,
-  Tasks extends object, TaskOutputs extends Record<keyof Tasks, unknown>,
+  Queries extends object, QueryOutputs extends Record<keyof Queries, AnySchema>,
+  Mutations extends object, MutationOutputs extends Record<keyof Mutations, AnySchema>,
+  Tasks extends object, TaskOutputs extends Record<keyof Tasks, AnySchema>,
   Agents extends object,
   AuthSchema extends AnySchema | undefined,
 > = {
@@ -505,9 +510,9 @@ type DefinedWorkspace<App, Id extends string,
   : AuthSchema extends AnySchema ? { authorization: AuthorizationConfiguration<AuthSchema> } : never);
 
 type WorkspaceConfiguration<App, Id extends string,
-  Queries extends object, QueryOutputs extends Record<keyof Queries, unknown>,
-  Mutations extends object, MutationOutputs extends Record<keyof Mutations, unknown>,
-  Tasks extends object, TaskOutputs extends Record<keyof Tasks, unknown>,
+  Queries extends object, QueryOutputs extends Record<keyof Queries, AnySchema>,
+  Mutations extends object, MutationOutputs extends Record<keyof Mutations, AnySchema>,
+  Tasks extends object, TaskOutputs extends Record<keyof Tasks, AnySchema>,
   Agents extends object,
   AuthSchema extends AnySchema | undefined,
 > = {
@@ -632,12 +637,13 @@ function validateCollectionActions(definition: RuntimeDefinition, actions: Colle
 export function defineWorkspace<App>() {
   return <
     const Id extends string,
-    const Queries extends object = {}, QueryOutputs extends Record<keyof Queries, unknown> = { [K in keyof Queries]: never },
-    const Mutations extends object = {}, MutationOutputs extends Record<keyof Mutations, unknown> = { [K in keyof Mutations]: never },
-    const Tasks extends object = {}, TaskOutputs extends Record<keyof Tasks, unknown> = { [K in keyof Tasks]: never },
+    const Queries extends object = {}, QueryOutputs extends Record<keyof Queries, AnySchema> = { [K in keyof Queries]: never },
+    const Mutations extends object = {}, MutationOutputs extends Record<keyof Mutations, AnySchema> = { [K in keyof Mutations]: never },
+    const Tasks extends object = {}, TaskOutputs extends Record<keyof Tasks, AnySchema> = { [K in keyof Tasks]: never },
     const Agents extends object = {},
     const AuthSchema extends AnySchema | undefined = undefined,
-  >(definition: WorkspaceConfiguration<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>): WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>> => {
+    const Authored extends { queries?: object; mutations?: object; tasks?: object } = {},
+  >(definition: WorkspaceConfiguration<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema> & Authored): WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>> & { readonly __publicOperations?: PublicCatalog<Authored> } => {
     const queryDefinitions = compileQueryViews(definition.queries);
     const queries = withOperationKind(queryDefinitions, 'query');
     const mutations = withOperationKind(definition.mutations, 'mutation');
@@ -661,9 +667,14 @@ export function defineWorkspace<App>() {
       enumerable: false,
       value: (options: ApplicationRegistrationOptions<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>>>) => registerApplicationInternal<WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>>>(runtimeDefinition, options),
     });
-     return workspace as unknown as WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>>;
+     return workspace as unknown as WorkspaceDefinition<App, DefinedWorkspace<App, Id, Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents, AuthSchema>> & { readonly __publicOperations?: PublicCatalog<Authored> };
   };
 }
+
+/** Preferred name: defines an application catalog, not a scoped workspace instance. */
+export const defineApplication = defineWorkspace;
+
+export { composeApplication, defineModule, type ComposedOperationCaller, type ModuleDefinition } from './composition.js';
 
 export function query<App, S extends AnySchema, O extends AnySchema, Tools = OperationCaller>(options: QueryOptions<App, S, O, Tools>): QueryDefinition<App, S, O, Tools> {
   return { ...options, kind: 'query' };
@@ -697,6 +708,13 @@ type OperationsFor<D, K extends OperationKind> = K extends 'query'
 export type QueryNames<D> = keyof OperationsFor<D, 'query'> & string;
 export type MutationNames<D> = keyof OperationsFor<D, 'mutation'> & string;
 export type TaskNames<D> = keyof OperationsFor<D, 'task'> & string;
+type PublicNames<D, K extends OperationKind> = {
+  [N in keyof OperationsFor<D, K>]: OperationsFor<D, K>[N] extends { api?: infer Exposure } ? true extends Exposure ? N : never : never;
+}[keyof OperationsFor<D, K>] & string;
+type PublicCatalog<D> = { [K in OperationKind]: PublicNames<D, K> };
+export type PublicOperationNames<D, K extends OperationKind> = D extends { readonly __publicOperations?: infer Catalog }
+  ? Catalog extends Record<OperationKind, string> ? Catalog[K] : never
+  : PublicNames<D, K>;
 export type DefinitionAt<D, K extends OperationKind, N extends string> = N extends keyof OperationsFor<D, K> ? OperationsFor<D, K>[N] : never;
 
 export type InputFor<Def> = Def extends { input: infer S } ? InputOf<S> : never;
@@ -720,6 +738,7 @@ export type RuntimeAgent = Omit<AgentDefinition<unknown, AnySchema>, 'permission
 
 export type RuntimeOperation = {
   kind: OperationKind;
+  version?: number;
   input: AnySchema;
   output: AnySchema;
   permission?: Permission<unknown, unknown>;
@@ -744,7 +763,7 @@ type AuthorizationFromDefinition<D> = D extends { authorization?: { context: inf
   ? S extends AnySchema ? OutputOf<S> : never
   : never;
 type AuthorizationRegistrationOption<D extends DefinitionWithContext> = D extends { authorization: { context: infer S } }
-  ? { resolveAuthorization: (args: { scope: Scope; actor: Actor }) => (S extends AnySchema ? OutputOf<S> : never) | Promise<S extends AnySchema ? OutputOf<S> : never> }
+  ? { resolveAuthorization: (args: { scope: Scope; actor: Actor }) => (S extends AnySchema ? InputOf<S> : never) | Promise<S extends AnySchema ? InputOf<S> : never> }
   : { resolveAuthorization?: (args: { scope: Scope; actor: Actor }) => unknown | Promise<unknown> };
 
 export type ApplicationRegistrationOptions<D extends DefinitionWithContext> = {
@@ -816,6 +835,8 @@ export type TaskPayload = {
   applicationId: string;
   workspaceId: string;
   operation: string;
+  /** Missing legacy versions mean 1. */
+  operationVersion?: number;
   /** Encoded, already-validated handler input. Decode with codecId; do not validate as raw schema input again. */
   input: JsonValue;
   codecId?: string;
@@ -896,6 +917,7 @@ export interface ScheduleEntry {
   id: string;
   scope: Scope;
   operation: string;
+  operationVersion?: number;
   /** Encoded, already-validated handler input. Decode with codecId when the schedule is due. */
   input: JsonValue;
   codecId?: string;
@@ -968,6 +990,10 @@ export type PlatformOptions = {
   maxResultBytes?: number;
   /** Maximum handler runtime. Defaults to 30 seconds for HTTP/internal calls and 5 minutes for worker tasks. */
   operationTimeoutMs?: number;
+  /** Interactive/internal handler deadline; overrides operationTimeoutMs. */
+  interactiveTimeoutMs?: number;
+  /** Worker task/agent handler deadline; overrides operationTimeoutMs. */
+  backgroundTimeoutMs?: number;
   /** Maximum time worker.stop() waits after aborting work. Defaults to 10 seconds. */
   shutdownTimeoutMs?: number;
   liveRefreshMs?: number;
@@ -977,6 +1003,10 @@ export type PlatformOptions = {
 };
 
 export function createPlatform(options: PlatformOptions) {
+  for (const name of ['maxRequestBytes', 'maxResultBytes', 'operationTimeoutMs', 'interactiveTimeoutMs', 'backgroundTimeoutMs', 'liveRefreshMs', 'workerRetryDelayMs', 'shutdownTimeoutMs'] as const) {
+    const value = options[name];
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < (name === 'shutdownTimeoutMs' ? 0 : 1) || (name.endsWith('Ms') && value > 2_147_483_647))) throw new RangeError(`${name} must be a ${name === 'shutdownTimeoutMs' ? 'non-negative' : 'positive'} safe integer within the supported range`);
+  }
   const apps = new Map(options.applications.map((registration) => [registration.definition.id, registration]));
   const trustedOrigins = new Set((options.trustedOrigins ?? []).map(normalizeOrigin));
   const codecs = new Set<string>();
@@ -987,37 +1017,47 @@ export function createPlatform(options: PlatformOptions) {
   if (apps.size !== options.applications.length) throw new Error('Application IDs must be unique');
   for (const registration of options.applications) validateDefinition(registration.definition);
 
-  const worker = () => createWorker(options, apps);
+  const worker = () => {
+    if (!options.auth.resolveActor) throw new Error('Background workers require auth.resolveActor');
+    return createWorker(options, apps);
+  };
   const httpHandler = (mount: { apiBasePath?: string; admin?: { basePath: string; handle?: (request: Request) => Promise<Response> | Response } } = {}) => {
     const apiBasePath = normalizePath(mount.apiBasePath ?? '/workcore/api');
-    const adminPath = mount.admin?.basePath ?? options.admin?.basePath;
+    const admin = mount.admin ?? options.admin;
+    const adminPath = admin ? normalizePath(admin.basePath) : undefined;
     return async (request: Request): Promise<Response> => {
       const url = new URL(request.url);
       if (adminPath && (url.pathname === adminPath || url.pathname.startsWith(`${adminPath}/`))) {
-        if (options.admin?.handle) return options.admin.handle(request);
-        if (mount.admin && 'handle' in mount.admin && mount.admin.handle) return mount.admin.handle(request);
+        if (admin?.handle) return admin.handle(request);
         return json({ error: { code: 'ADMIN_ASSETS_NOT_CONFIGURED', message: 'Install @workcore/admin and provide its createAdminHandler() for this route' } }, 501);
       }
       if (!url.pathname.startsWith(`${apiBasePath}/`) && url.pathname !== apiBasePath) return new Response('Not found', { status: 404 });
       let codec = jsonWireCodec;
+      const correlationId = request.headers.get('x-correlation-id')?.slice(0, 128) || randomId();
+      request = new Request(request, { headers: new Headers(request.headers) });
+      request.headers.set('x-correlation-id', correlationId);
       try {
         codec = resolveWireCodec(options, request.headers.get('x-workcore-codec'));
         const response = await handleApi(request, url, apiBasePath, options, apps, trustedOrigins, codec);
+        response.headers.set('x-correlation-id', correlationId);
         return withCorsHeaders(response, request, trustedOrigins);
       } catch (error) {
         const known = error instanceof WorkcoreError ? error : new WorkcoreError('INTERNAL_ERROR', 'The operation could not be completed', 500);
-        options.services.logger?.error('Workcore request failed', { code: known.code, detail: error instanceof Error ? error.message : String(error) });
+        options.services.logger?.error('Workcore request failed', { code: known.code, correlationId, detail: error instanceof Error ? error.message : String(error) });
         const responseCodec = known.code === 'WIRE_CODEC_UNSUPPORTED' ? jsonWireCodec : codec;
-        try { return withCorsHeaders(json({ error: { code: known.code, message: known.message } }, known.status, {}, responseCodec), request, trustedOrigins); }
-        catch { return withCorsHeaders(json({ error: { code: 'WIRE_ENCODING_FAILED', message: 'The error response could not be encoded' } }, 500), request, trustedOrigins); }
+        const headers = { 'x-correlation-id': correlationId };
+        try { return withCorsHeaders(json({ error: { code: known.code, message: known.message, correlationId, ...(known.issues ? { issues: known.issues } : {}) } }, known.status, headers, responseCodec), request, trustedOrigins); }
+        catch { return withCorsHeaders(json({ error: { code: 'WIRE_ENCODING_FAILED', message: 'The error response could not be encoded', correlationId } }, 500, headers), request, trustedOrigins); }
       }
     };
   };
   return { httpHandler, worker };
 }
 
+export type ValidationIssue = { message: string; path?: Array<string | number> };
+
 class WorkcoreError extends Error {
-  constructor(readonly code: string, message: string, readonly status: number) { super(message); }
+  constructor(readonly code: string, message: string, readonly status: number, readonly issues?: ValidationIssue[]) { super(message); }
 }
 
 function json(value: unknown, status = 200, headers: HeadersInit = {}, codec: WireCodec = jsonWireCodec) {
@@ -1175,7 +1215,7 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
     const runAt = kind === 'once' ? String(item.runAt ?? '') : undefined;
     if (kind === 'once' && (!Number.isFinite(Date.parse(runAt ?? '')) || Date.parse(runAt ?? '') <= Date.now())) throw new WorkcoreError('INVALID_SCHEDULE', 'One-off runAt must be a future date', 400);
     if (kind === 'recurring' && !isSupportedCron(String(item.cron ?? ''))) throw new WorkcoreError('INVALID_SCHEDULE', 'Recurring schedules require a supported five-field cron expression', 400);
-    const schedule: ScheduleEntry = { id: randomId(), scope, operation, input: codec.encode(validated), codecId: codec.id, actorId: actor.id, timezone, kind, enabled: true, createdAt: new Date().toISOString(), ...(runAt ? { runAt, nextRunAt: runAt } : { cron: String(item.cron), nextRunAt: nextScheduleOccurrence(String(item.cron), new Date(), timezone).toISOString() }) };
+    const schedule: ScheduleEntry = { id: randomId(), scope, operation, operationVersion: def.version ?? 1, input: encodeWithCodec(codec, validated), codecId: codec.id, actorId: actor.id, timezone, kind, enabled: true, createdAt: new Date().toISOString(), ...(runAt ? { runAt, nextRunAt: runAt } : { cron: String(item.cron), nextRunAt: nextScheduleOccurrence(String(item.cron), new Date(), timezone).toISOString() }) };
     await options.services.schedules.create(schedule);
     return json({ schedule: { ...schedule, input: validated } }, 201, {}, codec);
   }
@@ -1217,7 +1257,7 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
     if (kind === 'task') {
       const runId = randomId();
       const correlationId = request.headers.get('x-correlation-id') ?? randomId();
-      await options.services.tasks.enqueue({ id: runId, applicationId, workspaceId, operation: operationName, input: codec.encode(validatedInput), codecId: codec.id, actorId: actor.id, correlationId, createdAt: new Date().toISOString() });
+      await options.services.tasks.enqueue({ id: runId, applicationId, workspaceId, operation: operationName, operationVersion: def.version ?? 1, input: encodeWithCodec(codec, validatedInput), codecId: codec.id, actorId: actor.id, correlationId, createdAt: new Date().toISOString() });
       return json({ runId }, 202, {}, codec);
     }
     const executionId = randomId();
@@ -1228,7 +1268,7 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
     try {
       context = await registration.createAppContext({ scope, actor });
       const requestContext = createRequestContext(request);
-      const result = await executeWithDeadline(request.signal, options.operationTimeoutMs ?? 30_000, (signal) => def.handler({
+      const result = await executeWithDeadline(request.signal, options.interactiveTimeoutMs ?? options.operationTimeoutMs ?? 30_000, (signal) => def.handler({
         ctx: createExecutionContext(scope, actor, correlationId, context, options.services, signal, undefined, requestContext),
         input: validatedInput,
         operations: createCaller(registration, actor, scope, correlationId, options, apps, signal, codec, undefined, 0, undefined, requestContext),
@@ -1254,7 +1294,7 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
       entry.finishedAt = new Date().toISOString();
       entry.durationMs = Date.now() - startedAt;
       if (!await safeHistory(options, entry)) deliveryWarnings.push('HISTORY_PERSISTENCE_FAILED');
-      return json({ result: validatedResult, executionId, ...(deliveryWarnings.length ? { deliveryWarning: deliveryWarnings[0], deliveryWarnings } : {}) }, 200, {}, codec);
+      return json({ result: validatedResult, executionId, correlationId, ...(deliveryWarnings.length ? { deliveryWarning: deliveryWarnings[0], deliveryWarnings } : {}) }, 200, {}, codec);
     } catch (error) {
       entry.status = 'failed';
       entry.finishedAt = new Date().toISOString();
@@ -1312,8 +1352,11 @@ async function canCapability(registration: ApplicationRegistration, options: Pla
 }
 
 async function validate(schema: AnySchema, value: unknown): Promise<unknown> {
-  const result = await schema['~standard'].validate(value) as { value?: unknown; issues?: readonly { message: string }[] };
-  if (result.issues) throw new WorkcoreError('VALIDATION_FAILED', result.issues.map((issue) => issue.message).join('; '), 400);
+  const result = await schema['~standard'].validate(value) as { value?: unknown; issues?: readonly { message: string; path?: readonly (PropertyKey | { key: PropertyKey })[] }[] };
+  if (result.issues) {
+    const issues: ValidationIssue[] = result.issues.map((issue) => ({ message: issue.message, ...(issue.path ? { path: issue.path.map((part) => typeof part === 'object' ? part.key : part).map((key) => typeof key === 'symbol' ? String(key) : key) } : {}) }));
+    throw new WorkcoreError('VALIDATION_FAILED', issues.map((issue) => issue.message).join('; '), 400, issues);
+  }
   return result.value;
 }
 
@@ -1387,7 +1430,7 @@ function createCaller(registration: ApplicationRegistration, actor: Actor, scope
       if (triggerDepth >= 8) throw new WorkcoreError('TRIGGER_DEPTH_EXCEEDED', 'Background operation trigger depth limit exceeded', 409);
       if (signal.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Task enqueue was aborted', 499);
       const id = randomId();
-      await options.services.tasks.enqueue({ id, applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: name, input: encodeWithCodec(codec, validInput), codecId: codec.id, actorId: actor.id, correlationId, ...(currentExecutionId ? { causationId: currentExecutionId } : causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt: new Date().toISOString() });
+      await options.services.tasks.enqueue({ id, applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: name, operationVersion: def.version ?? 1, input: encodeWithCodec(codec, validInput), codecId: codec.id, actorId: actor.id, correlationId, ...(currentExecutionId ? { causationId: currentExecutionId } : causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt: new Date().toISOString() });
       return { runId: id };
     }
     const executionId = randomId();
@@ -1395,7 +1438,7 @@ function createCaller(registration: ApplicationRegistration, actor: Actor, scope
     const entry: HistoryEntry = { id: executionId, scope, actorId: actor.id, kind, operation: name, status: 'running', startedAt: new Date(startedAt).toISOString() };
     const context = await registration.createAppContext({ scope, actor });
     try {
-      const result = await executeWithDeadline(signal, options.operationTimeoutMs ?? 30_000, (executionSignal) => def.handler({ ctx: createExecutionContext(scope, actor, correlationId, context, options.services, executionSignal, undefined, request), input: validInput, operations: createCaller(registration, actor, scope, correlationId, options, apps, executionSignal, codec, causationId, triggerDepth, currentExecutionId, request) }));
+      const result = await executeWithDeadline(signal, options.interactiveTimeoutMs ?? options.operationTimeoutMs ?? 30_000, (executionSignal) => def.handler({ ctx: createExecutionContext(scope, actor, correlationId, context, options.services, executionSignal, undefined, request), input: validInput, operations: createCaller(registration, actor, scope, correlationId, options, apps, executionSignal, codec, causationId, triggerDepth, currentExecutionId, request) }));
       const validOutput = await validateOutput(def.output, result);
       let deliveryFailed = false;
       if (kind === 'mutation') {
@@ -1448,7 +1491,7 @@ async function enqueueAgentRun(registration: ApplicationRegistration, actor: Act
   await options.services.agentRuns.create(run);
   try {
     if (signal?.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Agent enqueue was aborted', 499);
-    await options.services.tasks.enqueue({ id, applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: `@workcore/agent/${name}`, input: codec.encode(input), codecId: codec.id, actorId: actor.id, correlationId, ...(causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt });
+    await options.services.tasks.enqueue({ id, applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: `@workcore/agent/${name}`, operationVersion: definition.version ?? 1, input: encodeWithCodec(codec, input), codecId: codec.id, actorId: actor.id, correlationId, ...(causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt });
   } catch (error) {
     run.status = 'failed'; run.finishedAt = new Date().toISOString(); run.error = { code: 'AGENT_ENQUEUE_FAILED', message: safeMessage(error) };
     await options.services.agentRuns.update(run);
@@ -1469,7 +1512,7 @@ async function enqueueTriggeredTasks(registration: ApplicationRegistration, acto
     const runId = randomId();
     await options.services.tasks.enqueue({
       id: runId, applicationId: scope.applicationId, workspaceId: scope.workspaceId,
-      operation, input: encodeWithCodec(codec, input), codecId: codec.id, actorId: actor.id, correlationId, causationId: event.id, triggerDepth: (event.triggerDepth ?? 0) + 1, createdAt: new Date().toISOString(),
+      operation, operationVersion: definition.version ?? 1, input: encodeWithCodec(codec, input), codecId: codec.id, actorId: actor.id, correlationId, causationId: event.id, triggerDepth: (event.triggerDepth ?? 0) + 1, createdAt: new Date().toISOString(),
     });
   }
 }
@@ -1491,6 +1534,13 @@ async function processClaimedTask(payload: TaskPayload, options: PlatformOptions
     return;
   }
   const def = operationAt(registration.definition, 'task', payload.operation);
+  const versionedDefinition = payload.operation.startsWith('@workcore/agent/') ? registration.definition.agents?.[payload.operation.slice('@workcore/agent/'.length)] : def;
+  if (versionedDefinition && (payload.operationVersion ?? 1) !== (versionedDefinition.version ?? 1)) {
+    const error = { code: 'OPERATION_VERSION_MISMATCH', message: 'Persisted input version does not match the registered operation; drain or migrate outstanding work before deployment' };
+    await recordAgentPreflightFailure(payload, options, error);
+    await recordTaskFailure(options, payload, error);
+    return;
+  }
   if (payload.operation.startsWith('@workcore/agent/')) {
     await processClaimedAgent(payload, registration, actor, scope, options, apps, signal);
     await publishAgentInvalidation(payload, scope, options);
@@ -1509,7 +1559,7 @@ async function processClaimedTask(payload: TaskPayload, options: PlatformOptions
     const context = await registration.createAppContext({ scope, actor });
     let result: unknown;
     try {
-      result = await executeWithDeadline(signal, options.operationTimeoutMs ?? 5 * 60_000, (executionSignal) => def.handler({
+      result = await executeWithDeadline(signal, options.backgroundTimeoutMs ?? options.operationTimeoutMs ?? 5 * 60_000, (executionSignal) => def.handler({
         ctx: createExecutionContext(scope, actor, payload.correlationId, context, options.services, executionSignal, payload.id),
         input,
         operations: createCaller(registration, actor, scope, payload.correlationId, options, apps, executionSignal, codec, payload.causationId, payload.triggerDepth ?? 0, payload.id),
@@ -1668,7 +1718,7 @@ async function processClaimedAgent(payload: TaskPayload, registration: Applicati
     if (!definition.tools.some((tool) => `${tool.kind}.${tool.operation}` === definition.finishWhen.tool)) throw new WorkcoreError('INVALID_AGENT', `Agent '${agentName}' finish tool '${definition.finishWhen.tool}' is not declared`, 500);
     let result: Awaited<ReturnType<AgentEngine['run']>>;
     try {
-      result = await executeWithDeadline(signal, options.operationTimeoutMs ?? 5 * 60_000, async (deadlineSignal) => {
+      result = await executeWithDeadline(signal, options.backgroundTimeoutMs ?? options.operationTimeoutMs ?? 5 * 60_000, async (deadlineSignal) => {
         agentSignal = AbortSignal.any([deadlineSignal, agentAbortController.signal]);
         const callContext = {
           ctx: createExecutionContext(scope, actor, payload.correlationId, context, options.services, agentSignal, payload.id),
@@ -2023,6 +2073,9 @@ function getJsonSchema(schema: AnySchema, direction: 'input' | 'output'): JsonSc
 }
 
 export function validateDefinition(definition: RuntimeDefinition) {
+  for (const operation of [...Object.values(definition.queries ?? {}), ...Object.values(definition.mutations ?? {}), ...Object.values(definition.tasks ?? {}), ...Object.values(definition.agents ?? {})]) {
+    if (operation.version !== undefined && (!Number.isSafeInteger(operation.version) || operation.version < 1)) throw new Error('Operation versions must be positive safe integers');
+  }
   if (definition.authorization && (!definition.authorization.context?.['~standard']?.validate || typeof definition.authorization.check !== 'function')) throw new Error('Application authorization must provide a Standard Schema context and check function');
   const mutationNames = new Set(Object.keys(definition.mutations ?? {}));
   for (const [name, configured] of Object.entries(definition.agents ?? {})) {
@@ -2364,6 +2417,7 @@ function corsHeaders(request: Request, trustedOrigins: ReadonlySet<string>): Rec
     'access-control-allow-credentials': 'true',
     'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     'access-control-allow-headers': 'content-type, x-correlation-id, x-workcore-codec',
+    'access-control-expose-headers': 'x-correlation-id',
     'access-control-max-age': '600',
     vary: 'Origin',
   };
@@ -2467,6 +2521,13 @@ async function handleScheduleDue(options: PlatformOptions, apps: Map<string, App
           await commit(schedule);
           continue;
         }
+        if ((schedule.operationVersion ?? 1) !== (def.version ?? 1)) {
+          schedule.enabled = false;
+          schedule.lastSkipReason = 'OPERATION_VERSION_MISMATCH: drain or migrate persisted schedule inputs';
+          await commit(schedule);
+          await safeHistory(options, { id: randomId(), scope: schedule.scope, actorId: schedule.actorId, kind: 'schedule', operation: schedule.operation, status: 'failed', startedAt: new Date().toISOString(), error: { code: 'OPERATION_VERSION_MISMATCH', message: schedule.lastSkipReason } });
+          continue;
+        }
         const codec = resolveWireCodec(options, schedule.codecId ?? 'json');
         const input = decodeStored(schedule.input, schedule.codecId, options);
       await authoriseOperation(registration, def, actor, schedule.scope, input, options);
@@ -2478,7 +2539,7 @@ async function handleScheduleDue(options: PlatformOptions, apps: Map<string, App
           throw new WorkcoreError('SCHEDULE_CONFLICT', 'Schedule changed before dispatch', 409);
         }
         dispatchReserved = true;
-        await options.services.tasks.enqueue({ id: runId, applicationId: schedule.scope.applicationId, workspaceId: schedule.scope.workspaceId, operation: schedule.operation, input: schedule.input, codecId: codec.id, actorId: actor.id, correlationId: randomId(), createdAt: new Date().toISOString(), scheduleId: schedule.id });
+        await options.services.tasks.enqueue({ id: runId, applicationId: schedule.scope.applicationId, workspaceId: schedule.scope.workspaceId, operation: schedule.operation, operationVersion: schedule.operationVersion ?? 1, input: schedule.input, codecId: codec.id, actorId: actor.id, correlationId: randomId(), createdAt: new Date().toISOString(), scheduleId: schedule.id });
         schedule.activeRunId = runId;
         if (schedule.kind === 'once') {
           if (!await options.services.schedules.removeClaimed(schedule.id, claimToken, schedule.revision ?? 0)) throw new WorkcoreError('SCHEDULE_CLAIM_LOST', 'Schedule reservation was lost after task enqueue', 409);

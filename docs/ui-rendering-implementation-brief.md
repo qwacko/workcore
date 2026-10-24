@@ -42,7 +42,7 @@ Success is less application-specific frontend code with dependable data/form lif
 | `packages/admin/src/ui/DataTable.svelte` | Table presentation and row actions |
 | `packages/admin/src/ui/OperationInput.svelte` | Generated operation inputs and fallback editing |
 | `packages/admin/src/ui/rich-input.ts` | Rich-value display/editing and runtime-type hydration |
-| `examples/tracker/src/app.ts` | Executable operations, views, Activity dashboard, and Milo chat page |
+| `examples/tracker/src/app.ts`, `src/modules/activities.ts`, `src/modules/assistant.ts` | Composed application, module-owned operations/views, Activity dashboard, and Milo chat page |
 | `examples/tracker/src/type-tests.ts` | Positive inference tests and `@ts-expect-error` negative tests |
 | `tests/e2e/admin.spec.ts` | Browser-level admin verification |
 | `docs/authoring.md`, `docs/architecture.md` | Current public behaviour and security contracts |

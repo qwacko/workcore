@@ -1,4 +1,4 @@
-import type { Activity } from './app.js';
+import type { Activity } from './tracker-types.js';
 
 export type DemoWorkspace = {
   applicationId: string;

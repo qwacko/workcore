@@ -4,11 +4,61 @@ import { defineWorkspace } from '@workcore/core';
 import { z } from 'zod';
 import { tracker, type TrackerContext } from './app.js';
 
+const publicBoundary = defineWorkspace()({
+  id: 'public-boundary',
+  queries: {
+    public: { input: z.object({}), output: z.string().transform(Number).pipe(z.number()), api: true, permission: [], handler: () => '42' },
+    private: { input: z.object({}), output: z.string(), permission: [], handler: () => 'private' },
+    hidden: { input: z.object({}), output: z.string(), api: false, permission: [], handler: () => 'hidden' },
+  },
+  mutations: { internal: { input: z.object({}), output: z.string(), handler: () => 'internal' } },
+  tasks: { internal: { input: z.object({}), output: z.string(), handler: async ({ operations }) => {
+    const result: number = await operations.query('public', {});
+    await operations.query('private', {});
+    return String(result);
+  } } },
+});
+function verifyPublicBoundary() {
+  const publicClient = createClient<typeof publicBoundary>({ transport: createFetchTransport(), applicationId: publicBoundary.id, workspaceId: 'one' });
+  void publicClient.query('public', {}).then((result) => {
+    const number: number = result;
+    // @ts-expect-error Callers receive the transformed output, not its raw string input.
+    const text: string = result;
+    void number; void text;
+  });
+  // @ts-expect-error Operations without api:true are not available on the browser client.
+  void publicClient.query('private', {});
+  // @ts-expect-error Explicitly internal queries are not available on the browser client.
+  void publicClient.subscribe('hidden', {}, { onData() {}, onError() {} });
+  // @ts-expect-error Internal mutations are not available on the browser client.
+  void publicClient.mutate('internal', {});
+  // @ts-expect-error Internal tasks are not available on the browser client.
+  void publicClient.enqueue('internal', {});
+}
+void verifyPublicBoundary;
+
+defineWorkspace()({ id: 'invalid-output-transform', queries: { read: {
+  input: z.object({}), output: z.string().transform(Number).pipe(z.number()),
+  // @ts-expect-error Handlers produce the input side of the output schema; validation transforms it.
+  handler: () => 42,
+} } });
+
+defineWorkspace()({ id: 'invalid-binding-only', mutations: { save: { input: z.object({ id: z.string() }), output: z.string(), handler: () => 'ok' } }, queries: { rows: {
+  input: z.object({}), output: z.string(), handler: () => 'ok',
+  // @ts-expect-error Even valid mutation names cannot bind nonexistent target input fields.
+  views: { default: 'json', variants: { json: { title: 'Rows', renderer: 'json', actions: [{ label: 'Save', mutation: 'save', bind: { missing: { fromRow: 'id' } } }] } } },
+} } });
+
 const client = createClient<typeof tracker>({ transport: createFetchTransport({ codec: superjsonCodec() }), applicationId: 'tracker', workspaceId: 'personal-alice' });
-const trackerCollectionEditor: keyof typeof tracker.mutations = tracker.queries.activities.views!.variants.basic!.collection!.editor!.mutation;
+const trackerCollectionEditor: keyof typeof tracker.mutations = tracker.queries['activities.list'].views!.variants.basic!.collection!.editor!.mutation;
 void trackerCollectionEditor;
+// @ts-expect-error Compiled view references are qualified, not module-local names.
+const localEditor: 'edit' = tracker.queries['activities.list'].views!.variants.basic!.collection!.editor!.mutation;
+void localEditor;
+void client.query('activities.list', { limit: 10 });
+// @ts-expect-error The demo deliberately moved to qualified module operation names.
 void client.query('activities', { limit: 10 });
-void client.query('activities', { limit: 10 }).then((page) => {
+void client.query('activities.list', { limit: 10 }).then((page) => {
   const firstId: string | undefined = page.rows[0]?.id;
   const updatedAt: Date | undefined = page.rows[0]?.updatedAt;
   void firstId;
@@ -17,9 +67,9 @@ void client.query('activities', { limit: 10 }).then((page) => {
   const invalidId: number | undefined = page.rows[0]?.id;
   void invalidId;
 });
-void client.mutate('editActivity', { id: 'run-001', title: 'Run', status: 'complete' });
-void client.enqueue('refreshSummary', {});
-void client.query('dateRoundTrip', { at: new Date() }).then((value) => {
+void client.mutate('activities.edit', { id: 'run-001', title: 'Run', status: 'complete' });
+void client.enqueue('activities.refreshSummary', {});
+void client.query('activities.dateRoundTrip', { at: new Date() }).then((value) => {
   const result: Date = value;
   void result;
   // @ts-expect-error A Zod date remains a Date in the typed client, not an ISO string.
@@ -27,19 +77,19 @@ void client.query('dateRoundTrip', { at: new Date() }).then((value) => {
   void invalid;
 });
 
-type RefreshHandlerArgs = Parameters<typeof tracker.tasks.refreshSummary.handler>[0];
+type RefreshHandlerArgs = Parameters<typeof tracker.tasks['activities.refreshSummary']['handler']>[0];
 function verifySiblingOperationTypes(operations: RefreshHandlerArgs['operations']) {
   // @ts-expect-error Internal sibling operation names are inferred from the definition.
   void operations.query('missing', {});
   // @ts-expect-error Internal sibling operation inputs are schema checked.
-  void operations.query('activities', { limit: 'many' });
+  void operations.query('list', { limit: 'many' });
   void operations.enqueue('refreshSummary', {});
   // @ts-expect-error Task-to-task calls are inferred from the same definition.
   void operations.enqueue('missingTask', {});
 }
 void verifySiblingOperationTypes;
 
-type SendHandlerArgs = Parameters<typeof tracker.mutations.sendAssistantMessage.handler>[0];
+type SendHandlerArgs = Parameters<typeof tracker.mutations['assistant.sendMessage']['handler']>[0];
 function verifyAgentCallTypes(operations: SendHandlerArgs['operations']) {
   void operations.enqueueAgent('milo', { conversationId: 'conversation', assistantMessageId: 'message', userMessage: 'hello' });
   // @ts-expect-error Agent enqueue inputs come from that agent's input schema.
@@ -178,15 +228,14 @@ defineWorkspace<TrackerContext>()({
     read: {
       input: z.object({}),
       output: z.string(),
+      // @ts-expect-error UI action targets and binding fields must exist in the mutation catalog.
       views: { default: 'basic', variants: { basic: {
         title: 'Read', renderer: 'json',
         actions: [
           { label: 'Bad action',
-            // @ts-expect-error UI action targets must be declared mutations.
             mutation: 'missingMutation',
           },
           { label: 'Bad binding', mutation: 'edit', bind: {
-            // @ts-expect-error Binding keys must exist on the target mutation input.
             missingField: { fromRow: 'id' },
           } },
         ],
@@ -201,9 +250,9 @@ defineWorkspace<TrackerContext>()({
   mutations: { save: { input: z.object({ id: z.string() }), output: z.string(), handler: () => 'saved' } },
   queries: { rows: {
     input: z.object({}), output: z.object({ rows: z.array(z.object({ id: z.string() })), nextCursor: z.string().nullable() }),
+    // @ts-expect-error Collection editor mutations are checked against this workspace's mutation catalog.
     views: { default: 'table', variants: { table: { title: 'Rows', renderer: 'table', rowKey: 'id', collection: {
       itemKey: 'id', columns: [],
-      // @ts-expect-error Collection editor mutations are checked against this workspace's mutation catalog.
       editor: { mutation: 'missingMutation' },
     } } } },
     handler: () => ({ rows: [], nextCursor: null }),
@@ -254,6 +303,6 @@ tracker.registerApplication({
 });
 
 // @ts-expect-error Query inputs are inferred from the schema.
-void client.query('activities', { limit: 'many' });
+void client.query('activities.list', { limit: 'many' });
 // @ts-expect-error Unknown operation names are rejected.
 void client.query('missing', {});

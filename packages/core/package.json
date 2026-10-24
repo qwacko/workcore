@@ -6,7 +6,7 @@
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
   },
-  "files": ["dist/index.js", "dist/index.d.ts", "dist/index.js.map", "dist/index.d.ts.map"],
+  "files": ["dist/index.js", "dist/index.d.ts", "dist/index.js.map", "dist/index.d.ts.map", "dist/composition.js", "dist/composition.d.ts", "dist/composition.js.map", "dist/composition.d.ts.map"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",

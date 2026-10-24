@@ -5,6 +5,8 @@ type MiloPrompt = {
   assistantMessageId: string;
   userMessage: string;
   recentMessages?: Array<{ role: 'user' | 'assistant'; text: string }>;
+  activitySummary?: { total: number; complete: number; planned: number };
+  latestActivityUpdate?: { title: string; status: 'planned' | 'complete' };
 };
 
 /** Offline, deterministic fallback so the chat example works without a provider key. */
@@ -12,8 +14,8 @@ export const miloDemoEngine: AgentEngine = {
   async run(args) {
     const prompt = JSON.parse(args.prompt) as MiloPrompt;
     const userText = prompt.userMessage.trim();
-  const history = prompt.recentMessages ?? [];
-    const reply = makeMiloReply(userText, history);
+    const history = prompt.recentMessages ?? [];
+    const reply = makeMiloReply(userText, history, prompt);
     await args.onEvent({ type: 'step.started', data: { stepNumber: 0, mode: 'local-demo' } });
     const finishTool = args.tools[args.finishTool];
     if (!finishTool) throw new Error(`Milo's finish tool '${args.finishTool}' was not configured`);
@@ -36,11 +38,18 @@ export const miloDemoEngine: AgentEngine = {
   },
 };
 
-function makeMiloReply(message: string, history: NonNullable<MiloPrompt['recentMessages']>) {
+function makeMiloReply(message: string, history: NonNullable<MiloPrompt['recentMessages']>, context: MiloPrompt) {
   const normalized = message.toLowerCase();
   const topic = message.replace(/\s+/g, ' ').slice(0, 120);
   if (/what can you do|how can you help|who are you/.test(normalized)) {
     return 'I’m Milo, your cheerful trail buddy. I can help you think through plans, untangle a question, or find one small next step. What’s on your mind?';
+  }
+  if (/\b(activities|activity summary|progress)\b/.test(normalized) && context.activitySummary) {
+    const summary = context.activitySummary;
+    return `Your workspace has ${summary.total} activities: ${summary.complete} complete and ${summary.planned} planned. One trail marker at a time!`;
+  }
+  if (/\b(what changed|latest update)\b/.test(normalized) && context.latestActivityUpdate) {
+    return `The latest activity update was “${context.latestActivityUpdate.title}”, now ${context.latestActivityUpdate.status}. A little progress goes a long way.`;
   }
   if (/\b(run|hike|walk|trail|workout|training|ride)\b/.test(normalized)) {
     return `That sounds like a good trail to explore: “${topic}.” I’d start with one easy milestone, leave a little room for surprise, and call that a win. What would make this feel doable for you?`;

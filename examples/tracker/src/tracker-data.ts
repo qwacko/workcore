@@ -1,5 +1,5 @@
 import { and, asc, count, eq, like } from 'drizzle-orm';
-import type { Activity, ActivityStore } from './app.js';
+import type { Activity, ActivityStore } from './tracker-types.js';
 import { activities } from './db/schema.js';
 import { db } from './db/index.js';
 

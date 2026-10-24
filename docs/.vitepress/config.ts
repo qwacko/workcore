@@ -34,14 +34,29 @@ export default defineConfig({
         items: [
           { text: 'Overview', link: '/' },
           { text: 'Getting started', link: '/getting-started' },
+          { text: 'Minimal integration', link: '/minimal-integration' },
           { text: 'Authoring', link: '/authoring' },
+          { text: 'Module composition', link: '/composition' },
         ],
       },
       {
         text: 'Guides',
         items: [
           { text: 'Architecture and security', link: '/architecture' },
+          { text: 'Authorization', link: '/authorization' },
+          { text: 'Authentication integrations', link: '/authentication' },
+          { text: 'Tasks and schedules', link: '/tasks' },
+          { text: 'Admin pages and views', link: '/admin-pages' },
+          { text: 'Chat', link: '/chat' },
+          { text: 'Agents', link: '/agents' },
           { text: 'Production deployment', link: '/production-deployment' },
+        ],
+      },
+      {
+        text: 'Reference',
+        items: [
+          { text: 'Configuration', link: '/configuration' },
+          { text: 'HTTP and live protocol', link: '/protocol' },
         ],
       },
       {

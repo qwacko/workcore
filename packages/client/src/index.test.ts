@@ -5,6 +5,52 @@ import type { JsonValue, WireCodec } from '@workcore/core';
 describe('fetch transport', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it.each(['not json', '{}', 'null', '[]', '{"result":1}'])('rejects malformed successful operation responses: %s', async (body) => {
+    const transport = createFetchTransport({ fetch: async () => new Response(body, { headers: { 'x-correlation-id': 'bad-response' } }) });
+    await expect(transport.request({ path: 'query', applicationId: 'demo', workspaceId: 'one', operation: 'read', input: {} })).rejects.toMatchObject({ code: 'INVALID_RESPONSE', status: 200 });
+  });
+
+  it('retains detailed metadata and structured validation errors', async () => {
+    const onWarning = vi.fn();
+    const request = { path: 'mutate' as const, applicationId: 'demo', workspaceId: 'one', operation: 'save', input: {} };
+    const transport = createFetchTransport({ onWarning, fetch: async () => Response.json({ result: 42, executionId: 'exec-1', correlationId: 'corr-1', deliveryWarnings: ['EVENT_DELIVERY_FAILED'] }) });
+    expect(await transport.requestDetailed!(request)).toEqual({ result: 42, executionId: 'exec-1', correlationId: 'corr-1', deliveryWarnings: ['EVENT_DELIVERY_FAILED'] });
+    expect(onWarning).toHaveBeenCalledWith('EVENT_DELIVERY_FAILED');
+    const forbidden = createFetchTransport({ fetch: async () => Response.json({ error: { code: 'VALIDATION_FAILED', message: 'Required', correlationId: 'corr-2', issues: [{ path: ['name'], message: 'Required' }] } }, { status: 400 }) });
+    await expect(forbidden.request(request)).rejects.toMatchObject({ correlationId: 'corr-2', issues: [{ path: ['name'], message: 'Required' }] });
+  });
+
+  it('rejects malformed enqueue responses and accepts a queued run envelope', async () => {
+    const request = { path: 'enqueue' as const, applicationId: 'demo', workspaceId: 'one', operation: 'save', input: {} };
+    await expect(createFetchTransport({ fetch: async () => Response.json({}, { status: 202, headers: { 'x-correlation-id': 'queued-error' } }) }).request(request)).rejects.toMatchObject({ code: 'INVALID_RESPONSE', status: 202, correlationId: 'queued-error' });
+    expect(await createFetchTransport({ fetch: async () => Response.json({ runId: 'run-1' }, { status: 202 }) }).request(request)).toEqual({ runId: 'run-1' });
+  });
+
+  it('preserves codec error fallbacks and wraps decoder failures with correlation context', async () => {
+    const codec: WireCodec = { id: 'broken-v1', encode: () => null, decode: () => { throw new Error('private decoder details'); } };
+    const request = { path: 'query' as const, applicationId: 'demo', workspaceId: 'one', operation: 'read', input: {} };
+    const broken = createFetchTransport({ codec, fetch: async () => Response.json({ workcoreCodec: codec.id, payload: null }, { headers: { 'x-correlation-id': 'decode-1' } }) });
+    await expect(broken.request(request)).rejects.toMatchObject({ code: 'WIRE_DECODING_FAILED', correlationId: 'decode-1', status: 200 });
+    const unsupported = createFetchTransport({ codec, fetch: async () => Response.json({ error: { code: 'WIRE_CODEC_UNSUPPORTED', message: 'Unsupported', correlationId: 'codec-1' } }, { status: 406 }) });
+    await expect(unsupported.request(request)).rejects.toMatchObject({ code: 'WIRE_CODEC_UNSUPPORTED', correlationId: 'codec-1', status: 406 });
+  });
+
+  it('supports injected SSE and header providers without assuming custom fetch config applies to SSE', async () => {
+    const source = { onopen: null, onmessage: null, onerror: null, close: vi.fn() };
+    const eventSource = vi.fn(() => source);
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer example');
+      return Response.json({ applications: [] });
+    });
+    const transport = createFetchTransport({ credentials: 'include', headers: async () => ({ authorization: 'Bearer example' }), fetch: fetcher, eventSource });
+    await transport.applications();
+    const stop = transport.subscribe('app', 'one', { onInvalidate() {}, onError() {} });
+    expect(eventSource).toHaveBeenCalledWith(expect.stringContaining('/events?'), { withCredentials: true });
+    stop();
+    expect(source.close).toHaveBeenCalled();
+    expect(() => createFetchTransport({ credentials: 'omit' }).subscribe('app', 'one', { onInvalidate() {}, onError() {} })).toThrow('Native EventSource');
+  });
+
   it('validates semantic UI versions, features, references and safe field names', () => {
     const manifest = {
       protocolVersion: 2, applicationId: 'demo', operations: [

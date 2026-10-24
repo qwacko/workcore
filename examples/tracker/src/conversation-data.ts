@@ -1,5 +1,5 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
-import type { ConversationStore } from './app.js';
+import type { ConversationStore } from './tracker-types.js';
 import { conversationMessages, conversations } from './db/schema.js';
 import { db } from './db/index.js';
 
