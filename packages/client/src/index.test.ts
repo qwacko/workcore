@@ -1,6 +1,36 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createFetchTransport, validateSemanticInterface, type WorkcoreManifest } from './index.js';
-import type { JsonValue, WireCodec } from '@workcore/core';
+import { createClient, createFetchTransport, validateSemanticInterface, type WorkcoreManifest, type WorkcoreTransport } from './index.js';
+import type { JsonValue, ValidationSchema, WireCodec } from '@workcore/core';
+
+describe('typed live query lifecycle', () => {
+  type App = { queries: { read: { api: true; input: ValidationSchema<Record<string, never>>; output: ValidationSchema<number> } } };
+  it('coalesces invalidations, suppresses stale results, and ignores notifications after disposal', async () => {
+    const pending: Array<(response: Response) => void> = [];
+    const fetcher = vi.fn(() => new Promise<Response>((resolve) => pending.push(resolve)));
+    const transport = createFetchTransport({ fetch: fetcher });
+    let events!: Parameters<WorkcoreTransport['subscribe']>[2];
+    const unsubscribe = vi.fn();
+    vi.spyOn(transport, 'subscribe').mockImplementation((_app, _workspace, callbacks) => { events = callbacks; return unsubscribe; });
+    const onData = vi.fn();
+    const onError = vi.fn();
+    const stop = createClient<App>({ transport, applicationId: 'app', workspaceId: 'one' }).subscribe('read', {}, { onData, onError });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    events.onInvalidate();
+    events.onInvalidate();
+    pending[0]!(Response.json({ result: 1, executionId: 'first' }));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    expect(onData).not.toHaveBeenCalled();
+    pending[1]!(Response.json({ result: 2, executionId: 'second' }));
+    await vi.waitFor(() => expect(onData).toHaveBeenCalledExactlyOnceWith(2));
+    stop(); stop();
+    events.onError(new Error('late disconnect'));
+    events.onInvalidate();
+    events.onReady?.();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+  });
+});
 
 describe('fetch transport', () => {
   afterEach(() => vi.unstubAllGlobals());

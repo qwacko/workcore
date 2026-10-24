@@ -1,32 +1,18 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
-import { jsonWireCodec, nextScheduleOccurrence, type AgentRun, type AgentRunAdapter, type AgentTraceEvent, type EventAdapter, type HistoryEntry, type PlatformServices, type ScheduleEntry, type Scope, type TaskPayload, type TaskRun, type WorkcoreEvent } from '@workcore/core';
-
-type DurableFileState = {
-  tasks: TaskPayload[];
-  taskDedupe: string[];
-  processing: TaskPayload[];
-  runs: TaskRun[];
-  history: HistoryEntry[];
-  schedules: ScheduleEntry[];
-  kv: Record<string, unknown>;
-  agentRuns: AgentRun[];
-  agentEvents: AgentTraceEvent[];
-};
+import { jsonWireCodec, nextScheduleOccurrence, type AgentRunAdapter, type EventAdapter, type PlatformServices, type ScheduleEntry, type Scope, type WorkcoreEvent } from '@workcore/core';
+import { createFileStore, type DurableFileState } from './store.js';
+import { claimedScheduleUpdate, sameScope, scheduleEdit } from '../shared.js';
 
 export type FileRetentionOptions = {
   /** Retain at most this many newest history records. Defaults to 5,000. */
   historyLimit?: number;
-  /** Retain at most this many task-run records, preserving queued/running runs. Defaults to 1,000. */
+  /** Retain at most this many newest terminal task runs, preserving queued/running runs. Defaults to 1,000. */
   taskRunLimit?: number;
   /** Retain at most this many newest terminal agent runs, preserving queued/running runs. Defaults to 1,000. */
   agentRunLimit?: number;
 };
 
-const emptyState = (): DurableFileState => ({ tasks: [], taskDedupe: [], processing: [], runs: [], history: [], schedules: [], kv: {}, agentRuns: [], agentEvents: [] });
 const scopeKey = (scope: Scope) => JSON.stringify([scope.applicationId, scope.workspaceId]);
 const kvKey = (scope: Scope, key: string) => JSON.stringify([scope.applicationId, scope.workspaceId, key]);
-const sameScope = (left: Scope, right: Scope) => left.applicationId === right.applicationId && left.workspaceId === right.workspaceId;
 function encodeAgentCursor(createdAt: string, id: string) { return encodeURIComponent(`${createdAt}\u0000${id}`); }
 function decodeAgentCursor(cursor: string) {
   try {
@@ -40,14 +26,13 @@ function decodeAgentCursor(cursor: string) {
  * Single-process local/demo adapter. Production multi-process deployments should use shared adapters.
  * Enqueue deduplication IDs are retained indefinitely, independently of taskRunLimit.
  */
-function createFileAdapterState(options: {
+export function createFileState(options: {
   path: string;
   workspaces: Array<{ applicationId: string; id: string; name: string; actors: string[] }>;
   retention?: FileRetentionOptions;
   maxKVValueBytes?: number;
 }): PlatformServices {
-  let serial: Promise<void> = Promise.resolve();
-  let recovered = false;
+  const { read, update } = createFileStore(options);
   const listeners = new Map<string, Set<(event: WorkcoreEvent) => void>>();
   const waiters = new Set<() => void>();
   const historyLimit = options.retention?.historyLimit ?? 5_000;
@@ -61,45 +46,11 @@ function createFileAdapterState(options: {
   const pruneTaskRuns = (state: DurableFileState) => {
     if (state.runs.length <= taskRunLimit) return;
     const keep = new Set(state.runs.filter((run) => run.status === 'queued' || run.status === 'running').map((run) => run.runId));
-    for (const run of state.runs) {
-      if (keep.size >= taskRunLimit) break;
-      if (run.status !== 'queued' && run.status !== 'running') keep.add(run.runId);
-    }
+    let terminals = 0;
+    for (const run of state.runs) if (run.status !== 'queued' && run.status !== 'running' && terminals++ < taskRunLimit) keep.add(run.runId);
     state.runs = state.runs.filter((run) => keep.has(run.runId));
   };
 
-  async function read(): Promise<DurableFileState> {
-    try {
-      const parsed = JSON.parse(await readFile(options.path, 'utf8')) as Partial<DurableFileState>;
-      return { ...emptyState(), ...parsed, taskDedupe: parsed.taskDedupe ?? parsed.runs?.map((run) => run.runId) ?? [], processing: parsed.processing ?? [] };
-    } catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return emptyState();
-      throw error;
-    }
-  }
-  async function update<T>(fn: (state: DurableFileState) => T | Promise<T>): Promise<T> {
-    let result!: T;
-    const operation = serial.then(async () => {
-      const state = await read();
-      if (!recovered) {
-        recovered = true;
-        for (const payload of state.processing) {
-          state.tasks.unshift(payload);
-          const run = state.runs.find((candidate) => candidate.runId === payload.id);
-          if (run) run.status = 'queued';
-        }
-        state.processing = [];
-      }
-      result = await fn(state);
-      await mkdir(dirname(options.path), { recursive: true });
-      const temporary = `${options.path}.${process.pid}.tmp`;
-      await writeFile(temporary, JSON.stringify(state, null, 2));
-      await rename(temporary, options.path);
-    });
-    serial = operation.catch(() => undefined);
-    await operation;
-    return result;
-  }
   const eventAdapter: EventAdapter = {
     publish: async (event) => { for (const listener of listeners.get(scopeKey(event)) ?? []) listener(event); },
     subscribe: (scope, listener) => {
@@ -182,27 +133,30 @@ function createFileAdapterState(options: {
         const run = state.runs.find((candidate) => candidate.runId === runId);
         if (run) { run.status = 'queued'; delete run.finishedAt; }
       }).then(() => { for (const wake of waiters) wake(); }),
-      complete: (runId, result) => update((state) => { state.processing = state.processing.filter((payload) => payload.id !== runId); const run = state.runs.find((candidate) => candidate.runId === runId); if (run) { run.status = 'succeeded'; run.result = result; run.finishedAt = new Date().toISOString(); } }),
-      fail: (runId, error) => update((state) => { state.processing = state.processing.filter((payload) => payload.id !== runId); const run = state.runs.find((candidate) => candidate.runId === runId); if (run) { run.status = 'failed'; run.error = error; run.finishedAt = new Date().toISOString(); } }),
+      complete: (runId, result) => update((state) => { state.processing = state.processing.filter((payload) => payload.id !== runId); const run = state.runs.find((candidate) => candidate.runId === runId); if (run) { run.status = 'succeeded'; run.result = result; run.finishedAt = new Date().toISOString(); } pruneTaskRuns(state); }),
+      fail: (runId, error) => update((state) => { state.processing = state.processing.filter((payload) => payload.id !== runId); const run = state.runs.find((candidate) => candidate.runId === runId); if (run) { run.status = 'failed'; run.error = error; run.finishedAt = new Date().toISOString(); } pruneTaskRuns(state); }),
       progress: (runId, progress) => update((state) => { const run = state.runs.find((candidate) => candidate.runId === runId); if (run) run.progress = Math.max(0, Math.min(100, progress)); }),
       list: async (scope, limit) => (await read()).runs.filter((run) => sameScope(run.scope, scope)).slice(0, limit),
-      waitForWork: (signal) => new Promise((resolve) => {
+      waitForWork: (signal) => new Promise((resolve, reject) => {
         if (signal.aborted) return resolve();
-        const wake = () => { waiters.delete(wake); signal.removeEventListener('abort', wake); resolve(); };
+        const cleanup = () => { waiters.delete(wake); signal.removeEventListener('abort', wake); };
+        const wake = () => { cleanup(); resolve(); };
         waiters.add(wake);
         signal.addEventListener('abort', wake, { once: true });
+        // Subscribe before inspecting persisted work so an enqueue cannot fall between the two.
+        void read().then((state) => { if (state.tasks.length) wake(); }).catch((error) => { cleanup(); reject(error); });
       }),
     },
     schedules: {
-      create: (schedule) => update((state) => { state.schedules.push(schedule); }),
+      create: (schedule) => update((state) => { if (state.schedules.some((item) => item.id === schedule.id)) throw new Error(`Duplicate schedule '${schedule.id}'`); state.schedules.push(schedule); }),
       list: async (scope) => (await read()).schedules.filter((schedule) => sameScope(schedule.scope, scope)),
       get: async (id) => (await read()).schedules.find((schedule) => schedule.id === id),
       update: (schedule) => update((state) => {
         const index = state.schedules.findIndex((candidate) => candidate.id === schedule.id);
         const current = state.schedules[index];
-        if (!current || (current.revision ?? 0) !== (schedule.revision ?? 0)) return false;
-        const { claimToken: _token, claimUntil: _until, activeRunId: _active, pendingRunId: _pending, ...fields } = schedule;
-        state.schedules[index] = { ...current, ...fields, revision: (current.revision ?? 0) + 1 };
+        const updated = current && scheduleEdit(current, schedule);
+        if (!updated) return false;
+        state.schedules[index] = updated;
         return true;
       }),
       remove: (id) => update((state) => { state.schedules = state.schedules.filter((schedule) => schedule.id !== id); }),
@@ -240,11 +194,9 @@ function createFileAdapterState(options: {
         let updated = false;
         await update((state) => {
           const current = state.schedules.find((candidate) => candidate.id === schedule.id);
-          if (!current || current.claimToken !== claimToken || (current.revision ?? 0) !== (schedule.revision ?? 0)) return;
-          const replacement = { ...schedule, revision: (current.revision ?? 0) + 1 };
-          delete replacement.claimToken;
-          delete replacement.claimUntil;
-          delete replacement.pendingRunId;
+          if (!current || current.claimToken !== claimToken) return;
+          const replacement = claimedScheduleUpdate(current, schedule);
+          if (!replacement) return;
           state.schedules[state.schedules.indexOf(current)] = replacement;
           updated = true;
         });
@@ -279,15 +231,7 @@ function createFileAdapterState(options: {
       }),
     },
     kv: {
-      get: async (scope, key) => {
-        const values = (await read()).kv;
-        const storageKey = kvKey(scope, key);
-        if (Object.hasOwn(values, storageKey)) return values[storageKey];
-        const legacyKey = `${scope.applicationId}:${scope.workspaceId}:${key}`;
-        const matchingScopes = options.workspaces.filter((workspace) => legacyKey.startsWith(`${workspace.applicationId}:${workspace.id}:`));
-        if (matchingScopes.length === 1 && matchingScopes[0]?.applicationId === scope.applicationId && matchingScopes[0]?.id === scope.workspaceId) return values[legacyKey];
-        return undefined;
-      },
+      get: async (scope, key) => (await read()).kv[kvKey(scope, key)],
       set: async (scope, key, value) => {
         const encoded = jsonWireCodec.encode(value);
         if (new TextEncoder().encode(JSON.stringify(encoded)).byteLength > maxKVValueBytes) throw new RangeError(`KV value exceeds the ${maxKVValueBytes}-byte limit`);
@@ -302,11 +246,7 @@ function createFileAdapterState(options: {
   };
 }
 
-export type FileAdapterState = ReturnType<typeof createFileAdapterState>;
-
-export function createFileState(options: Parameters<typeof createFileAdapterState>[0]): FileAdapterState {
-  return createFileAdapterState(options);
-}
+export type FileAdapterState = ReturnType<typeof createFileState>;
 
 export const createFileWorkspaces = (state: FileAdapterState) => state.workspaces;
 export const createFileEvents = (state: FileAdapterState) => state.events;

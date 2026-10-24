@@ -1,8 +1,29 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MockLanguageModelV3 } from 'ai/test';
 import { createAiSdkAgentEngine } from './index.js';
 
 describe('AI SDK agent engine', () => {
+  it('rejects missing or colliding finish-tool configurations before calling the model', async () => {
+    const model = new MockLanguageModelV3();
+    const engine = createAiSdkAgentEngine({ model });
+    const tool = { inputSchema: { type: 'object' }, execute: async () => ({}) };
+    const args = { model: 'mock', instructions: '', prompt: '', maxSteps: 1, signal: new AbortController().signal, onEvent: async () => {} };
+    await expect(engine.run({ ...args, tools: {}, finishTool: 'missing' })).rejects.toThrow('missing');
+    await expect(engine.run({ ...args, tools: { 'mutation.finish': tool, mutation_u2e_finish: tool }, finishTool: 'mutation.finish' })).rejects.toThrow('collide');
+    expect(model.doGenerateCalls).toHaveLength(0);
+  });
+
+  it('does not execute tools when the supplied signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('stopped'));
+    const execute = vi.fn(async () => ({}));
+    await expect(createAiSdkAgentEngine({ model: new MockLanguageModelV3() }).run({
+      model: 'mock', instructions: '', prompt: '', maxSteps: 1, signal: controller.signal, onEvent: async () => {},
+      tools: { finish: { inputSchema: { type: 'object' }, execute } }, finishTool: 'finish',
+    })).rejects.toThrow();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('returns successfully after the finish tool without another model call', async () => {
     const model = new MockLanguageModelV3({
       doGenerate: {

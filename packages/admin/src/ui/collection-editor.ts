@@ -1,20 +1,7 @@
 import type { CollectionViewOptions } from '@workcore/core';
+import { fieldPath as getCollectionFieldValue } from './field-path.js';
 
-/** Resolve a safe dot-separated object/array path from a collection row. */
-export function getCollectionFieldValue(value: unknown, path: string): unknown {
-  const parts = path.split('.');
-  if (!parts.length || parts.some((part) => !part || part === '__proto__' || part === 'prototype' || part === 'constructor')) return undefined;
-  let current = value;
-  for (const part of parts) {
-    if (Array.isArray(current)) {
-      if (!/^(0|[1-9]\d*)$/.test(part)) return undefined;
-      current = current[Number(part)];
-    } else if (current && typeof current === 'object' && Object.hasOwn(current, part)) {
-      current = (current as Record<string, unknown>)[part];
-    } else return undefined;
-  }
-  return current;
-}
+export { getCollectionFieldValue };
 
 /** Build a mutation input from only the declared identity/editable field mappings. */
 export function mapCollectionEditorInput(collection: CollectionViewOptions, row: Record<string, unknown>): Record<string, unknown> {

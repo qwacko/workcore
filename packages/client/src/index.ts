@@ -346,24 +346,22 @@ export function createClient<D>(options: { transport: WorkcoreTransport; applica
     },
     subscribe: <N extends PublicOperationNames<D, 'query'>>(operation: N, input: InputFor<DefinitionAt<D, 'query', N>>, callbacks: { onData(data: OutputFor<DefinitionAt<D, 'query', N>>): void; onError(error: Error): void }) => {
       let disposed = false;
-      let generation = 0;
       let inFlight = false;
       let rerun = false;
       const refresh = async () => {
         if (disposed) return;
         if (inFlight) { rerun = true; return; }
         inFlight = true;
-        const ownGeneration = ++generation;
         try {
           const value = await request<OutputFor<DefinitionAt<D, 'query', N>>>('query', operation, input);
-          if (!disposed && ownGeneration === generation && !rerun) callbacks.onData(value);
+          if (!disposed && !rerun) callbacks.onData(value);
         } catch (error) { if (!disposed && !rerun) callbacks.onError(error instanceof Error ? error : new Error(String(error))); }
         finally { inFlight = false; if (rerun && !disposed) { rerun = false; void refresh(); } }
       };
       // Subscribe first so invalidations during the initial query are not lost.
-       const unsubscribe = options.transport.subscribe(options.applicationId, options.workspaceId, { onInvalidate: () => void refresh(), onReady: () => void refresh(), onReconnect: () => void refresh(), onError: callbacks.onError });
-       void refresh();
-      return () => { disposed = true; unsubscribe(); };
+      const unsubscribe = options.transport.subscribe(options.applicationId, options.workspaceId, { onInvalidate: () => void refresh(), onReady: () => void refresh(), onReconnect: () => void refresh(), onError: (error) => { if (!disposed) callbacks.onError(error); } });
+      void refresh();
+      return () => { if (disposed) return; disposed = true; unsubscribe(); };
     },
   };
 }

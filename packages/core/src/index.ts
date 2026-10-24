@@ -1,4 +1,16 @@
 import type { StandardJSONSchemaV1, StandardSchemaV1 } from '@standard-schema/spec';
+import { WorkcoreError, safeMessage } from './internal/errors.js';
+import { authoriseOperation, canCapability } from './internal/authorization.js';
+import { compileOperationSchemas, getJsonSchema, operationAt, validate } from './internal/schema.js';
+import { makeManifest } from './internal/manifest.js';
+import { decodeStored, decodeWithCodec, encodeResult, encodeWithCodec, jsonWireCodec, resolveWireCodec } from './internal/wire.js';
+import { cleanupContext, executeWithDeadline, randomId, safeHistory } from './internal/lifecycle.js';
+import { createCaller, createExecutionContext, executeHandler, executeInteractive } from './internal/execution.js';
+import { isSupportedCron, nextScheduleOccurrence } from './internal/schedule.js';
+
+export { jsonWireCodec } from './internal/wire.js';
+export { createMemoryState } from './internal/memory.js';
+export { nextScheduleOccurrence } from './internal/schedule.js';
 
 export type Actor = { id: string; [key: string]: unknown };
 export type Scope = { applicationId: string; workspaceId: string };
@@ -13,33 +25,6 @@ export interface WireCodec {
   decode(value: JsonValue): unknown;
 }
 
-export const jsonWireCodec: WireCodec = {
-  id: 'json',
-  encode(value) { assertJsonValue(value); return value; },
-  decode(value) { assertJsonValue(value); return value; },
-};
-
-function assertJsonValue(value: unknown, seen = new Set<object>()): asserts value is JsonValue {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
-  if (typeof value === 'number') {
-    if (Number.isFinite(value)) return;
-    throw new TypeError('JSON wire values cannot contain non-finite numbers');
-  }
-  if (typeof value !== 'object') throw new TypeError(`Unsupported JSON wire value: ${typeof value}`);
-  if (seen.has(value)) throw new TypeError('JSON wire values cannot contain cycles');
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index++) {
-      if (!(index in value)) throw new TypeError('JSON wire arrays cannot be sparse');
-      assertJsonValue(value[index], seen);
-    }
-  } else {
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) throw new TypeError('JSON wire objects must be plain objects');
-    for (const item of Object.values(value)) assertJsonValue(item, seen);
-  }
-  seen.delete(value);
-}
 export type OperationKind = 'query' | 'mutation' | 'task';
 export type AgentToolKind = 'query' | 'mutation' | 'task';
 export type ValidationSchema<I = unknown, O = I> = StandardSchemaV1<I, O>;
@@ -61,7 +46,7 @@ export type Permission<App, Input> =
   | readonly string[]
   | ((args: { actor: Actor; scope: Scope; input: Input; access: AccessControl<App> }) => boolean | Promise<boolean>);
 
-export interface AccessControl<App = unknown> {
+export interface AccessControl<_App = unknown> {
   has(capability: string): boolean | Promise<boolean>;
 }
 
@@ -451,7 +436,7 @@ export type OperationViewsFor<Mutations extends object> = Omit<OperationViews, '
 type DefinitionOperationCaller<
   Queries extends object, QueryOutputs extends Record<keyof Queries, AnySchema>,
   Mutations extends object, MutationOutputs extends Record<keyof Mutations, AnySchema>,
-  Tasks extends object, TaskOutputs extends Record<keyof Tasks, AnySchema>,
+  Tasks extends object,
   Agents extends object,
 > = {
   query<N extends keyof Queries & string>(name: N, input: SchemaInput<Queries[N]>): Promise<OutputOf<QueryOutputs[N]>>;
@@ -501,9 +486,9 @@ type DefinedWorkspace<App, Id extends string,
 > = {
   id: Id;
   admin?: AdminConfigurationFor<keyof Queries & string, keyof Mutations & string, keyof Tasks & string>;
-  queries: DefinedOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents>, 'query', Mutations>;
-  mutations: DefinedOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents>, 'mutation', Mutations>;
-  tasks: DefinedOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, TaskOutputs, Agents>, 'task', Mutations>;
+  queries: DefinedOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, Agents>, 'query', Mutations>;
+  mutations: DefinedOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, Agents>, 'mutation', Mutations>;
+  tasks: DefinedOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<Queries, QueryOutputs, Mutations, MutationOutputs, Tasks, Agents>, 'task', Mutations>;
   agents: AgentMap<App, Agents, Queries, Mutations, Tasks>;
 } & ([AuthSchema] extends [undefined]
   ? { authorization?: undefined }
@@ -519,9 +504,9 @@ type WorkspaceConfiguration<App, Id extends string,
   id: Id;
   admin?: AdminAuthoring<Queries, Mutations, Tasks>;
   authorization?: AuthSchema extends AnySchema ? AuthorizationConfiguration<AuthSchema> : undefined;
-  queries?: DefinitionOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>, NoInfer<Agents>>, 'query', NoInfer<Mutations>>;
-  mutations?: DefinitionOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>, NoInfer<Agents>>, 'mutation', NoInfer<Mutations>>;
-  tasks?: DefinitionOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<TaskOutputs>, NoInfer<Agents>>, 'task', NoInfer<Mutations>>;
+  queries?: DefinitionOperationMap<App, Queries, QueryOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<Agents>>, 'query', NoInfer<Mutations>>;
+  mutations?: DefinitionOperationMap<App, Mutations, MutationOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<Agents>>, 'mutation', NoInfer<Mutations>>;
+  tasks?: DefinitionOperationMap<App, Tasks, TaskOutputs, DefinitionOperationCaller<NoInfer<Queries>, NoInfer<QueryOutputs>, NoInfer<Mutations>, NoInfer<MutationOutputs>, NoInfer<Tasks>, NoInfer<Agents>>, 'task', NoInfer<Mutations>>;
   agents?: AgentMap<App, Agents, Queries, Mutations, Tasks>;
 };
 
@@ -759,9 +744,6 @@ export type ApplicationRegistration = {
 
 type DefinitionWithContext = { id: string; readonly __appContext?: unknown };
 type ContextFromDefinition<D> = D extends { readonly __appContext?: infer App } ? Exclude<App, undefined> : never;
-type AuthorizationFromDefinition<D> = D extends { authorization?: { context: infer S } }
-  ? S extends AnySchema ? OutputOf<S> : never
-  : never;
 type AuthorizationRegistrationOption<D extends DefinitionWithContext> = D extends { authorization: { context: infer S } }
   ? { resolveAuthorization: (args: { scope: Scope; actor: Actor }) => (S extends AnySchema ? InputOf<S> : never) | Promise<S extends AnySchema ? InputOf<S> : never> }
   : { resolveAuthorization?: (args: { scope: Scope; actor: Actor }) => unknown | Promise<unknown> };
@@ -1015,7 +997,10 @@ export function createPlatform(options: PlatformOptions) {
     codecs.add(codec.id);
   }
   if (apps.size !== options.applications.length) throw new Error('Application IDs must be unique');
-  for (const registration of options.applications) validateDefinition(registration.definition);
+  for (const registration of options.applications) {
+    validateDefinition(registration.definition);
+    compileOperationSchemas(registration.definition);
+  }
 
   const worker = () => {
     if (!options.auth.resolveActor) throw new Error('Background workers require auth.resolveActor');
@@ -1056,50 +1041,15 @@ export function createPlatform(options: PlatformOptions) {
 
 export type ValidationIssue = { message: string; path?: Array<string | number> };
 
-class WorkcoreError extends Error {
-  constructor(readonly code: string, message: string, readonly status: number, readonly issues?: ValidationIssue[]) { super(message); }
-}
-
 function json(value: unknown, status = 200, headers: HeadersInit = {}, codec: WireCodec = jsonWireCodec) {
   const encoded = encodeWithCodec(codec, value);
   const body = codec.id === 'json' ? encoded : { workcoreCodec: codec.id, payload: encoded };
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...headers } });
 }
 
-function encodeWithCodec(codec: WireCodec, value: unknown): JsonValue {
-  try {
-    const encoded = codec.encode(value);
-    assertJsonValue(encoded);
-    return encoded;
-  }
-  catch (error) {
-    const detail = error instanceof TypeError ? error.message : safeMessage(error);
-    throw new WorkcoreError('WIRE_ENCODING_FAILED', `Could not encode value with '${codec.id}': ${detail}`, 422);
-  }
-}
-
-function decodeWithCodec(codec: WireCodec, value: JsonValue): unknown {
-  try { return codec.decode(value); }
-  catch (error) {
-    const detail = error instanceof TypeError ? error.message : safeMessage(error);
-    throw new WorkcoreError('WIRE_DECODING_FAILED', `Could not decode value with '${codec.id}': ${detail}`, 400);
-  }
-}
-
-function decodeStored(value: JsonValue, codecId: string | undefined, options: PlatformOptions) {
-  return decodeWithCodec(resolveWireCodec(options, codecId ?? 'json'), value);
-}
-
 function publicSchedule(schedule: ScheduleEntry, options: PlatformOptions) {
   const { claimToken: _claimToken, claimUntil: _claimUntil, pendingRunId: _pendingRunId, ...publicFields } = schedule;
   return { ...publicFields, input: decodeStored(schedule.input, schedule.codecId, options) };
-}
-
-function resolveWireCodec(options: PlatformOptions, requestedId: string | null): WireCodec {
-  if (!requestedId || requestedId === 'json') return jsonWireCodec;
-  const codec = options.wireCodecs?.find((candidate) => candidate.id === requestedId);
-  if (!codec) throw new WorkcoreError('WIRE_CODEC_UNSUPPORTED', `Wire codec '${requestedId}' is not supported`, 406);
-  return codec;
 }
 
 async function decodeRequestEnvelope(requestValue: unknown, codec: WireCodec): Promise<Record<string, unknown>> {
@@ -1151,7 +1101,7 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
   if (!await options.services.workspaces.canAccess(actor, scope)) throw new WorkcoreError('FORBIDDEN', 'Workspace access denied', 403);
   const input = (body as Record<string, unknown>).input;
   if (path === 'manifest' && request.method === 'GET') return json(await makeManifest(registration, actor, scope, options), 200, {}, codec);
-  if (path === 'events' && request.method === 'GET') return eventStream(request, scope, actor, registration, options, apps, trustedOrigins);
+  if (path === 'events' && request.method === 'GET') return eventStream(request, scope, actor, options, trustedOrigins);
   if (path === 'history' && request.method === 'GET') {
     if (!await canCapability(registration, options, actor, scope, 'workcore.history.read', undefined)) throw new WorkcoreError('FORBIDDEN', 'History access denied', 403);
     return json({ entries: await options.services.history.list(scope, boundedLimit(url.searchParams.get('limit'))) }, 200, {}, codec);
@@ -1260,261 +1210,20 @@ async function handleApi(request: Request, url: URL, base: string, options: Plat
       await options.services.tasks.enqueue({ id: runId, applicationId, workspaceId, operation: operationName, operationVersion: def.version ?? 1, input: encodeWithCodec(codec, validatedInput), codecId: codec.id, actorId: actor.id, correlationId, createdAt: new Date().toISOString() });
       return json({ runId }, 202, {}, codec);
     }
-    const executionId = randomId();
     const correlationId = request.headers.get('x-correlation-id') ?? randomId();
-    const startedAt = Date.now();
-    const entry: HistoryEntry = { id: executionId, scope, actorId: actor.id, kind, operation: operationName, status: 'running', startedAt: new Date(startedAt).toISOString() };
-    let context: unknown;
     try {
-      context = await registration.createAppContext({ scope, actor });
-      const requestContext = createRequestContext(request);
-      const result = await executeWithDeadline(request.signal, options.interactiveTimeoutMs ?? options.operationTimeoutMs ?? 30_000, (signal) => def.handler({
-        ctx: createExecutionContext(scope, actor, correlationId, context, options.services, signal, undefined, requestContext),
-        input: validatedInput,
-        operations: createCaller(registration, actor, scope, correlationId, options, apps, signal, codec, undefined, 0, undefined, requestContext),
-      }));
-      const validatedResult = await validateOutput(def.output, result);
-      const encodedResult = encodeWithCodec(codec, validatedResult);
-      if (new TextEncoder().encode(JSON.stringify(encodedResult)).byteLength > (options.maxResultBytes ?? 2_097_152)) throw new WorkcoreError('RESULT_TOO_LARGE', 'Operation result exceeds configured limit', 413);
-      const deliveryWarnings: string[] = [];
-      if (kind === 'mutation') {
-        const event: WorkcoreEvent = { id: randomId(), type: 'mutation.succeeded', applicationId, workspaceId, operation: operationName, executionId, actorId: actor.id, correlationId, createdAt: new Date().toISOString() };
-        let published = false;
-        try { await options.services.events.publish(event); published = true; } catch (error) {
-          deliveryWarnings.push('EVENT_DELIVERY_FAILED');
-          options.services.logger?.error('Mutation committed but success event publication failed', { executionId, detail: error instanceof Error ? error.message : String(error) });
-        }
-        try { if (published) await enqueueTriggeredTasks(registration, actor, scope, correlationId, event, options, codec); }
-        catch (error) {
-          deliveryWarnings.push('TRIGGER_DELIVERY_FAILED');
-          options.services.logger?.error('Mutation committed but triggered task enqueue failed', { executionId, detail: safeMessage(error) });
-        }
-      }
-      entry.status = deliveryWarnings.length ? 'delivery_failed' : 'succeeded';
-      entry.finishedAt = new Date().toISOString();
-      entry.durationMs = Date.now() - startedAt;
-      if (!await safeHistory(options, entry)) deliveryWarnings.push('HISTORY_PERSISTENCE_FAILED');
-      return json({ result: validatedResult, executionId, correlationId, ...(deliveryWarnings.length ? { deliveryWarning: deliveryWarnings[0], deliveryWarnings } : {}) }, 200, {}, codec);
+      const execution = await executeInteractive({ registration, actor, scope, correlationId, signal: request.signal, codec, request: createRequestContext(request) }, options, def, operationName, validatedInput, 'http');
+      return json({ result: execution.result, executionId: execution.executionId, correlationId, ...(execution.deliveryWarnings.length ? { deliveryWarning: execution.deliveryWarnings[0], deliveryWarnings: execution.deliveryWarnings } : {}) }, 200, {}, codec);
     } catch (error) {
-      entry.status = 'failed';
-      entry.finishedAt = new Date().toISOString();
-      entry.durationMs = Date.now() - startedAt;
-      entry.error = { code: error instanceof WorkcoreError ? error.code : 'EXECUTION_FAILED', message: safeMessage(error) };
-      await safeHistory(options, entry);
       if (error instanceof WorkcoreError) throw error;
       throw new WorkcoreError('EXECUTION_FAILED', safeMessage(error), 422);
-    } finally {
-      await cleanupContext(context, options.services.logger);
     }
   }
   throw new WorkcoreError('NOT_FOUND', 'Endpoint not found', 404);
 }
 
-async function authoriseOperation(registration: ApplicationRegistration, def: RuntimeOperation, actor: Actor, scope: Scope, input: unknown, options: PlatformOptions) {
-  const policy = def.permission;
-  if (policy === undefined) throw new WorkcoreError('FORBIDDEN', 'Operation has no permission policy', 403);
-  if (typeof policy === 'function') {
-    const allowed = await policy({ actor, scope, input, access: { has: (capability) => canCapability(registration, options, actor, scope, capability, input) } });
-    if (!allowed) throw new WorkcoreError('FORBIDDEN', 'Operation permission denied', 403);
-    return;
-  }
-  // An empty list explicitly requires no capability; workspace membership is still checked at the request boundary.
-  const permissions = typeof policy === 'string' ? [policy] : policy;
-  for (const permission of permissions) {
-    if (!await canCapability(registration, options, actor, scope, permission, input)) throw new WorkcoreError('FORBIDDEN', 'Operation permission denied', 403);
-  }
-}
-
-async function authoriseAgent(registration: ApplicationRegistration, def: RuntimeAgent, actor: Actor, scope: Scope, input: unknown, options: PlatformOptions) {
-  return authoriseOperation(registration, { kind: 'task', input: def.input, output: def.input, ...(def.permission ? { permission: def.permission as Permission<unknown, unknown> } : {}), handler: async () => undefined }, actor, scope, input, options);
-}
-
-async function workspacePermissionAllowed(registration: ApplicationRegistration, actor: Actor, scope: Scope, permission: string, input: unknown): Promise<boolean | undefined> {
-  const authorization = registration.definition.authorization;
-  if (!authorization) return undefined;
-  if (!registration.resolveAuthorization) return false;
-  const auth = await validate(authorization.context, await registration.resolveAuthorization({ actor, scope }));
-  return authorization.check({ auth, actor, scope, permission, input });
-}
-
-async function canCapability(registration: ApplicationRegistration, options: PlatformOptions, actor: Actor, scope: Scope, permission: string, input: unknown) {
-  let hasAuthorizer = false;
-  if (options.authorise) {
-    hasAuthorizer = true;
-    if (!await options.authorise({ actor, scope, permission, input })) return false;
-  }
-  const workspaceAllowed = await workspacePermissionAllowed(registration, actor, scope, permission, input);
-  if (workspaceAllowed !== undefined) {
-    hasAuthorizer = true;
-    if (!workspaceAllowed) return false;
-  }
-  return hasAuthorizer;
-}
-
-async function validate(schema: AnySchema, value: unknown): Promise<unknown> {
-  const result = await schema['~standard'].validate(value) as { value?: unknown; issues?: readonly { message: string; path?: readonly (PropertyKey | { key: PropertyKey })[] }[] };
-  if (result.issues) {
-    const issues: ValidationIssue[] = result.issues.map((issue) => ({ message: issue.message, ...(issue.path ? { path: issue.path.map((part) => typeof part === 'object' ? part.key : part).map((key) => typeof key === 'symbol' ? String(key) : key) } : {}) }));
-    throw new WorkcoreError('VALIDATION_FAILED', issues.map((issue) => issue.message).join('; '), 400, issues);
-  }
-  return result.value;
-}
-
-async function validateOutput(schema: AnySchema, value: unknown): Promise<unknown> {
-  try { return await validate(schema, value); }
-  catch (error) {
-    if (error instanceof WorkcoreError && error.code === 'VALIDATION_FAILED') {
-      throw new WorkcoreError('OUTPUT_VALIDATION_FAILED', 'Handler completed but returned a value that failed output validation; side effects may already have occurred', 500);
-    }
-    throw error;
-  }
-}
-
-async function executeWithDeadline<T>(parent: AbortSignal, timeoutMs: number, execute: (signal: AbortSignal) => T | Promise<T>): Promise<T> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('operationTimeoutMs must be a positive finite number');
-  if (parent.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Operation was aborted; side effects may have occurred', 499);
-  const controller = new AbortController();
-  const abortFromParent = () => controller.abort(parent.reason);
-  parent.addEventListener('abort', abortFromParent, { once: true });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let timedOut = false;
-  const timeoutError = new WorkcoreError('OPERATION_TIMEOUT', 'Operation exceeded its configured time limit; side effects may have occurred', 504);
-  let rejectAbort!: (error: Error) => void;
-  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
-  const rejectOnAbort = () => rejectAbort(timedOut ? timeoutError : new WorkcoreError('EXECUTION_ABORTED', 'Operation was aborted; side effects may have occurred', 499));
-  controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort(new Error('Operation deadline exceeded'));
-      reject(timeoutError);
-    }, timeoutMs);
-  });
-  try { return await Promise.race([Promise.resolve().then(() => execute(controller.signal)), timeout, aborted]); }
-  finally {
-    if (timer) clearTimeout(timer);
-    controller.signal.removeEventListener('abort', rejectOnAbort);
-    parent.removeEventListener('abort', abortFromParent);
-  }
-}
-
 function createRequestContext(request?: Request): RequestContext | undefined {
   return request ? { url: request.url, method: request.method, headers: new Headers(request.headers) } : undefined;
-}
-
-function createExecutionContext(scope: Scope, actor: Actor, correlationId: string, app: unknown, services: PlatformServices, signal: AbortSignal, runId?: string, request?: RequestContext): ExecutionContext<unknown> {
-  return {
-    scope, actor, correlationId, signal, app,
-    ...(request ? { request: { ...request, headers: new Headers(request.headers) } } : {}),
-    services: {
-      kv: {
-        get: async (key) => services.kv.get(scope, key) as Promise<never>,
-        set: (key, value) => services.kv.set(scope, key, value),
-        delete: (key) => services.kv.delete(scope, key),
-      },
-      logger: services.logger ?? consoleLogger,
-      tasks: { reportProgress: (percent) => runId ? services.tasks.progress(runId, percent) : Promise.resolve() },
-    },
-  };
-}
-
-function createCaller(registration: ApplicationRegistration, actor: Actor, scope: Scope, correlationId: string, options: PlatformOptions, apps: Map<string, ApplicationRegistration>, signal: AbortSignal, codec: WireCodec = jsonWireCodec, causationId?: string, triggerDepth = 0, currentExecutionId?: string, request?: RequestContext): OperationCaller {
-  const invoke = async (kind: 'query' | 'mutation' | 'task', name: string, input: unknown) => {
-    if (signal.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Operation call was aborted', 499);
-    if (!await options.services.workspaces.canAccess(actor, scope)) throw new WorkcoreError('FORBIDDEN', 'Workspace access denied', 403);
-    const def = operationAt(registration.definition, kind, name);
-    if (!def) throw new WorkcoreError('OPERATION_NOT_FOUND', `Unknown ${kind}: ${name}`, 404);
-    const validInput = await validate(def.input, input);
-    await authoriseOperation(registration, def, actor, scope, validInput, options);
-    if (kind === 'task') {
-      if (triggerDepth >= 8) throw new WorkcoreError('TRIGGER_DEPTH_EXCEEDED', 'Background operation trigger depth limit exceeded', 409);
-      if (signal.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Task enqueue was aborted', 499);
-      const id = randomId();
-      await options.services.tasks.enqueue({ id, applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: name, operationVersion: def.version ?? 1, input: encodeWithCodec(codec, validInput), codecId: codec.id, actorId: actor.id, correlationId, ...(currentExecutionId ? { causationId: currentExecutionId } : causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt: new Date().toISOString() });
-      return { runId: id };
-    }
-    const executionId = randomId();
-    const startedAt = Date.now();
-    const entry: HistoryEntry = { id: executionId, scope, actorId: actor.id, kind, operation: name, status: 'running', startedAt: new Date(startedAt).toISOString() };
-    const context = await registration.createAppContext({ scope, actor });
-    try {
-      const result = await executeWithDeadline(signal, options.interactiveTimeoutMs ?? options.operationTimeoutMs ?? 30_000, (executionSignal) => def.handler({ ctx: createExecutionContext(scope, actor, correlationId, context, options.services, executionSignal, undefined, request), input: validInput, operations: createCaller(registration, actor, scope, correlationId, options, apps, executionSignal, codec, causationId, triggerDepth, currentExecutionId, request) }));
-      const validOutput = await validateOutput(def.output, result);
-      let deliveryFailed = false;
-      if (kind === 'mutation') {
-        const event: WorkcoreEvent = { id: randomId(), type: 'mutation.succeeded', applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: name, executionId, actorId: actor.id, correlationId, ...(currentExecutionId ? { causationId: currentExecutionId } : causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt: new Date().toISOString() };
-        let published = false;
-        try { await options.services.events.publish(event); published = true; }
-        catch (error) { deliveryFailed = true; options.services.logger?.error('Internal mutation committed but event publication failed', { executionId, detail: error instanceof Error ? error.message : String(error) }); }
-        if (published) {
-          try { await enqueueTriggeredTasks(registration, actor, scope, correlationId, event, options, codec); }
-          catch (error) { deliveryFailed = true; options.services.logger?.error('Internal mutation committed but trigger enqueue failed', { executionId, detail: safeMessage(error) }); }
-        }
-      }
-      entry.status = deliveryFailed ? 'delivery_failed' : 'succeeded';
-      entry.finishedAt = new Date().toISOString();
-      entry.durationMs = Date.now() - startedAt;
-      await safeHistory(options, entry);
-      return validOutput;
-    } catch (error) {
-      entry.status = 'failed';
-      entry.finishedAt = new Date().toISOString();
-      entry.durationMs = Date.now() - startedAt;
-      entry.error = { code: error instanceof WorkcoreError ? error.code : 'EXECUTION_FAILED', message: safeMessage(error) };
-      await safeHistory(options, entry);
-      throw error;
-    } finally { await cleanupContext(context, options.services.logger); }
-  };
-  return {
-    query: (name, input) => invoke('query', name, input),
-    mutate: (name, input) => invoke('mutation', name, input),
-    enqueue: (name, input) => invoke('task', name, input) as Promise<{ runId: string }>,
-    enqueueAgent: (name, input, agentOptions) => {
-      if (signal.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Agent enqueue was aborted', 499);
-      return enqueueAgentRun(registration, actor, scope, correlationId, options, codec, name, input, agentOptions?.conversationId, currentExecutionId, triggerDepth, signal);
-    },
-  };
-}
-
-async function enqueueAgentRun(registration: ApplicationRegistration, actor: Actor, scope: Scope, correlationId: string, options: PlatformOptions, codec: WireCodec, name: string, rawInput: unknown, conversationId?: string, causationId?: string, triggerDepth = 0, signal?: AbortSignal) {
-  if (triggerDepth >= 8) throw new WorkcoreError('TRIGGER_DEPTH_EXCEEDED', 'Background operation trigger depth limit exceeded', 409);
-  const definition = registration.definition.agents?.[name];
-  if (!definition) throw new WorkcoreError('OPERATION_NOT_FOUND', `Unknown agent: ${name}`, 404);
-  if (!options.services.agentRuns) throw new WorkcoreError('AGENT_STORAGE_UNAVAILABLE', 'Agent run storage is not configured', 503);
-  const input = await validate(definition.input, rawInput);
-  await authoriseAgent(registration, definition, actor, scope, input, options);
-  if (!await options.services.workspaces.canAccess(actor, scope)) throw new WorkcoreError('FORBIDDEN', 'Workspace access denied', 403);
-  if (signal?.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Agent enqueue was aborted', 499);
-  const id = randomId();
-  const createdAt = new Date().toISOString();
-  const run: AgentRun = { id, scope, actorId: actor.id, agent: name, status: 'queued', createdAt, correlationId, codecId: codec.id, ...(conversationId ? { conversationId } : {}) };
-  await options.services.agentRuns.create(run);
-  try {
-    if (signal?.aborted) throw new WorkcoreError('EXECUTION_ABORTED', 'Agent enqueue was aborted', 499);
-    await options.services.tasks.enqueue({ id, applicationId: scope.applicationId, workspaceId: scope.workspaceId, operation: `@workcore/agent/${name}`, operationVersion: definition.version ?? 1, input: encodeWithCodec(codec, input), codecId: codec.id, actorId: actor.id, correlationId, ...(causationId ? { causationId } : {}), triggerDepth: triggerDepth + 1, createdAt });
-  } catch (error) {
-    run.status = 'failed'; run.finishedAt = new Date().toISOString(); run.error = { code: 'AGENT_ENQUEUE_FAILED', message: safeMessage(error) };
-    await options.services.agentRuns.update(run);
-    throw error;
-  }
-  return { runId: id };
-}
-
-async function enqueueTriggeredTasks(registration: ApplicationRegistration, actor: Actor, scope: Scope, correlationId: string, event: WorkcoreEvent, options: PlatformOptions, codec: WireCodec) {
-  if ((event.triggerDepth ?? 0) >= 8) throw new WorkcoreError('TRIGGER_DEPTH_EXCEEDED', 'Task trigger depth limit exceeded', 409);
-  if (!await options.services.workspaces.canAccess(actor, scope)) throw new WorkcoreError('FORBIDDEN', 'Workspace access denied before triggered task enqueue', 403);
-  const tasks = registration.definition.tasks ?? {};
-  for (const [operation, definition] of Object.entries(tasks)) {
-    if (!definition.triggers?.mutations?.includes(event.operation ?? '')) continue;
-    const rawInput = definition.triggers.mapInput ? definition.triggers.mapInput(event) : {};
-    const input = await validate(definition.input, rawInput);
-    await authoriseOperation(registration, definition, actor, scope, input, options);
-    const runId = randomId();
-    await options.services.tasks.enqueue({
-      id: runId, applicationId: scope.applicationId, workspaceId: scope.workspaceId,
-      operation, operationVersion: definition.version ?? 1, input: encodeWithCodec(codec, input), codecId: codec.id, actorId: actor.id, correlationId, causationId: event.id, triggerDepth: (event.triggerDepth ?? 0) + 1, createdAt: new Date().toISOString(),
-    });
-  }
 }
 
 async function processClaimedTask(payload: TaskPayload, options: PlatformOptions, apps: Map<string, ApplicationRegistration>, signal: AbortSignal) {
@@ -1542,7 +1251,7 @@ async function processClaimedTask(payload: TaskPayload, options: PlatformOptions
     return;
   }
   if (payload.operation.startsWith('@workcore/agent/')) {
-    await processClaimedAgent(payload, registration, actor, scope, options, apps, signal);
+    await processClaimedAgent(payload, registration, actor, scope, options, signal);
     await publishAgentInvalidation(payload, scope, options);
     return;
   }
@@ -1556,18 +1265,8 @@ async function processClaimedTask(payload: TaskPayload, options: PlatformOptions
     codec = resolveWireCodec(options, payload.codecId ?? 'json');
     const input = decodeStored(payload.input, payload.codecId, options);
     await authoriseOperation(registration, def, actor, scope, input, options);
-    const context = await registration.createAppContext({ scope, actor });
-    let result: unknown;
-    try {
-      result = await executeWithDeadline(signal, options.backgroundTimeoutMs ?? options.operationTimeoutMs ?? 5 * 60_000, (executionSignal) => def.handler({
-        ctx: createExecutionContext(scope, actor, payload.correlationId, context, options.services, executionSignal, payload.id),
-        input,
-        operations: createCaller(registration, actor, scope, payload.correlationId, options, apps, executionSignal, codec, payload.causationId, payload.triggerDepth ?? 0, payload.id),
-      }));
-    } finally { await cleanupContext(context, options.services.logger); }
-    const validatedResult = await validateOutput(def.output, result);
-    encodedResult = encodeWithCodec(codec, validatedResult);
-    if (new TextEncoder().encode(JSON.stringify(encodedResult)).byteLength > (options.maxResultBytes ?? 2_097_152)) throw new WorkcoreError('RESULT_TOO_LARGE', 'Task result exceeds configured limit', 413);
+    const result = await executeHandler({ registration, actor, scope, correlationId: payload.correlationId, signal, codec, causationId: payload.causationId, triggerDepth: payload.triggerDepth, runId: payload.id }, options, def, input, 'background');
+    encodedResult = encodeResult(codec, result, options);
   } catch (error) {
     const taskError = { code: error instanceof WorkcoreError ? error.code : 'TASK_FAILED', message: safeMessage(error) };
     await recordTaskFailure(options, payload, taskError);
@@ -1620,7 +1319,7 @@ async function recordAgentPreflightFailure(payload: TaskPayload, options: Platfo
   await store.update(run);
 }
 
-async function processClaimedAgent(payload: TaskPayload, registration: ApplicationRegistration, actor: Actor, scope: Scope, options: PlatformOptions, apps: Map<string, ApplicationRegistration>, signal: AbortSignal) {
+async function processClaimedAgent(payload: TaskPayload, registration: ApplicationRegistration, actor: Actor, scope: Scope, options: PlatformOptions, signal: AbortSignal) {
   const agentName = payload.operation.slice('@workcore/agent/'.length);
   const definition = registration.definition.agents?.[agentName];
   const store = options.services.agentRuns;
@@ -1662,7 +1361,7 @@ async function processClaimedAgent(payload: TaskPayload, registration: Applicati
   }
   const input = decodeStored(payload.input, payload.codecId, options);
   try {
-    await authoriseAgent(registration, definition, actor, scope, input, options);
+    await authoriseOperation(registration, definition, actor, scope, input, options);
   } catch (error) {
     run.status = 'failed'; run.finishedAt = new Date().toISOString(); run.error = { code: error instanceof WorkcoreError ? error.code : 'FORBIDDEN', message: safeMessage(error) };
     await store.update(run); await options.services.tasks.fail(payload.id, run.error); return;
@@ -1695,7 +1394,7 @@ async function processClaimedAgent(payload: TaskPayload, registration: Applicati
             let result: unknown;
             const signals = [agentSignal, agentAbortController.signal, ...(toolSignal ? [toolSignal] : [])];
             const executionSignal = AbortSignal.any(signals);
-            const toolCaller = createCaller(registration, actor, scope, payload.correlationId, options, apps, executionSignal, resolveWireCodec(options, payload.codecId ?? 'json'), payload.causationId, payload.triggerDepth ?? 0, payload.id);
+            const toolCaller = createCaller({ registration, actor, scope, correlationId: payload.correlationId, signal: executionSignal, codec: resolveWireCodec(options, payload.codecId ?? 'json'), causationId: payload.causationId, triggerDepth: payload.triggerDepth, runId: payload.id }, options);
             if (toolDefinition.kind === 'query') result = await toolCaller.query(toolDefinition.operation, toolInput);
             else if (toolDefinition.kind === 'mutation') result = await toolCaller.mutate(toolDefinition.operation, toolInput);
             else result = await toolCaller.enqueue(toolDefinition.operation, toolInput);
@@ -1723,7 +1422,7 @@ async function processClaimedAgent(payload: TaskPayload, registration: Applicati
         const callContext = {
           ctx: createExecutionContext(scope, actor, payload.correlationId, context, options.services, agentSignal, payload.id),
           input,
-          operations: createCaller(registration, actor, scope, payload.correlationId, options, apps, agentSignal, resolveWireCodec(options, payload.codecId ?? 'json'), payload.causationId, payload.triggerDepth ?? 0, payload.id),
+          operations: createCaller({ registration, actor, scope, correlationId: payload.correlationId, signal: agentSignal, codec: resolveWireCodec(options, payload.codecId ?? 'json'), causationId: payload.causationId, triggerDepth: payload.triggerDepth, runId: payload.id }, options),
         };
         const instructions = typeof definition.instructions === 'function' ? await definition.instructions(callContext) : definition.instructions;
         const prompt = await definition.prompt(callContext);
@@ -1737,8 +1436,7 @@ async function processClaimedAgent(payload: TaskPayload, registration: Applicati
       if (!finishToolSucceeded && !agentAbortController.signal.aborted) agentAbortController.abort(new Error('Agent engine stopped before successful completion'));
     }
     if (!finishToolSucceeded || result.finishTool !== definition.finishWhen.tool) throw new WorkcoreError('AGENT_FINISH_CONDITION_NOT_MET', 'Agent stopped without successfully calling its configured finish tool', 422);
-    const encoded = encodeWithCodec(resolveWireCodec(options, payload.codecId ?? 'json'), finishToolResult);
-    if (new TextEncoder().encode(JSON.stringify(encoded)).byteLength > (options.maxResultBytes ?? 2_097_152)) throw new WorkcoreError('RESULT_TOO_LARGE', 'Agent result exceeds configured limit', 413);
+    const encoded = encodeResult(resolveWireCodec(options, payload.codecId ?? 'json'), finishToolResult, options);
     run.status = 'succeeded'; run.finishedAt = new Date().toISOString(); run.finishReason = `tool:${result.finishTool}`;
     run.result = encoded;
     try { await append({ type: 'run.completed', data: { finishReason: run.finishReason } }); }
@@ -1860,7 +1558,7 @@ async function recordTaskFailure(options: PlatformOptions, payload: TaskPayload,
   }).catch((eventError) => options.services.logger?.error('Task failure was recorded but its event could not be published', { runId: payload.id, detail: safeMessage(eventError) }));
 }
 
-async function eventStream(request: Request, scope: Scope, actor: Actor, registration: ApplicationRegistration, options: PlatformOptions, apps: Map<string, ApplicationRegistration>, trustedOrigins: ReadonlySet<string>) {
+async function eventStream(request: Request, scope: Scope, actor: Actor, options: PlatformOptions, trustedOrigins: ReadonlySet<string>) {
   const encoder = new TextEncoder();
   const controller = new AbortController();
   const abort = () => { if (!controller.signal.aborted) controller.abort(); };
@@ -1915,118 +1613,7 @@ async function eventStream(request: Request, scope: Scope, actor: Actor, registr
     },
     cancel() { abort(); },
   });
-  // Keep references alive in the closure and make access revocation observable.
-  void registration; void apps;
   return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', ...corsHeaders(request, trustedOrigins) } });
-}
-
-async function makeManifest(registration: ApplicationRegistration, actor: Actor, scope: Scope, options: PlatformOptions) {
-  const definition = registration.definition;
-  const operations: Array<Record<string, unknown>> = [];
-  const operationViews: CompiledOperationPresentation[] = [];
-  const visibleMutations = new Set<string>();
-  const visibleQueries = new Set<string>();
-  for (const [name, def] of Object.entries(definition.queries ?? {})) {
-    if (def.api === true && await permissionVisible(registration, def, actor, scope, options)) visibleQueries.add(name);
-  }
-  for (const [name, def] of Object.entries(definition.mutations ?? {})) {
-    if (def.api === true && await permissionVisible(registration, def, actor, scope, options)) visibleMutations.add(name);
-  }
-  for (const [kind, map] of [['query', definition.queries], ['mutation', definition.mutations], ['task', definition.tasks]] as const) {
-    for (const [name, def] of Object.entries(map ?? {})) {
-      if (def.api !== true || !await permissionVisible(registration, def, actor, scope, options)) continue;
-      const inputSchema = getJsonSchema(def.input, 'input');
-      const outputSchema = getJsonSchema(def.output, 'output');
-       const views = def.views ? {
-         ...def.views,
-          variants: Object.fromEntries(Object.entries(def.views.variants).map(([variantName, variant]) => {
-              const { chat, chatActions, chatList, ...safeVariant } = variant;
-             const safeCollection = variant.collection ? (() => {
-               const { editor, actions = [], ...collectionFields } = variant.collection;
-               const visibleActions = actions.filter((action) => visibleMutations.has(action.mutation));
-               return {
-                 ...collectionFields,
-                 ...(editor && visibleMutations.has(editor.mutation) ? { editor } : {}),
-                 ...(visibleActions.length ? { actions: visibleActions } : {}),
-               };
-             })() : undefined;
-             const safeChat = chat ? {
-              ...chat,
-              ...(chat.actions ? { actions: Object.fromEntries(Object.entries(chat.actions).filter(([, mapping]) => visibleMutations.has(mapping.mutation))) } : {}),
-            } : undefined;
-             const safeChatActions = chatActions ? Object.fromEntries(Object.entries(chatActions).filter(([, mapping]) => visibleMutations.has(mapping.mutation))) : undefined;
-             const safeChatList = chatList ? (() => {
-               const { threadQuery, ...listOptions } = chatList;
-               return threadQuery && visibleQueries.has(threadQuery) ? chatList : listOptions;
-             })() : undefined;
-            return [variantName, {
-              ...safeVariant,
-              ...(variant.actions ? { actions: variant.actions.filter((action) => visibleMutations.has(action.mutation)) } : {}),
-               ...(safeCollection ? { collection: safeCollection } : {}),
-               ...(safeChatActions ? { chatActions: safeChatActions } : {}),
-               ...(safeChatList ? { chatList: safeChatList } : {}),
-               ...(safeChat && (!safeChat.sendMutation || visibleMutations.has(safeChat.sendMutation)) ? { chat: safeChat } : {}),
-           }];
-         })),
-      } : undefined;
-      operationViews.push(views && def.views
-        ? { operation: name, kind, default: def.views.default, variants: views.variants }
-        : { operation: name, kind, default: kind === 'query' ? 'json' : 'form', variants: { [kind === 'query' ? 'json' : 'form']: { title: name, renderer: kind === 'query' ? 'json' : 'form' } } });
-      operations.push({ name, kind, input: inputSchema, output: outputSchema });
-    }
-  }
-  const builtinEnabled = (id: 'operations' | 'tasks' | 'schedules' | 'history' | 'agents') => definition.admin?.builtins?.[id] !== false;
-  const capabilities = {
-    tasksRead: await canCapability(registration, options, actor, scope, 'workcore.tasks.read', undefined),
-    schedulesRead: await canCapability(registration, options, actor, scope, 'workcore.schedules.read', undefined),
-    schedulesManage: await canCapability(registration, options, actor, scope, 'workcore.schedules.manage', undefined),
-    historyRead: await canCapability(registration, options, actor, scope, 'workcore.history.read', undefined),
-    agentRunsRead: await canCapability(registration, options, actor, scope, 'workcore.agents.runs.read', undefined),
-    agentRunsReadAll: await canCapability(registration, options, actor, scope, 'workcore.agents.runs.read.all', undefined),
-    agentResultsRead: await canCapability(registration, options, actor, scope, 'workcore.agents.results.read', undefined),
-    agentMessagesRead: await canCapability(registration, options, actor, scope, 'workcore.agents.messages.read', undefined),
-    agentToolsRead: await canCapability(registration, options, actor, scope, 'workcore.agents.tools.read', undefined),
-    agentToolPayloadsRead: await canCapability(registration, options, actor, scope, 'workcore.agents.toolPayloads.read', undefined),
-  };
-  const pages: AdminManifestPage[] = [];
-  if (builtinEnabled('operations') && operations.length) pages.push({
-    id: 'operations', title: 'Operations', description: 'Explore validated operations available in this workspace.', layout: 'two-column', builtin: true,
-    blocks: [
-      { id: 'operation-catalog', type: 'operation-catalog', selection: 'operation' },
-      { id: 'operation-executor', type: 'operation-executor', selection: 'operation' },
-    ],
-  });
-  if (builtinEnabled('tasks') && capabilities.tasksRead) pages.push({ id: 'tasks', title: 'Task runs', description: 'Inspect queued, running and completed tasks.', blocks: [{ id: 'task-runs', type: 'resource', resource: 'tasks', title: 'Task runs' }], builtin: true });
-  if (builtinEnabled('schedules') && capabilities.schedulesRead) pages.push({ id: 'schedules', title: 'Schedules', description: 'Manage recurring and one-off task schedules.', blocks: [{ id: 'schedules', type: 'resource', resource: 'schedules', title: 'Schedules' }], builtin: true });
-  if (builtinEnabled('history') && capabilities.historyRead) pages.push({ id: 'history', title: 'History', description: 'Recent execution outcomes for this workspace.', blocks: [{ id: 'history', type: 'resource', resource: 'history', title: 'History' }], builtin: true });
-  if (builtinEnabled('agents') && options.services.agentRuns && capabilities.agentRunsRead) pages.push({ id: 'agents', title: 'Agent runs', description: 'Inspect agent execution status and authorized trace details.', blocks: [{ id: 'agent-runs', type: 'resource', resource: 'agents', title: 'Agent runs' }], builtin: true });
-  for (const [id, page] of Object.entries(definition.admin?.pages ?? {})) {
-    const blocks = page.blocks.filter((block) => block.type === 'custom' ? true : block.type === 'resource'
-      ? (block.resource === 'tasks' ? capabilities.tasksRead : block.resource === 'schedules' ? capabilities.schedulesRead : block.resource === 'history' ? capabilities.historyRead : Boolean(options.services.agentRuns && capabilities.agentRunsRead))
-      : block.type === 'operation-catalog' || block.type === 'operation-executor'
-        ? operations.length > 0
-      : operations.some((operation) => operation.name === block.operation && ((block.type === 'query' && operation.kind === 'query') || (block.type === 'mutation-form' && operation.kind === 'mutation') || (block.type === 'task-launcher' && operation.kind === 'task'))));
-     if (blocks.length) pages.push({ id, ...page, blocks });
-  }
-  const semanticPages = pages.map((page) => ({ ...page, layout: normalizeSemanticLayout(page.layout) }));
-  const semanticDefaultPage = semanticPages.some((page) => page.id === definition.admin?.defaultPage) ? definition.admin!.defaultPage : semanticPages[0]?.id;
-  const hasOperationComposition = semanticPages.some((page) => page.blocks.some((block) => block.type === 'operation-catalog' || block.type === 'operation-executor'));
-  const hasCollections = operationViews.some((view) => Object.values(view.variants).some((variant) => !!variant.collection));
-  const hasCustomBlocks = semanticPages.some((page) => page.blocks.some((block) => block.type === 'custom'));
-  return { protocolVersion: 2, schemaDialect: 'https://json-schema.org/draft/2020-12/schema', applicationId: definition.id, operations, interface: { version: 1, requiredFeatures: [...(operationViews.length ? ['operation-views-v1'] : []), ...(hasCollections ? ['collection-editor-v1'] : []), ...(hasOperationComposition ? ['operation-catalog-v1'] : []), ...(hasCustomBlocks ? ['custom-placeholder-v1'] : [])], pages: semanticPages, ...(semanticDefaultPage ? { defaultPage: semanticDefaultPage } : {}), operationViews }, capabilities };
-}
-
-function normalizeSemanticLayout(layout: AdminManifestPage['layout']): 'stack' | 'grid' | 'page' {
-  return layout === 'two-column' || layout === 'overview' ? 'grid' : layout === 'stacked' ? 'stack' : 'page';
-}
-
-async function permissionVisible(registration: ApplicationRegistration, definition: RuntimeOperation, actor: Actor, scope: Scope, options: PlatformOptions) {
-  if (definition.permission === undefined) return false;
-  // Input-aware policies are decided at execution; an empty list explicitly requires no capability.
-  if (typeof definition.permission === 'function' || (Array.isArray(definition.permission) && definition.permission.length === 0)) return true;
-  const permissions = typeof definition.permission === 'string' ? [definition.permission] : definition.permission;
-  for (const permission of permissions) if (!await canCapability(registration, options, actor, scope, permission, undefined)) return false;
-  return true;
 }
 
 function isAgentRunStatus(value: string | undefined): value is AgentRunStatus {
@@ -2060,16 +1647,6 @@ function projectAgentEvent(event: AgentTraceEvent, permissions: { canReadTools: 
     return { ...event, data };
   }
   return event;
-}
-
-function getJsonSchema(schema: AnySchema, direction: 'input' | 'output'): JsonSchema {
-  const provider = schema as unknown as JsonSchemaProvider;
-  if (!provider['~standard'].jsonSchema) throw new WorkcoreError('SCHEMA_CONVERSION_MISSING', 'Operation schema must implement Standard JSON Schema to appear in the admin manifest', 500);
-  const options = {
-    target: 'draft-2020-12',
-    ...(provider['~standard'].vendor === 'zod' ? { libraryOptions: { unrepresentable: 'any' } } : {}),
-  };
-  return provider['~standard'].jsonSchema[direction](options);
 }
 
 export function validateDefinition(definition: RuntimeDefinition) {
@@ -2320,10 +1897,6 @@ export function validateDefinition(definition: RuntimeDefinition) {
   }
 }
 
-function operationAt(definition: RuntimeDefinition, kind: OperationKind, name: string) {
-  return (kind === 'query' ? definition.queries : kind === 'mutation' ? definition.mutations : definition.tasks)?.[name];
-}
-
 async function readBody(request: Request, maxBytes: number): Promise<unknown> {
   const declaredSize = Number(request.headers.get('content-length'));
   if (Number.isFinite(declaredSize) && declaredSize > maxBytes) throw new WorkcoreError('REQUEST_TOO_LARGE', 'Request body exceeds configured limit', 413);
@@ -2371,16 +1944,6 @@ function applySchedulePatch(schedule: ScheduleEntry, patch: Record<string, unkno
   }
 }
 function normalizePath(path: string) { return `/${path.split('/').filter(Boolean).join('/')}`; }
-function randomId() { return globalThis.crypto.randomUUID(); }
-function encodeMemoryAgentCursor(createdAt: string, id: string) { return encodeURIComponent(`${createdAt}\u0000${id}`); }
-function decodeMemoryAgentCursor(cursor: string) {
-  try {
-    const [createdAt, id, extra] = decodeURIComponent(cursor).split('\u0000');
-    if (!createdAt || !id || extra !== undefined || !Number.isFinite(Date.parse(createdAt))) throw new TypeError();
-    return [createdAt, id] as const;
-  } catch { throw new TypeError('Invalid agent run cursor'); }
-}
-function safeMessage(error: unknown) { return error instanceof WorkcoreError ? error.message.slice(0, 300) : 'Operation failed'; }
 function safeTraceValue(value: unknown): JsonValue {
   try {
     const encoded = jsonWireCodec.encode(value);
@@ -2388,24 +1951,6 @@ function safeTraceValue(value: unknown): JsonValue {
     if (new TextEncoder().encode(serialized).byteLength <= 32_768) return encoded;
     return { truncated: true };
   } catch { return { unavailable: true }; }
-}
-async function safeHistory(options: PlatformOptions, entry: HistoryEntry): Promise<boolean> {
-  try { await options.services.history.append(entry); return true; }
-  catch (error) { options.services.logger?.error('Operation history persistence failed', { executionId: entry.id, detail: safeMessage(error) }); }
-  return false;
-}
-async function cleanupContext(context: unknown, logger?: Logger) {
-  if (context && typeof context === 'object' && 'dispose' in context && typeof context.dispose === 'function') {
-    const dispose = context.dispose as () => unknown;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        Promise.resolve().then(() => dispose.call(context)),
-        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Cleanup deadline exceeded')), 5_000); }),
-      ]);
-    } catch { logger?.error('Application context cleanup failed', { error: 'Cleanup hook failed or exceeded 5 seconds' }); }
-    finally { if (timer) clearTimeout(timer); }
-  }
 }
 function corsHeaders(request: Request, trustedOrigins: ReadonlySet<string>): Record<string, string> {
   const origin = request.headers.get('origin');
@@ -2437,39 +1982,6 @@ function normalizeOrigin(value: string): string {
     throw new Error(`Trusted origin must contain only an http(s) origin: '${value}'`);
   }
   return url.origin;
-}
-const consoleLogger: Logger = { debug: (message, fields) => console.debug(message, fields), info: (message, fields) => console.info(message, fields), warn: (message, fields) => console.warn(message, fields), error: (message, fields) => console.error(message, fields) };
-
-function isSupportedCron(value: string) {
-  const fields = value.trim().split(/\s+/);
-  const bounds: Array<[number, number]> = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
-  if (fields.length !== bounds.length) return false;
-  return fields.every((field, index) => field.split(',').every((part) => {
-    const [minimum, maximum] = bounds[index]!;
-    if (part === '*') return true;
-    if (/^\*\/\d+$/.test(part)) { const step = Number(part.slice(2)); return step > 0 && step <= maximum - minimum + 1; }
-    const range = /^(\d+)-(\d+)$/.exec(part);
-    if (range) { const start = Number(range[1]); const end = Number(range[2]); return start >= minimum && end <= maximum && start <= end; }
-    if (/^\d+$/.test(part)) { const number = Number(part); return number >= minimum && number <= maximum; }
-    return false;
-  }));
-}
-export function nextScheduleOccurrence(cron: string, from: Date, timezone: string): Date {
-  const parts = cron.trim().split(/\s+/);
-  const matches = (part: string, value: number) => part === '*' || part.split(',').some((chunk) => {
-    if (chunk.startsWith('*/')) return value % Number(chunk.slice(2)) === 0;
-    if (chunk.includes('-')) { const [a, b] = chunk.split('-').map(Number); return value >= a! && value <= b!; }
-    return Number(chunk) === value;
-  });
-  const formatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, minute: 'numeric', hour: 'numeric', day: 'numeric', month: 'numeric', weekday: 'short', hourCycle: 'h23' });
-  const next = new Date(from.getTime()); next.setSeconds(0, 0);
-  for (let i = 0; i < 60 * 24 * 370; i++) {
-    next.setMinutes(next.getMinutes() + 1);
-    const values = Object.fromEntries(formatter.formatToParts(next).map((part) => [part.type, part.value]));
-    const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(values.weekday ?? '');
-    if (matches(parts[0]!, Number(values.minute)) && matches(parts[1]!, Number(values.hour)) && matches(parts[2]!, Number(values.day)) && matches(parts[3]!, Number(values.month)) && matches(parts[4]!, weekday)) return next;
-  }
-  throw new Error('Could not calculate next schedule occurrence');
 }
 
 async function handleScheduleDue(options: PlatformOptions, apps: Map<string, ApplicationRegistration>) {
@@ -2577,143 +2089,6 @@ async function handleScheduleDue(options: PlatformOptions, apps: Map<string, App
       catch (error) { options.services.logger?.error('Could not release unfinished schedule claim', { scheduleId: id, detail: safeMessage(error) }); }
     }));
   }
-}
-
-// In-memory adapters are intended for tests and local demos, not durable production storage.
-/** Shared in-memory adapter state. Compose its individual services when building PlatformServices. */
-export function createMemoryState(options: { workspaces?: Array<{ applicationId: string; id: string; name: string; actors: string[] }> } = {}): PlatformServices {
-  const workspaceRows = options.workspaces ?? [];
-  const eventListeners = new Map<string, Set<(event: WorkcoreEvent) => void>>();
-  const taskQueue: TaskPayload[] = [];
-  const processing = new Map<string, TaskPayload>();
-  const taskRuns = new Map<string, TaskRun>();
-  const agentRuns = new Map<string, AgentRun>();
-  const agentEvents = new Map<string, AgentTraceEvent[]>();
-  const historyRows = new Map<string, HistoryEntry[]>();
-  const scheduleRows = new Map<string, ScheduleEntry>();
-  const kvRows = new Map<string, unknown>();
-  const waiters = new Set<() => void>();
-  const scopeKey = (scope: Scope) => JSON.stringify([scope.applicationId, scope.workspaceId]);
-  const kvKey = (scope: Scope, key: string) => JSON.stringify([scope.applicationId, scope.workspaceId, key]);
-  const services: PlatformServices = {
-    workspaces: {
-      canAccess: (actor, scope) => workspaceRows.some((workspace) => workspace.applicationId === scope.applicationId && workspace.id === scope.workspaceId && workspace.actors.includes(actor.id)),
-      list: async (actor, applicationId) => workspaceRows.filter((workspace) => workspace.applicationId === applicationId && workspace.actors.includes(actor.id)).map(({ id, name }) => ({ id, name })),
-    },
-    events: {
-      publish: async (event) => { for (const listener of eventListeners.get(scopeKey(event)) ?? []) listener(event); },
-      subscribe: (scope, listener) => { const key = scopeKey(scope); const listeners = eventListeners.get(key) ?? new Set(); listeners.add(listener); eventListeners.set(key, listeners); return () => { listeners.delete(listener); if (!listeners.size) eventListeners.delete(key); }; },
-    },
-    history: {
-      append: async (entry) => { const key = scopeKey(entry.scope); const entries = historyRows.get(key) ?? []; entries.unshift(entry); historyRows.set(key, entries); },
-      list: async (scope, limit) => (historyRows.get(scopeKey(scope)) ?? []).slice(0, limit),
-    },
-    tasks: {
-      enqueue: async (payload) => { if (taskRuns.has(payload.id)) return; taskQueue.push(payload); taskRuns.set(payload.id, { id: payload.id, runId: payload.id, scope: { applicationId: payload.applicationId, workspaceId: payload.workspaceId }, actorId: payload.actorId, kind: 'task', operation: payload.operation, status: 'queued', startedAt: payload.createdAt, ...(payload.codecId ? { codecId: payload.codecId } : {}) }); for (const wake of waiters) wake(); },
-      claim: async () => { const item = taskQueue.shift(); if (item) { processing.set(item.id, item); const run = taskRuns.get(item.id); if (run) { run.status = 'running'; run.startedAt = new Date().toISOString(); } } return item; },
-      release: async (id) => { const run = taskRuns.get(id); if (!run || run.status !== 'running') return; run.status = 'queued'; delete run.finishedAt; const item = processing.get(id); if (item) { processing.delete(id); taskQueue.unshift(item); for (const wake of waiters) wake(); } },
-      complete: async (id, result) => { processing.delete(id); const run = taskRuns.get(id); if (run) { run.status = 'succeeded'; run.finishedAt = new Date().toISOString(); run.result = result; } },
-      fail: async (id, error) => { processing.delete(id); const run = taskRuns.get(id); if (run) { run.status = 'failed'; run.finishedAt = new Date().toISOString(); run.error = error; } },
-      progress: async (id, progress) => { const run = taskRuns.get(id); if (run) run.progress = Math.max(0, Math.min(100, progress)); },
-      list: async (scope, limit) => [...taskRuns.values()].filter((run) => sameScope(run.scope, scope)).slice(0, limit),
-      waitForWork: (signal) => new Promise((resolve) => { if (signal.aborted) return resolve(); const wake = () => { waiters.delete(wake); signal.removeEventListener('abort', wake); resolve(); }; waiters.add(wake); signal.addEventListener('abort', wake, { once: true }); }),
-    },
-    agentRuns: {
-      create: async (run) => { if (agentRuns.has(run.id)) throw new Error(`Duplicate agent run '${run.id}'`); agentRuns.set(run.id, structuredClone(run)); agentEvents.set(run.id, []); },
-      get: async (scope, runId) => { const run = agentRuns.get(runId); return run && sameScope(run.scope, scope) ? structuredClone(run) : undefined; },
-      list: async (scope, filter) => {
-        let rows = [...agentRuns.values()].filter((run) => sameScope(run.scope, scope)
-          && (!filter.agent || run.agent === filter.agent) && (!filter.status || run.status === filter.status)
-          && (!filter.actorId || run.actorId === filter.actorId) && (!filter.conversationId || run.conversationId === filter.conversationId))
-          .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
-        if (filter.cursor) {
-          const [createdAt, id] = decodeMemoryAgentCursor(filter.cursor);
-          rows = rows.filter((run) => run.createdAt < createdAt || (run.createdAt === createdAt && run.id < id));
-        }
-        const page = rows.slice(0, filter.limit);
-        const last = page.at(-1);
-        return { runs: structuredClone(page), nextCursor: rows.length > page.length && last ? encodeMemoryAgentCursor(last.createdAt, last.id) : null };
-      },
-      update: async (run) => { const existing = agentRuns.get(run.id); if (!existing || !sameScope(existing.scope, run.scope)) throw new Error(`Unknown agent run '${run.id}'`); agentRuns.set(run.id, structuredClone(run)); },
-      appendEvent: async (event) => { const run = agentRuns.get(event.runId); if (!run) throw new Error(`Unknown agent run '${event.runId}'`); const rows = agentEvents.get(event.runId) ?? []; if (rows.some((item) => item.sequence === event.sequence)) return; rows.push(structuredClone(event)); agentEvents.set(event.runId, rows); },
-      listEvents: async (scope, runId, afterSequence, limit) => { const run = agentRuns.get(runId); if (!run || !sameScope(run.scope, scope)) return []; return structuredClone((agentEvents.get(runId) ?? []).filter((event) => event.sequence > afterSequence).slice(0, limit)); },
-    },
-    schedules: {
-      create: async (schedule) => { scheduleRows.set(schedule.id, structuredClone(schedule)); },
-      list: async (scope) => structuredClone([...scheduleRows.values()].filter((schedule) => sameScope(schedule.scope, scope))),
-      get: async (id) => { const schedule = scheduleRows.get(id); return schedule ? structuredClone(schedule) : undefined; },
-      update: async (schedule) => {
-        const current = scheduleRows.get(schedule.id);
-        if (!current || (current.revision ?? 0) !== (schedule.revision ?? 0)) return false;
-        const { claimToken: _token, claimUntil: _until, activeRunId: _active, pendingRunId: _pending, ...fields } = schedule;
-        scheduleRows.set(schedule.id, structuredClone({ ...current, ...fields, revision: (current.revision ?? 0) + 1 }));
-        return true;
-      },
-      remove: async (id) => { scheduleRows.delete(id); },
-      claimDue: async (now, claimToken, leaseMs) => {
-        const due: ScheduleEntry[] = [];
-        for (const schedule of scheduleRows.values()) {
-          if (!schedule.pendingRunId && (!schedule.enabled || !schedule.nextRunAt || Date.parse(schedule.nextRunAt) > now.getTime())) continue;
-          if (schedule.claimToken && schedule.claimUntil && Date.parse(schedule.claimUntil) > now.getTime()) continue;
-          if (!schedule.pendingRunId && schedule.activeRunId) {
-            const run = taskRuns.get(schedule.activeRunId);
-            if (run?.status === 'queued' || run?.status === 'running') {
-              schedule.lastSkipReason = 'Skipped because the previous scheduled run is still active';
-              if (schedule.kind === 'recurring') schedule.nextRunAt = nextScheduleOccurrence(schedule.cron!, now, schedule.timezone).toISOString();
-              continue;
-            }
-            delete schedule.activeRunId;
-          }
-          schedule.claimToken = claimToken;
-          schedule.claimUntil = new Date(now.getTime() + leaseMs).toISOString();
-          due.push({ ...schedule });
-        }
-        return due;
-      },
-      renewClaim: async (id, claimToken, claimUntil) => {
-        const schedule = scheduleRows.get(id);
-        if (!schedule || schedule.claimToken !== claimToken) return false;
-        schedule.claimUntil = claimUntil;
-        return true;
-      },
-      reserveRun: async (schedule, claimToken, runId) => {
-        const current = scheduleRows.get(schedule.id);
-        if (!current || (!current.enabled && !current.pendingRunId) || current.claimToken !== claimToken || (current.revision ?? 0) !== (schedule.revision ?? 0)
-          || !current.claimUntil || Date.parse(current.claimUntil) <= Date.now()) return false;
-        current.pendingRunId = runId;
-        return true;
-      },
-      clearActiveRun: async (id, runId) => {
-        const current = scheduleRows.get(id);
-        if (current?.activeRunId === runId) delete current.activeRunId;
-      },
-      updateClaimed: async (schedule, claimToken) => {
-        const current = scheduleRows.get(schedule.id);
-        if (!current || current.claimToken !== claimToken || (current.revision ?? 0) !== (schedule.revision ?? 0)) return false;
-        const updated = { ...schedule, revision: (current.revision ?? 0) + 1 };
-        delete updated.claimToken;
-        delete updated.claimUntil;
-        delete updated.pendingRunId;
-        scheduleRows.set(updated.id, updated);
-        return true;
-      },
-      removeClaimed: async (id, claimToken, revision = 0) => {
-        const current = scheduleRows.get(id);
-        if (!current || current.claimToken !== claimToken || (current.revision ?? 0) !== revision) return false;
-        scheduleRows.delete(id);
-        return true;
-      },
-      releaseClaim: async (id, claimToken) => {
-        const schedule = scheduleRows.get(id);
-        if (schedule?.claimToken !== claimToken) return;
-        delete schedule.claimToken;
-        delete schedule.claimUntil;
-      },
-    },
-    kv: { get: async (scope, key) => kvRows.get(kvKey(scope, key)), set: async (scope, key, value) => { kvRows.set(kvKey(scope, key), value); }, delete: async (scope, key) => { kvRows.delete(kvKey(scope, key)); } },
-    logger: consoleLogger,
-  };
-  return services;
 }
 
 export type ClientDefinition<D> = D;

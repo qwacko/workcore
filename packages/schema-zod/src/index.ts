@@ -10,28 +10,31 @@ export type TableSchemaHelperOptions<Input extends z.ZodRawShape, Row extends z.
   maxLimit?: number;
 };
 
+function pageLimit(options: { maxLimit?: number; defaultLimit?: number }, maximum = Number.MAX_SAFE_INTEGER) {
+  const max = options.maxLimit ?? 200;
+  const initial = options.defaultLimit ?? 50;
+  if (!Number.isSafeInteger(initial) || initial < 1 || !Number.isSafeInteger(max) || max < initial || max > maximum) throw new RangeError(`Page limits must satisfy 1 <= defaultLimit <= maxLimit <= ${maximum}`);
+  return z.number().int().min(1).max(max).default(initial);
+}
+
 /** Build a cursor-paged table contract; handlers receive `limit`/`cursor`. */
 export function cursorTableSchemaHelper<Input extends z.ZodRawShape, Row extends z.ZodType>(options: TableSchemaHelperOptions<Input, Row>) {
-  const maxLimit = options.maxLimit ?? 200;
-  const defaultLimit = options.defaultLimit ?? 50;
-  if (!Number.isInteger(defaultLimit) || defaultLimit < 1 || !Number.isInteger(maxLimit) || maxLimit < defaultLimit || maxLimit > 200) throw new RangeError('Table page limits must satisfy 1 <= defaultLimit <= maxLimit <= 200');
+  const limit = pageLimit(options, 200);
   const base = options.input;
   if (Object.hasOwn(base.shape, 'limit') || Object.hasOwn(base.shape, 'cursor')) throw new TypeError('Table schema input already defines reserved pagination field');
   return {
-    input: z.object({ limit: z.number().int().min(1).max(maxLimit).default(defaultLimit), cursor: z.string().optional(), ...base.shape }),
+    input: z.object({ limit, cursor: z.string().optional(), ...base.shape }),
     output: z.object({ rows: z.array(options.row), nextCursor: z.string().nullable(), totalCount: z.number().int().nonnegative().optional() }),
   };
 }
 
 /** Build an offset-paged table contract; handlers receive `limit`/`offset`. */
 export function offsetTableSchemaHelper<Input extends z.ZodRawShape, Row extends z.ZodType>(options: TableSchemaHelperOptions<Input, Row>) {
-  const maxLimit = options.maxLimit ?? 200;
-  const defaultLimit = options.defaultLimit ?? 50;
-  if (!Number.isInteger(defaultLimit) || defaultLimit < 1 || !Number.isInteger(maxLimit) || maxLimit < defaultLimit || maxLimit > 200) throw new RangeError('Table page limits must satisfy 1 <= defaultLimit <= maxLimit <= 200');
+  const limit = pageLimit(options, 200);
   const base = options.input;
   if (Object.hasOwn(base.shape, 'limit') || Object.hasOwn(base.shape, 'offset')) throw new TypeError('Table schema input already defines reserved pagination field');
   return {
-    input: z.object({ limit: z.number().int().min(1).max(maxLimit).default(defaultLimit), offset: z.number().int().min(0).default(0), ...base.shape }),
+    input: z.object({ limit, offset: z.number().int().min(0).default(0), ...base.shape }),
     output: z.object({ rows: z.array(options.row), totalCount: z.number().int().nonnegative() }),
   };
 }
@@ -159,7 +162,7 @@ export function chatSchemaHelper<
     parts: z.array(contentPart).optional(), actions: z.array(actionSchema).optional(), data: messageData.optional(),
   });
   const input = z.object({
-    search: z.string().optional(), limit: z.number().int().min(1).max(options.maxLimit ?? 200).default(options.defaultLimit ?? 50),
+    search: z.string().optional(), limit: pageLimit(options),
     cursor: z.string().optional(), direction: z.enum(['forward', 'backward']).optional(),
     filters: filters.optional(), types: z.array(messageType).optional(), statuses: z.array(messageStatus).optional(),
     threadId: z.string().optional(), conversationId: z.string().optional(), participantId: z.string().optional(), before: z.iso.datetime().optional(), after: z.iso.datetime().optional(),
@@ -212,7 +215,7 @@ export function chatThreadSchemaHelper<ThreadData extends z.ZodType = typeof jso
     messageCount: z.number().int().nonnegative().optional(), unreadCount: z.number().int().nonnegative().optional(), actions: z.array(actionSchema).optional(), data: threadData.optional(),
   });
   return {
-    input: z.object({ search: z.string().optional(), limit: z.number().int().min(1).max(options.maxLimit ?? 200).default(options.defaultLimit ?? 50), cursor: z.string().optional(), direction: z.enum(['forward', 'backward']).optional(), filters: filters.optional(), statuses: z.array(status).optional(), participantId: z.string().optional() }),
+    input: z.object({ search: z.string().optional(), limit: pageLimit(options), cursor: z.string().optional(), direction: z.enum(['forward', 'backward']).optional(), filters: filters.optional(), statuses: z.array(status).optional(), participantId: z.string().optional() }),
     output: z.object({ items: z.array(thread), nextCursor: z.string().nullable(), previousCursor: z.string().nullable().optional(), totalCount: z.number().int().nonnegative().optional(), data: pageData.optional() }),
   };
 }

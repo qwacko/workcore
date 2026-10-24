@@ -3,6 +3,19 @@ import { z } from 'zod';
 import { chatMessageZodQuery, chatSchemaHelper, chatThreadSchemaHelper, cursorTableSchemaHelper, offsetTableSchemaHelper } from './index.js';
 
 describe('chat schema helpers', () => {
+  it.each([{ defaultLimit: 0 }, { maxLimit: -1 }, { defaultLimit: 51, maxLimit: 50 }, { maxLimit: Infinity }, { defaultLimit: 1.5 }])('rejects invalid pagination configuration at setup: %j', (options) => {
+    expect(() => chatSchemaHelper(options)).toThrow(RangeError);
+    expect(() => chatThreadSchemaHelper(options)).toThrow(RangeError);
+    expect(() => cursorTableSchemaHelper({ ...options, input: z.object({}), row: z.object({ id: z.string() }) })).toThrow(RangeError);
+    expect(() => offsetTableSchemaHelper({ ...options, input: z.object({}), row: z.object({ id: z.string() }) })).toThrow(RangeError);
+  });
+
+  it('preserves application-selected chat limits while enforcing the table renderer limit', () => {
+    expect(chatSchemaHelper({ defaultLimit: 250, maxLimit: 500 }).input.parse({}).limit).toBe(250);
+    expect(chatThreadSchemaHelper({ defaultLimit: 250, maxLimit: 500 }).input.parse({}).limit).toBe(250);
+    expect(() => cursorTableSchemaHelper({ input: z.object({}), row: z.object({ id: z.string() }), maxLimit: 500 })).toThrow(RangeError);
+  });
+
   it('builds a typed chat-message query with the standard timeline presentation', () => {
     const schemas = chatSchemaHelper({
       messageType: z.enum(['message', 'approval']),

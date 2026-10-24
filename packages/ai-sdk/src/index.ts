@@ -11,16 +11,12 @@ export function createAiSdkAgentEngine(options: AiSdkEngineOptions): AgentEngine
   return {
     async run(args) {
       let successfulFinish = false;
-      const engineAbortController = new AbortController();
-      const propagateAbort = () => engineAbortController.abort(args.signal.reason);
-      if (args.signal.aborted) propagateAbort();
-      else args.signal.addEventListener('abort', propagateAbort, { once: true });
-      const engineToolNames = new Map<string, string>();
+      if (!Object.hasOwn(args.tools, args.finishTool)) throw new Error(`Configured finish tool '${args.finishTool}' is missing`);
       const sdkToolNames = new Map<string, string>();
       const tools: ToolSet = Object.fromEntries(Object.entries(args.tools).map(([name, definition]) => {
         const sdkName = providerToolName(name);
         if (sdkToolNames.has(sdkName)) throw new Error(`Agent tool names collide after provider normalization: '${name}' and '${sdkToolNames.get(sdkName)}'`);
-        engineToolNames.set(name, sdkName); sdkToolNames.set(sdkName, name);
+        sdkToolNames.set(sdkName, name);
         return [sdkName, dynamicTool({
         ...(definition.description ? { description: definition.description } : {}),
         inputSchema: jsonSchema(definition.inputSchema as JsonSchema as never),
@@ -33,7 +29,6 @@ export function createAiSdkAgentEngine(options: AiSdkEngineOptions): AgentEngine
         },
       })];
       }));
-      if (!engineToolNames.has(args.finishTool)) throw new Error(`Configured finish tool '${args.finishTool}' is missing`);
       let result;
       try {
         result = await generateText({
@@ -45,8 +40,8 @@ export function createAiSdkAgentEngine(options: AiSdkEngineOptions): AgentEngine
           // let models silently end with plain text while the finish tool is pending.
           toolChoice: 'required',
           ...(args.maxOutputTokens ? { maxOutputTokens: args.maxOutputTokens } : {}),
-           stopWhen: [stepCountIs(args.maxSteps), (() => successfulFinish) as StopCondition<ToolSet>],
-          abortSignal: engineAbortController.signal,
+          stopWhen: [stepCountIs(args.maxSteps), (() => successfulFinish) as StopCondition<ToolSet>],
+          abortSignal: args.signal,
           onStepFinish: async ({ stepNumber, finishReason, usage, toolCalls, text, response }) => {
             await args.onEvent({ type: 'step.completed', data: {
               stepNumber, finishReason, text, modelId: response.modelId,
@@ -59,9 +54,7 @@ export function createAiSdkAgentEngine(options: AiSdkEngineOptions): AgentEngine
         // Some providers start another generation before applying stopWhen. Once
         // the finish operation has succeeded, that follow-up is unnecessary.
         if (!successfulFinish || args.signal.aborted) throw error;
-        return { output: undefined, finishReason: 'tool-calls', finishTool: args.finishTool };
-      } finally {
-        args.signal.removeEventListener('abort', propagateAbort);
+        return { finishReason: 'tool-calls', finishTool: args.finishTool };
       }
       return {
         // Agent completion and its result are defined exclusively by the

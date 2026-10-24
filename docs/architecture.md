@@ -10,6 +10,16 @@
 - Missing permissions default to deny. Workspace membership is always checked separately. Named string/array capabilities require an affirmative workspace or global authorizer (and all configured gates must allow); an explicit empty array requires no capability. Callback policies are evaluated at execution and use `access.has()` for capability checks, so the manifest includes them without pretending to evaluate input-dependent policy. The manifest hides statically denied operations, but execution checks are authoritative.
 - Standard Schema is the validation contract. Standard JSON Schema draft 2020-12 is required for exposed operations so the versioned manifest and generic UI can represent inputs/results.
 
+## Internal boundaries
+
+Operation authoring and public types stay in `packages/core/src/index.ts`. The internal execution module owns the shared handler boundary (context, deadline, output validation and disposal), checked sibling calls, and interactive history/event delivery. HTTP encoding and queue terminal transitions remain at their respective boundaries: internal-only results need not be wire-serializable, and queued inputs must not repeat input transforms.
+
+The manifest uses a setup-time catalog of wire schemas and default presentations. Request-time projection only evaluates visibility and removes unavailable references. Capability checks share one lazily resolved, validated authorization context within that manifest request; neither the context nor permission decisions are reused by execution or subsequent requests. Application definitions and their schemas are static after platform setup.
+
+Authorization, schema handling, wire codecs, and lifecycle helpers live in separate internal modules. Task/agent completion and schedule reservation/recovery retain their existing adapter contracts; they are not hidden inside a generic execution/middleware framework.
+
+Memory storage and cron calculation also have separate internal modules. The existing core memory export is retained without introducing a core-to-adapters dependency. Memory, file, and PostgreSQL run the same behavioral contract tests; the persistent adapters share pure schedule-update helpers but keep storage-specific atomicity in their own implementation.
+
 ## HTTP and live queries
 
 `createPlatform(...).httpHandler()` accepts the Web `Request` API. The initial endpoints are:
@@ -57,6 +67,7 @@ The tracker example uses a local SQLite database for Better Auth identity, works
 - KV values, task queue/runs, schedules and safe history are stored in `data/workcore-state.json` with serialized local file updates.
 - A claimed task left in the processing list is requeued on the next adapter instance start (at-least-once behaviour).
 - Task queue and schedule payloads contain JSON-safe encoded handler inputs plus a codec ID; adapters must persist those fields unchanged, and worker processes must register compatible codecs until the work expires.
+- File state uses a serialized store boundary with atomic replacement only when data changes. Startup recovery is committed only after persistence succeeds. Format version 1 migrates unambiguous colon-delimited legacy KV keys once, preserving current keys in preference to old values; ambiguous legacy keys are retained for explicit application migration, not exposed through a fallback read. Back up state before upgrading, and do not downgrade a migrated file to an older writer.
 - Schedule adapters must implement claims, lease renewal/release, `reserveRun`, and claimed updates/removal atomically across worker processes. User updates and claimed bookkeeping compare `revision` (legacy missing revisions mean zero); stale user edits return HTTP 409. User updates preserve current internal claim/dispatch fields, and `clearActiveRun` clears only the matching run rather than replacing a schedule. This prevents a worker snapshot from undoing a concurrent disable, cron or timezone edit.
 - `reserveRun` atomically checks the claim, revision and enabled state and persists `pendingRunId` before enqueue. The ID is derived from the schedule and occurrence and is reused on recovery, including after uncertain enqueue acknowledgements or bookkeeping failures. Task adapters must make enqueue idempotent by ID even for already-completed runs, and retain deduplication records for the schedule recovery window. Both local adapters implement this. A pending reserved occurrence is recovered rather than skipped as a missed recurring occurrence. Reservation is the dispatch boundary: edits made before it prevent stale dispatch; disabling/removing a schedule afterwards does not cancel an already-reserved run.
 - The worker serializes polling within a process and renews leases during long actor-resolution/authorization calls. Enqueue and schedule bookkeeping still span separate adapter calls, so these guarantees do not make domain side effects exactly-once or replace an outbox.

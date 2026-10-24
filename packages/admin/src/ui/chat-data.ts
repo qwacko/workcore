@@ -1,9 +1,8 @@
 import type { ChatMessage, ChatThread, OperationViewVariant, SemanticManifestPage } from '@workcore/core';
 import { parseEditableJson, richJson } from './rich-input.js';
+import { fieldPath as pathValue } from './field-path.js';
 
-export function pathValue(value: unknown, path: string): unknown {
-  return path.split('.').filter(Boolean).reduce<unknown>((current, key) => current && typeof current === 'object' ? (current as Record<string, unknown>)[key] : undefined, value);
-}
+export { pathValue };
 
 export function safeMarkdown(markdown: string): string {
   const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -61,7 +60,7 @@ export function validateChatNavigation(pages: readonly SemanticManifestPage[], p
   const page = pages.find((candidate) => candidate.id === pageId);
   if (!page) throw new Error('This chat link points to a page that is not available to your account.');
   for (const [name, value] of Object.entries(stateValues)) {
-    const declaration = page.state?.[name];
+    const declaration = Object.hasOwn(page.state ?? {}, name) ? page.state?.[name] : undefined;
     if (!declaration || typeof value !== 'string') throw new Error(`This chat link contains an invalid state value for '${name}'.`);
     if (declaration.type === 'select' && !declaration.options.some((option) => option.value === value)) throw new Error(`This chat link contains an unavailable value for '${name}'.`);
   }

@@ -1,4 +1,5 @@
-import { jsonWireCodec, type AgentRun, type AgentRunAdapter, type AgentTraceEvent, type HistoryEntry, type KeyValueAdapter, type PlatformServices, type ScheduleAdapter, type ScheduleEntry, type Scope, type TaskAdapter, type TaskPayload, type TaskRun, type WorkspaceAdapter } from '@workcore/core';
+import { jsonWireCodec, nextScheduleOccurrence, type AgentRun, type AgentRunAdapter, type AgentTraceEvent, type HistoryEntry, type KeyValueAdapter, type PlatformServices, type ScheduleAdapter, type ScheduleEntry, type Scope, type TaskAdapter, type TaskPayload, type TaskRun, type WorkspaceAdapter } from '@workcore/core';
+import { claimedScheduleUpdate, scheduleEdit } from '../shared.js';
 
 /** Minimal pg Pool/PoolClient shape; pass a `pg.Pool` without adding pg to Workcore's dependency tree. */
 export interface PostgresPool {
@@ -159,7 +160,8 @@ export function createPostgresState(options: { pool: PostgresPool; historyLimit?
       const result = await client.query<{ revision: number; body: ScheduleEntry }>('SELECT revision,body FROM workcore_schedules WHERE id=$1 FOR UPDATE', [schedule.id]);
       const current = result.rows[0];
       if (!current || Number(current.revision) !== (schedule.revision ?? 0)) return false;
-      const body = { ...jsonValue<ScheduleEntry>(current.body), ...schedule, revision: Number(current.revision) + 1 };
+      const body = scheduleEdit({ ...jsonValue<ScheduleEntry>(current.body), revision: Number(current.revision) }, schedule);
+      if (!body) return false;
       await client.query('UPDATE workcore_schedules SET enabled=$2,next_run_at=$3,revision=$4,body=$5::jsonb WHERE id=$1', [schedule.id, body.enabled, body.nextRunAt ?? null, body.revision, JSON.stringify(body)]);
       return true;
     }),
@@ -171,7 +173,13 @@ export function createPostgresState(options: { pool: PostgresPool; historyLimit?
         const schedule = jsonValue<ScheduleEntry>(row.body);
         if (schedule.activeRunId && !schedule.pendingRunId) {
           const active = await client.query<{ status: string }>('SELECT status FROM workcore_tasks WHERE id=$1', [schedule.activeRunId]);
-          if (active.rows[0]?.status === 'queued' || active.rows[0]?.status === 'running') continue;
+          if (active.rows[0]?.status === 'queued' || active.rows[0]?.status === 'running') {
+            schedule.lastSkipReason = 'Skipped because the previous scheduled run is still active';
+            if (schedule.kind === 'recurring') schedule.nextRunAt = nextScheduleOccurrence(schedule.cron!, now, schedule.timezone).toISOString();
+            await client.query('UPDATE workcore_schedules SET next_run_at=$2,body=$3::jsonb WHERE id=$1', [row.id, schedule.nextRunAt ?? null, JSON.stringify(schedule)]);
+            continue;
+          }
+          delete schedule.activeRunId;
         }
         const claim = await client.query<{ claim_until: Date | string }>("UPDATE workcore_schedules SET claim_token=$2,claim_until=now()+($3::text||' milliseconds')::interval WHERE id=$1 RETURNING claim_until", [row.id, claimToken, leaseMs]);
         const claimUntil = new Date(claim.rows[0]!.claim_until).toISOString();
@@ -190,8 +198,8 @@ export function createPostgresState(options: { pool: PostgresPool; historyLimit?
       const row = found.rows[0];
       if (!row || Number(row.revision) !== (schedule.revision ?? 0)) return false;
       const current = jsonValue<ScheduleEntry>(row.body);
-      const next = { ...current, ...schedule, revision: Number(row.revision) + 1 };
-      delete next.claimToken; delete next.claimUntil; delete next.pendingRunId;
+      const next = claimedScheduleUpdate({ ...current, revision: Number(row.revision) }, schedule);
+      if (!next) return false;
       await client.query('UPDATE workcore_schedules SET enabled=$2,next_run_at=$3,revision=$4,claim_token=NULL,claim_until=NULL,pending_run_id=NULL,body=$5::jsonb WHERE id=$1', [schedule.id, next.enabled, next.nextRunAt ?? null, next.revision, JSON.stringify(next)]);
       return true;
     }),

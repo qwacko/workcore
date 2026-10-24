@@ -1,8 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { chatMessages, chatThreads, chatTimelineKey, chatMutationInput, safeChatUrl, safeMarkdown, validateChatNavigation } from './chat-data.js';
+import { chatMessages, chatThreads, chatTimelineKey, chatMutationInput, pathValue, safeChatUrl, safeMarkdown, validateChatNavigation } from './chat-data.js';
 import { editableJson } from './rich-input.js';
 
 describe('shared chat data', () => {
+  it('resolves own data fields without following prototype or malformed paths', () => {
+    const value = { rows: [{ name: 'one' }] };
+    expect(pathValue(value, 'rows.0.name')).toBe('one');
+    for (const path of ['rows..0.name', 'rows.00.name', 'rows.constructor', '__proto__', 'constructor.name', 'toString']) expect(pathValue(value, path)).toBeUndefined();
+  });
+
+  it('rejects inherited properties masquerading as page state declarations', () => {
+    const pages = [{ id: 'page', title: 'Page', blocks: [], state: {} }];
+    expect(() => validateChatNavigation(pages, 'page', { constructor: 'value' })).toThrow(/invalid state/);
+    expect(() => validateChatNavigation(pages, 'page', JSON.parse('{"__proto__":"value"}'))).toThrow(/invalid state/);
+  });
+
   const variant = { title: 'Messages', renderer: 'chat-messages' as const };
   it('uses canonical item envelopes for messages and thread lists', () => {
     const items = [{ id: 'one' }];

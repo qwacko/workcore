@@ -31,16 +31,19 @@ export function createRedisEvents(options: { publisher: RedisPublisher; subscrib
         };
         entry = { listeners, receive };
         channels.set(channel, entry);
-        void Promise.resolve(options.subscriber.subscribe(channel, receive)).catch(() => channels.delete(channel));
+        const subscribed = entry;
+        void Promise.resolve(options.subscriber.subscribe(channel, receive)).catch(() => { if (channels.get(channel) === subscribed) channels.delete(channel); });
       }
       entry.listeners.add(listener);
+      const subscribed = entry;
+      let stopped = false;
       return () => {
-        const current = channels.get(channel);
-        if (!current) return;
-        current.listeners.delete(listener);
-        if (!current.listeners.size) {
+        if (stopped) return;
+        stopped = true;
+        subscribed.listeners.delete(listener);
+        if (channels.get(channel) === subscribed && !subscribed.listeners.size) {
           channels.delete(channel);
-          void Promise.resolve(options.subscriber.unsubscribe(channel, current.receive)).catch(() => undefined);
+          void Promise.resolve(options.subscriber.unsubscribe(channel, subscribed.receive)).catch(() => undefined);
         }
       };
     },
