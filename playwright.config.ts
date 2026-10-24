@@ -1,15 +1,11 @@
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
-  testDir: './tests/e2e',
-  fullyParallel: false,
-  reporter: 'list',
-  use: { baseURL: 'http://127.0.0.1:4181', trace: 'retain-on-failure' },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  testDir: './tests/browser',
+  use: { baseURL: 'http://localhost:8788', browserName: 'chromium' },
   webServer: {
-    command: `HOST=127.0.0.1 PORT=4181 BETTER_AUTH_URL=http://127.0.0.1:4181 WORKCORE_AGENT_MODE=demo WORKCORE_DATABASE=/tmp/opencode/workcore-e2e-db-${process.pid}.sqlite WORKCORE_DATA=/tmp/opencode/workcore-e2e-tracker-${process.pid}.json WORKCORE_STATE=/tmp/opencode/workcore-e2e-state-${process.pid}.json pnpm dev`,
-    url: 'http://127.0.0.1:4181',
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
+    command: `pnpm --filter @workcore/example exec wrangler dev --env local --port 8788 --persist-to /tmp/opencode/workcore-e2e-${process.pid}`,
+    url: 'http://localhost:8788',
+    reuseExistingServer: false,
   },
 });

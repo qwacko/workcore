@@ -1,0 +1,13 @@
+{
+  "name": "workcore-tests",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "vars": { "DEMO_MODE": "true" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "WORKSPACES", "class_name": "TrackerWorkspace" },
+      { "name": "TEST", "class_name": "TestWorkspace" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TrackerWorkspace", "TestWorkspace"] }]
+}

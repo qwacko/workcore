@@ -1,130 +1,125 @@
 # Workcore
 
-Workcore is a TypeScript workspace application runtime for quickly building full-stack apps. Define validated queries, mutations and tasks once; Workcore supplies checked execution, workspace access, live invalidation, a typed client and an optional prebuilt admin UI.
+**A Cloudflare-first kit for live workspace applications.**
 
-The application owns its domain data and repositories. Workcore owns the execution boundary and small, replaceable infrastructure interfaces. Its authoring examples are kept executable and typechecked to be easy for developers and AI coding agents to reuse.
+Define JSON records, typed actions and authorised read models. Workcore supplies SQLite persistence inside a Durable Object, live client subscriptions, background execution, schedules, and a small operational console.
 
-## Getting started
+One workspace has one Durable Object and one database. There is no D1 dependency, database adapter layer, Redis, separate queue server, or portable runtime to assemble.
 
-Requirements: Node.js 22+ and pnpm 10+.
+> This is a fresh, breaking implementation. The previous portable runtime remains in Git history at `7c2c092`. There is no compatibility layer or migration of its data. Packages are private while this new foundation is being exercised.
+
+## Try it
+
+Node.js 22+ and pnpm 10:
 
 ```sh
 pnpm install
-pnpm build
 pnpm dev
 ```
 
-Open <http://127.100.0.10:3000> and sign in with one of the local accounts shown on the page: `alice / alice-demo-pass`, `bob / bob-demo-pass`, or `admin / admin-demo-pass`. The server binds to `HOST` (`127.100.0.10` by default) and `PORT` (`3000` by default). The tracker loads `examples/tracker/.env` first, then the repo-root `.env`; values already exported in the shell take precedence. For example: `HOST=127.0.0.1 PORT=4173 BETTER_AUTH_URL=http://127.0.0.1:4173 pnpm dev`. Set `BETTER_AUTH_URL` to the browser-facing public URL behind a proxy (for example, `https://workcore.dev.jmcdowall.com`); both Better Auth and Workcore derive their default trusted origin from that URL. Override them independently with comma-separated `BETTER_AUTH_TRUSTED_ORIGINS` and `WORKCORE_TRUSTED_ORIGINS`. Set `BETTER_AUTH_SECRET` to a private random secret. The demo shows username/password authentication, an admin-only identity workspace for listing users and changing names/roles, SQLite-backed users, membership and activity data, personal and shared workspace isolation, live updates, tasks, schedules, history, and a second application with a differently shaped context.
+Open the local URL printed by Wrangler (normally <http://localhost:8787>). Choose Alice or Bob. Alice is an admin; Bob is a member. Use separate browser profiles to compare their private views.
 
-Browse the [Workcore documentation site](https://qwacko.github.io/workcore/) or run it locally with `pnpm docs:dev`.
+1. Open **tasks**, leave the input as `{}`, and **Subscribe**.
+2. Open another window and run **createTask** with `{"title":"A live update"}`.
+3. Watch the subscribed result change without refetch code.
+4. Launch **assistant**, then inspect **Runs** and **assistantSummary**.
+5. Run **scheduleCompletion** with one of your task IDs and a delay; inspect **Schedules**.
 
-For a small existing-app integration rather than the full demo, start with [Minimal integration](docs/minimal-integration.md). See [configuration](docs/configuration.md), [authorization](docs/authorization.md), and the [HTTP/live protocol](docs/protocol.md) for the supported contracts. `defineApplication` is the preferred name for an operation catalog; `defineWorkspace` remains a compatible alias. Workspace instances are selected by `{ applicationId, workspaceId }`.
+The example uses a deterministic assistant by default. Add a Workers AI binding named `AI` to use its model-backed summariser. No paid model call is needed to run the demo or tests.
 
-Reusable modules can be defined independently with `defineModule` and assembled with `composeApplication`. [Module composition](docs/composition.md) covers typed synchronous dependencies, optional awaited callbacks, namespaced operations/KV, and shared admin/client/worker integration without a separate event bus.
+**Demo authentication works only on localhost, with the explicit local Wrangler environment. Default deployments return 503 until real authentication is installed.**
 
-The main tracker demonstrates this directly: `examples/tracker/src/app.ts` composes `modules/activities.ts` and `modules/assistant.ts`. Milo reads a checked activity summary through a required dependency, and activity edits invoke an optional assistant-update callback. **Workspace overview** combines both modules; identity remains a separate application. Existing local task/schedule state is backed up and migrated to qualified operation names before startup—stop old demo processes first. See the [upgrade notes](docs/composition.md#upgrading-the-existing-local-tracker-demo).
+## The model
 
-The tracker example uses Better Auth with its username plugin and Drizzle on SQLite. The user, account, session, workspace membership, and activity tables live in `data/workcore.sqlite` (override with `WORKCORE_DATABASE`). User registration is disabled at the host route; the three accounts are seeded for local demonstration. Workcore's task, schedule, history, KV, logger, and event services remain file-backed in `data/workcore-state.json`. This composition is a realistic single-process example, not a production deployment recipe; change the demo passwords and secret before exposing it.
+- **Tables** store validated JSON records with IDs, record revisions and schema versions.
+- **Mutations** synchronously commit records, internal KV, queued jobs and schedules together.
+- **Views** are read-only, bounded, authorised results. Table changes trigger recomputation and complete replacement snapshots.
+- **Queries** fetch data once, including indexed cursor-paginated pages for larger datasets.
+- **Tasks and agents** have persisted runs, outcomes, step traces and explicit interruption semantics.
+- **Schedules** launch jobs once or on a fixed interval, driven by Durable Object alarms.
 
-## Packages
+The server determines what a user may receive. The browser can filter, group and sort that authorised dataset; browser filtering is never a security boundary.
 
-| Package | Purpose |
+## Authoring
+
+```ts
+import { table, workspace } from '@workcore/core';
+import { z } from 'zod';
+
+const tables = {
+  notes: table(z.object({ text: z.string(), ownerId: z.string() }), {
+    indexes: { owner: 'ownerId' },
+  }),
+};
+const app = workspace(tables);
+
+const addNote = app.mutation({
+  input: z.object({ text: z.string().min(1) }),
+  output: z.string(),
+  handler: ({ db, actor }, input) => {
+    const id = crypto.randomUUID();
+    db.put('notes', id, { text: input.text, ownerId: actor.id });
+    return id;
+  },
+});
+
+export const notes = app.define({
+  views: {}, queries: {}, mutations: { addNote }, jobs: {},
+  // Replace this with a current workspace membership check.
+  authorize: ({ actor }, action) => actor.id === 'owner',
+});
+```
+
+Extend `Workspace` from `@workcore/core/cloudflare` with this definition and route authenticated requests through `routeWorkspace`. See the [complete tracker](examples/tracker/src/app.ts), its [Cloudflare host](examples/tracker/src/worker.ts), and [authoring guide](docs/authoring.md).
+
+```ts
+import { createClient } from '@workcore/client';
+import type { tracker } from './app';
+
+const client = createClient<typeof tracker>({
+  baseUrl: '/api/workspaces/demo',
+});
+
+const tasks = client.subscribe('tasks', { projectId: 'inbox' }, state => {
+  if (state.status === 'live') render(state.data);
+});
+
+const result = await client.mutate('createTask', { title: 'Ship something small' });
+await tasks.whenRevision(result.revision);
+```
+
+## Repository
+
+| Path | Responsibility |
 | --- | --- |
-| `@workcore/core` | Definitions, checked runtime, HTTP/SSE endpoints and adapter contracts |
-| `@workcore/adapters` | Explicit memory and local file implementations for the core adapter contracts |
-| `@workcore/client` | Browser-safe typed client and fetch/SSE transport |
-| `@workcore/schema-zod` | Optional Zod table and chat schema/operation helpers |
-| `@workcore/ai-sdk` | Optional Vercel AI SDK engine for queued Workcore agents |
-| `@workcore/codec-superjson` | Optional SuperJSON wire codec for rich values such as `Date` |
-| `@workcore/codec-devalue` | Optional devalue wire codec for its supported rich-value set |
-| `@workcore/admin` | Prebuilt Svelte admin assets and host-route handler |
-| `examples/tracker` | Hono host, Better Auth + Drizzle/SQLite identity and domain data, plus file-backed Workcore services |
+| `packages/core` | Zod definitions, SQLite records, transactional runtime, runs/schedules, Cloudflare host |
+| `packages/client` | Browser-safe inferred API, WebSocket subscriptions, reconnect and revision tracking |
+| `packages/admin` | Same-origin operational console; no application frontend build required |
+| `examples/tracker` | Executable Cloudflare application, private/shared data, scheduling and an optional AI agent |
+| `tests` | Real Workers/SQLite integration tests and compile-time API checks |
 
-For a shared multi-process deployment, `@workcore/adapters/postgres` provides durable workspace, KV, history, task and schedule state, and `@workcore/adapters/redis` provides scoped transient events. See the [production deployment guide](docs/production-deployment.md) for setup, migrations, retention and delivery guarantees. These entry points use optional peer drivers rather than bundling database clients.
+## Deliberate boundaries
 
-The core has no database, queue, auth-provider or UI framework dependency. The supplied admin is optional; applications can use only the runtime/client or provide their own frontend.
+No offline writes, cross-workspace transactions, arbitrary client query language, automatic incremental SQL views, backend portability, cron/timezones, resumable agents, or raw admin record editing. Records and wire values are plain JSON—not JavaScript dates, maps or custom classes.
 
-The wire protocol defaults to strict JSON. To preserve rich values, install a codec package, pass the same codec to the typed client and allow-list it on the platform. The tracker example uses `superjsonCodec()` and has a `Date` query to demonstrate that schema types remain `Date` end-to-end; its SQLite database stores activity timestamps as integer dates.
+Large collections use explicit indexes and pages. `all()` is capped at 1,000 records. Array live views default to 500 rows and fail rather than truncate. Both live results and query responses have a 512 KiB data limit.
 
-```ts
-const codec = superjsonCodec();
-const platform = createPlatform({ applications, auth, services, wireCodecs: [codec] });
-const client = createClient<typeof app>({
-  transport: createFetchTransport({ codec }), applicationId: 'app', workspaceId: 'one',
-});
-```
+This is an initial foundation, not a claim of production completeness. In particular, authentication is host-owned, external side effects are not exactly-once, and interrupted runs require inspection and explicit retry. See [security and limits](docs/security.md).
 
-Published packages use ESM `exports` maps and include declarations. Changesets manages package versioning and public scoped releases (`pnpm changeset`, `pnpm version-packages`, `pnpm release`). `pnpm version-packages` snapshots docs under the resulting `@workcore/core` version; archived versions stay available in the site navigation.
-
-## Authoring shape
-
-```ts
-export const tracker = defineWorkspace<TrackerContext>()({
-  id: 'tracker',
-  queries: {
-    activities: {
-      input: activityListSchema,
-      output: activityPageSchema,
-      permission: 'activities.read',
-      api: true,
-      views: {
-        default: 'basic',
-        variants: {
-          basic: { title: 'Activities', renderer: 'table', rowKey: 'id', columns: ['title', 'status'] },
-          data: { title: 'Data', renderer: 'json' },
-        },
-      },
-      handler: ({ ctx, input }) => ctx.app.activities.list(ctx.scope, input),
-    },
-  },
-  mutations: {
-    editActivity: {
-      input: editActivitySchema,
-      output: activitySchema,
-      permission: 'activities.write',
-      api: true,
-      views: { default: 'basic', variants: { basic: { title: 'Edit activity', renderer: 'form' } } },
-      handler: ({ ctx, input }) => ctx.app.activities.update(ctx.scope, input),
-    },
-  },
-});
-```
-
-Tasks use the same inline shape. Their handlers receive a typed `operations` caller inferred from every query, mutation, and task in this definition, so tasks can safely call peer tasks without a separate operation builder. Task mutation triggers and UI mutation actions are also checked against the declared mutations, including action bindings against mutation input fields.
-
-Core accepts Standard Schema. Generated forms/manifests require schemas to also provide Standard JSON Schema; Zod 4 is used in the example. Browser input is validated again on the server. See the [implementation brief](workspace-framework-implementation-brief.md) and [architecture notes](docs/architecture.md) for contracts, security expectations and limits.
-
-For an existing application, install the packages you need (`@workcore/core`, `@workcore/client`, and optionally `@workcore/admin` or adapters), define a workspace catalog, register its context factory, and mount `platform.httpHandler()` in a host. The full copyable multi-process composition is in [Production deployment](docs/production-deployment.md); the tracker remains a local demo and uses demo-only login routes.
-
-## Admin and host setup
-
-Build the optional admin package as part of the workspace build, then mount its handler alongside the API:
-
-```ts
-const admin = createAdminHandler({ basePath: '/workcore/admin', apiBasePath: '/workcore/api' });
-const handler = platform.httpHandler({
-  apiBasePath: '/workcore/api',
-  admin: { basePath: '/workcore/admin', handle: admin },
-});
-```
-
-The host authenticates requests and mounts this `Request -> Response` handler. The admin's compiled assets are served from the installed package; consumers do not need Svelte/SvelteKit or a frontend build. Custom clients use the same HTTP and SSE contract.
-
-## Verification
+## Verification and documentation
 
 ```sh
-pnpm build
-pnpm test
 pnpm typecheck
-pnpm test:e2e # launches the local demo; requires Playwright Chromium
-pnpm test:packages # packs and installs packages in a separate temporary consumer
-pnpm --filter @workcore/adapters test:integration # requires PostgreSQL and Redis test URLs
+pnpm test          # Cloudflare Workers runtime and real SQLite
+pnpm exec playwright install chromium
+pnpm test:e2e      # Actual browser: live updates, privacy, jobs and mobile layout
+pnpm build         # TypeScript + Wrangler deployment dry run; does not deploy
+pnpm docs:build
+pnpm docs:dev
 ```
 
-## Documentation site
-
-Run `pnpm docs:dev` to edit the VitePress site or `pnpm docs:build` to check it. To publish from GitHub, set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**; `.github/workflows/docs.yml` deploys `main` to <https://qwacko.github.io/workcore/>. `pnpm version-packages` snapshots the current Markdown under the resulting `@workcore/core` version, and the site's Versions menu keeps those snapshots available.
-
-TypeScript 7 is used for core/client and the demo. Svelte's current checker requires TypeScript 6 for its ordinary API, so the admin package checks source with TypeScript 6 and runs `svelte-check --tsgo` with TypeScript 7. This is isolated to the UI toolchain.
-
-Framework-managed transactions/outbox, automatic retries, agent streaming/resumption, composed views and Better Auth integration remain deferred. PostgreSQL and Redis adapters are available, but Redis events are transient and task delivery is at-least-once. See [actual limitations](docs/architecture.md#current-limitations) and [production deployment](docs/production-deployment.md).
+- [Architecture](docs/architecture.md)
+- [Authoring and migrations](docs/authoring.md)
+- [Live views and large datasets](docs/sync.md)
+- [Tasks, schedules and agents](docs/execution.md)
+- [Security and actual limits](docs/security.md)

@@ -1,17 +1,11 @@
 {
   "name": "@workcore/core",
-  "version": "0.1.0",
+  "version": "0.0.0",
+  "private": true,
   "license": "MIT",
   "type": "module",
-  "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
-  },
-  "files": ["dist/index.js", "dist/index.d.ts", "dist/index.js.map", "dist/index.d.ts.map", "dist/composition.js", "dist/composition.d.ts", "dist/composition.js.map", "dist/composition.d.ts.map", "dist/internal"],
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": { "@standard-schema/spec": "^1.1.0" },
-  "devDependencies": { "@types/node": "^24.7.0", "typescript": "7.0.2", "vitest": "^3.2.4" }
+  "exports": { ".": "./src/index.ts", "./cloudflare": "./src/cloudflare.ts" },
+  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "zod": "^4.6.7" },
+  "devDependencies": { "@cloudflare/workers-types": "^5.20261024.1" }
 }

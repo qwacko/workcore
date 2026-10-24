@@ -1,9 +1,11 @@
 node_modules/
 dist/
-.svelte-kit/
-.svelte-check/
 *.tsbuildinfo
 playwright-report/
 test-results/
-data/
 .env
+.dev.vars
+.wrangler/
+# Local data/generated files from previous checkouts are not source.
+data/
+.svelte-check/

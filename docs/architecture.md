@@ -1,106 +1,80 @@
-# Architecture and operational notes
+# Architecture
 
-## Core model
+## One workspace, one durable owner
 
-- An application **definition** is the reusable operation catalog created with `defineApplication` (`defineWorkspace` remains an alias). A workspace **instance** is one personal/shared scope under that definition.
-- `applicationId` identifies a definition; `workspaceId` selects its scoped data.
-- Query, mutation and task handlers receive an actor, scope, correlation ID, abort signal, scoped services and a per-execution application context.
-- `api: true` is required to expose an operation to HTTP clients. Internal operation calls use the same input/output validation and permission checks.
-- Agents are internal queued workflows, invoked by operations with `operations.enqueueAgent()`. Their declared tools call queries/mutations/tasks through the checked caller; agent invocation itself has no direct HTTP operation endpoint.
-- Missing permissions default to deny. Workspace membership is always checked separately. Named string/array capabilities require an affirmative workspace or global authorizer (and all configured gates must allow); an explicit empty array requires no capability. Callback policies are evaluated at execution and use `access.has()` for capability checks, so the manifest includes them without pretending to evaluate input-dependent policy. The manifest hides statically denied operations, but execution checks are authoritative.
-- Standard Schema is the validation contract. Standard JSON Schema draft 2020-12 is required for exposed operations so the versioned manifest and generic UI can represent inputs/results.
+A public Cloudflare Worker authenticates the request and routes a workspace name to a Durable Object. That object owns its SQLite database, subscriptions, application operations and execution state.
 
-## Internal boundaries
+The database stores:
 
-Operation authoring and public types stay in `packages/core/src/index.ts`. The internal execution module owns the shared handler boundary (context, deadline, output validation and disposal), checked sibling calls, and interactive history/event delivery. HTTP encoding and queue terminal transitions remain at their respective boundaries: internal-only results need not be wire-serializable, and queued inputs must not repeat input transforms.
+- JSON application records and explicit indexes.
+- Internal, server-only KV values.
+- Table schema versions and the workspace revision.
+- Queued/running/terminal task and agent runs.
+- One-off and interval schedules.
+- Recorded execution steps and metadata-only mutation history.
+- Mutation/enqueue deduplication responses.
 
-The manifest uses a setup-time catalog of wire schemas and default presentations. Request-time projection only evaluates visibility and removes unavailable references. Capability checks share one lazily resolved, validated authorization context within that manifest request; neither the context nor permission decisions are reused by execution or subsequent requests. Application definitions and their schemas are static after platform setup.
+This is SQLite embedded in the Durable Object, **not D1**. No separate database, Redis, event server, scheduler process or queue worker is required.
 
-Authorization, schema handling, wire codecs, and lifecycle helpers live in separate internal modules. Task/agent completion and schedule reservation/recovery retain their existing adapter contracts; they are not hidden inside a generic execution/middleware framework.
+Workspace names are routed with `namespace.idFromName`. They are identifiers, not credentials. Each definition's `authorize` callback must check current membership in the selected workspace.
 
-Memory storage and cron calculation also have separate internal modules. The existing core memory export is retained without introducing a core-to-adapters dependency. Memory, file, and PostgreSQL run the same behavioral contract tests; the persistent adapters share pure schedule-update helpers but keep storage-specific atomicity in their own implementation.
+## The local transaction boundary
 
-## HTTP and live queries
+Mutation handlers are synchronous. Record writes, internal KV changes, job enqueues, schedule changes, output validation, history and the deduplicated response commit within one SQLite transaction.
 
-`createPlatform(...).httpHandler()` accepts the Web `Request` API. The initial endpoints are:
+If validation or the handler fails, those local changes roll back together. Database contexts expire after their callback and reject later use. Queries use read-only database contexts.
 
-| Method/path | Purpose |
-| --- | --- |
-| `GET /workcore/api/workspaces?applicationId=…` | List accessible workspaces |
-| `GET /workcore/api/manifest?applicationId=…&workspaceId=…` | Authorised versioned operation manifest |
-| `POST /workcore/api/query` | `{applicationId, workspaceId, operation, input}` |
-| `POST /workcore/api/mutate` | Same envelope for a mutation |
-| `POST /workcore/api/enqueue` | Same envelope; returns a task run ID |
-| `GET /workcore/api/events?applicationId=…&workspaceId=…` | SSE workspace invalidations |
-| `GET /workcore/api/tasks`, `/history`, `/schedules` | Scoped task/history/schedule inspection |
-| `GET /workcore/api/agent-runs`, `/agent-runs/:id`, `/agent-runs/:id/events` | Capability-filtered agent run and trace inspection |
-| `POST /workcore/api/schedules` | Create a one-off or five-field cron schedule |
-| `PATCH /workcore/api/schedules/:id`, `DELETE …` | Enable/disable/update or remove a schedule |
+External HTTP calls, model requests and notification delivery are not part of a database transaction. Execute external work in a task or agent, not inside a mutation. Workcore cannot prevent application code from starting an unawaited external call; doing so breaks the intended contract.
 
-SSE sends JSON control invalidations rather than domain payloads. The typed client starts a query immediately and performs a catch-up query when the event stream becomes ready; it coalesces invalidations while a request is pending, rejects stale responses and refreshes after reconnect/periodic recovery. The admin applies the same ready/catch-up and stale-response protections. Access is rechecked during event delivery and refresh.
+Every successful write transaction advances the workspace revision. Individual records retain the revision at which they were last written. This revision is separate from the schema version and wire protocol version.
 
-### Wire codecs
+## Changes and live delivery
 
-HTTP JSON is the default and accepts only JSON-compatible values; dates, `bigint`, maps/sets, cycles, `undefined` and non-finite numbers fail clearly instead of being silently changed by `JSON.stringify`. Optional `@workcore/codec-superjson` and `@workcore/codec-devalue` packages provide concrete codecs without making either serializer a core dependency. A client can use a custom `WireCodec` per transport connection, for example `createFetchTransport({ codec: superjsonCodec() })`; the server must explicitly allow-list the same codec with `createPlatform({ wireCodecs: [codec] })`. Each JSON request selects its codec with `x-workcore-codec`; unsupported IDs are rejected. Codec IDs must remain stable and compatible for as long as queued work or schedules using that codec can remain outstanding. The prebuilt admin can be configured to use the built-in SuperJSON codec by passing its ID to `createAdminHandler({ wireCodecId: 'superjson-v1' })`.
+After a transaction commits, the object knows which tables or internal resources changed. Active views declaring those dependencies are recomputed per subscriber and sent as full replacement snapshots. Authorisation is rechecked even for views not needing recomputation.
 
-Codecs preserve representation; Standard Schema still validates decoded inputs and handler outputs, and authorization still sees the validated handler-facing input. Workcore stores already-validated, codec-encoded task/schedule inputs and does not apply input transforms a second time. Task results retain their codec ID and are decoded then re-encoded for the requesting client. The SuperJSON adapter supports its built-ins, including `Date`, `bigint`, `Map`, `Set`, `undefined`, and cycles; it explicitly rejects functions, symbols, accessors, weak collections, and promises rather than silently dropping them. Custom classes need matching serializer registrations on all clients and workers. Devalue supports its documented value set and should only be used for trusted application values; do not use it to render untrusted strings as HTML. Application-owned database persistence remains separate: the tracker uses Drizzle/SQLite integer timestamps for domain activity dates and hydrates them as `Date` values. Workcore service state remains file-backed in the demo.
+The database commit is authoritative; a failed broadcast does not undo it. Clients resubscribe after reconnect, and request complete refreshes every 30 seconds while connected. This recovers missed publication without keeping an indefinite change log.
 
-The admin uses `x-workcore-runtimeType: 'date'` JSON Schema metadata only where the runtime value is a JavaScript `Date`. It does not infer runtime types from JSON Schema `format` (for example, `format: 'date-time'` alone remains a string). Rich results use a safe display formatter; rich row-action inputs use an editable SuperJSON envelope, while ordinary inputs remain plain JSON. The prebuilt admin supports `json` and `superjson-v1`; unsupported IDs fail during `createAdminHandler()` setup. Use a custom frontend/client for the devalue codec or a custom SuperJSON registration.
+There is no offline mutation queue, CRDT, general partial-replication engine or incremental view compiler.
 
-## Admin
+## Background execution
 
-`@workcore/admin` contains a Svelte 5 + Vite browser application, already compiled into package assets, and a Node host helper `createAdminHandler`. Mount its handler only for the admin route and delegate API routes to the core handler. Asset URLs are rewritten for arbitrary base paths; the admin uses local bundled assets, not a CDN. The host owns authentication, cookie policy and deployment/content-security policy.
+Durable Object alarms drive due schedules and queued runs. Before accepting an HTTP write, the host arms a durable alarm; a committed enqueue cannot be stranded merely because setting a subsequent alarm fails. Run execution also leaves a watchdog alarm before starting external work.
 
-The console consumes the same authorised manifest and API as custom clients. It supports JSON and table query results, pagination, named variants, schema-driven primitive/enum forms, row mutation bindings, task launch/results/progress, schedule management and workspace operation history. Complex input shapes use a JSON editor validated by the server.
+One job executes at a time per workspace. Other requests can interleave while its handler awaits external work; each mutation is still a short, synchronous transaction. A job does not own a long-running database transaction.
 
-Workspace definitions can optionally declare `admin.pages` and built-in page flags. The manifest includes those declarative page/block descriptions only after filtering references against the current actor's visible operations and system capabilities. Built-in Operations, Tasks, Schedules and History entries are represented by the same page metadata; their resource endpoints remain capability-checked independently. Pages compose queries, mutation forms, task launchers and platform resources, not arbitrary HTML or executable templates. See [admin pages and views](/admin-pages#configurable-admin-pages) for the supported contract and current limits.
+On object reconstruction, previously running jobs become `interrupted`. They are not automatically replayed. Known task failures may use explicitly configured retries; agents never automatically retry.
 
-The supported operation-view contract and callback-based page authoring are described in [admin pages and views](/admin-pages#configurable-admin-pages). The [UI rendering implementation brief](/ui-rendering-implementation-brief) remains a design reference for possible future HTML/template renderers; executable templates and Alpine-style behavior are not currently supported.
+An idle object is not a permanently running server. Authoritative state lives in SQLite. WebSocket attachments retain only the trusted identity, expiry and small subscription descriptions, allowing Cloudflare's hibernation APIs to manage connections.
 
-## Local demo adapters
+## Hosting
 
-The reusable `@workcore/adapters` package exposes the local implementations as individual adapters. Applications compose them into `PlatformServices`; the tracker uses a shared file state for KV, tasks, schedules and history, while selecting its event adapter explicitly.
+```ts
+import { Workspace, routeWorkspace } from '@workcore/core/cloudflare';
 
-The tracker example uses a local SQLite database for Better Auth identity, workspace membership and tracker domain data, but still needs no Redis or external service:
+export class NotesWorkspace extends Workspace<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env, notes);
+  }
+}
 
-- Better Auth users/sessions, workspace memberships and activities are stored in `data/workcore.sqlite` via Drizzle. Override the path with `WORKCORE_DATABASE`.
-- KV values, task queue/runs, schedules and safe history are stored in `data/workcore-state.json` with serialized local file updates.
-- A claimed task left in the processing list is requeued on the next adapter instance start (at-least-once behaviour).
-- Task queue and schedule payloads contain JSON-safe encoded handler inputs plus a codec ID; adapters must persist those fields unchanged, and worker processes must register compatible codecs until the work expires.
-- File state uses a serialized store boundary with atomic replacement only when data changes. Startup recovery is committed only after persistence succeeds. Format version 1 migrates unambiguous colon-delimited legacy KV keys once, preserving current keys in preference to old values; ambiguous legacy keys are retained for explicit application migration, not exposed through a fallback read. Back up state before upgrading, and do not downgrade a migrated file to an older writer.
-- Schedule adapters must implement claims, lease renewal/release, `reserveRun`, and claimed updates/removal atomically across worker processes. User updates and claimed bookkeeping compare `revision` (legacy missing revisions mean zero); stale user edits return HTTP 409. User updates preserve current internal claim/dispatch fields, and `clearActiveRun` clears only the matching run rather than replacing a schedule. This prevents a worker snapshot from undoing a concurrent disable, cron or timezone edit.
-- `reserveRun` atomically checks the claim, revision and enabled state and persists `pendingRunId` before enqueue. The ID is derived from the schedule and occurrence and is reused on recovery, including after uncertain enqueue acknowledgements or bookkeeping failures. Task adapters must make enqueue idempotent by ID even for already-completed runs, and retain deduplication records for the schedule recovery window. Both local adapters implement this. A pending reserved occurrence is recovered rather than skipped as a missed recurring occurrence. Reservation is the dispatch boundary: edits made before it prevent stale dispatch; disabling/removing a schedule afterwards does not cancel an already-reserved run.
-- The worker serializes polling within a process and renews leases during long actor-resolution/authorization calls. Enqueue and schedule bookkeeping still span separate adapter calls, so these guarantees do not make domain side effects exactly-once or replace an outbox.
-- SSE events are in-process/transient. Active subscriptions recover through periodic refresh; a mutation event lost between domain write and event publication can still miss a task trigger.
-- Demo account identities/passwords and initial workspace membership rules are seed definitions in source; membership changes are persisted in SQLite. Better Auth owns username/password sessions and native routes under `/api/auth/*`; the host blocks public sign-up.
+export default {
+  fetch(request: Request, env: Env) {
+    return routeWorkspace(request, {
+      namespace: env.WORKSPACES,
+      authenticate: verifySession, // returns { actor: { id }, expiresAt } or null
+    });
+  },
+};
+```
 
-The file-backed Workcore adapters and demo Better Auth/SQLite composition are local examples, not a production deployment recipe. File serialization is not a cross-process lock, scheduler claim protocol or production database. Change the seeded passwords and secret before exposing the demo. Applications should implement the exported service interfaces using their shared database, queue, authentication and event infrastructure.
+Bind the class in Wrangler and create its namespace with `new_sqlite_classes`. See the tracker's `wrangler.jsonc` for the executable configuration. Wrangler's namespace migration is distinct from application record migrations.
 
-## Security and failure semantics
+The helper serves `/api/workspaces/:workspaceId/:endpoint`, defaults to same-origin access, and replaces caller-supplied session headers with the host-verified identity. No application permission snapshot is trusted from the browser.
 
-- Never accept an actor ID from an operation request. Resolve the actor from trusted host authentication.
-- Behind a reverse proxy whose public origin differs from the internal `Request.url` origin, configure exact `trustedOrigins`; do not trust arbitrary forwarded host/protocol headers. Only configured origins are echoed for credentialed CORS responses.
-- Validate raw inputs before persistence/execution and recheck workspace/operation access for every HTTP, sibling, queued-task, live-refetch and scheduled invocation. Persisted handler-facing inputs are decoded without repeating transforms and checked against the operation version; see [upgrade safety](/tasks#persisted-input-versions).
-- Scope application-owned repositories themselves; passing scope alongside an unrestricted database does not isolate it.
-- Query handlers must be read-only. Mutations are not automatically transactional. Output validation failures use `OUTPUT_VALIDATION_FAILED`; timeouts use `OPERATION_TIMEOUT`. Both explicitly warn that side effects may already have occurred; errors do not mean rollback. Task completion is terminal before schedule/event/history follow-up, so bookkeeping failures do not rewrite a successful run as failed.
-- Applications may define an `authorization` context schema and checker on their workspace definition. The host registration resolves the trusted, execution-specific authorization context; the platform validates it and invokes the checker for application operations and built-in capabilities such as history, task inspection and schedule management. The optional platform `authorise` hook can add a global policy gate, but workspace authorization does not depend on it.
-- A workspace is authored in one `defineWorkspace<App>()({ ... })` call. Schema maps infer each operation's inputs/results; `NoInfer` makes handlers consume those types, including typed sibling query/mutation/task calls. Task triggers and UI actions are checked against declared mutations, and UI bindings against mutation input fields. Calls still execute through runtime validation and authorization. The typed browser client infers query/mutation/task inputs and outputs from the finished definition.
-- Success events contain provenance, not input/output. Event, trigger-enqueue and history delivery failures are reported separately from committed operation results; a response warning does not mean the handler rolled back. Lost transient trigger events are not recovered.
-- History is metadata-first: actor/scope, operation, timing, status and sanitised errors. Task adapters may retain results for authorized task inspection; define retention/size policy for production data.
-- Agent traces use a separate adapter and granular capabilities for run metadata, model step content, tool metadata/payloads, and final results. Runs are actor-scoped by default; workspace-wide inspection requires `workcore.agents.runs.read.all`. Worker recovery marks an already-running agent interrupted instead of replaying possible tool side effects.
-- Schedule timezone is explicit. Missed recurring executions are skipped; overlap is tracked per schedule, not per workspace. Queue delivery/recovery may repeat work.
-- Task automatic retries are not configurable in v1. A failure can be inspected and explicitly launched again.
+For local development, do not run two Wrangler processes against the same persistence directory. Browser tests use a separate temporary persistence directory so they cannot race a developer's running workspace.
 
-## Current limitations
+## What this architecture trades away
 
-- The core does not include a Better Auth adapter package or managed production service deployment. The tracker is a reference host integration; PostgreSQL state and Redis transient-event adapter entry points are available, and consumers operate and secure their own infrastructure.
-- No managed transaction/unit of work or outbox. Application handlers can use their own database transaction, but Workcore cannot atomically coordinate it with events, KV or queues.
-- Event publication and trigger enqueue are separate from a domain write. Transient event loss can miss live invalidation/trigger work until a client refreshes; refresh cannot restore a missed task trigger.
-- The local file adapters assume one process. `@workcore/adapters/postgres` supplies shared persistent state and atomic task/schedule claims; `@workcore/adapters/redis` supplies shared but transient event delivery. Durable event publication/outbox coordination remains deferred.
-- Operation handlers have configurable deadlines (`interactiveTimeoutMs`, default 30 seconds, and `backgroundTimeoutMs`, default 5 minutes; legacy `operationTimeoutMs` remains a common fallback override). Timeout abort is cooperative and does not prove that an uncooperative handler stopped or rolled back. Authentication, authorization, context creation and adapter I/O are not covered by handler deadlines. Worker shutdown aborts active work and waits up to `shutdownTimeoutMs` (default 10 seconds); claims recover after lease expiry and may repeat side effects.
-- PostgreSQL adapter retention defaults to 5,000 history records per workspace and 1,000 task runs globally. File adapters default to 5,000 history entries and 1,000 task runs. KV values are JSON-compatible and default to at most 1 MiB. Enqueue deduplication markers are retained independently from task-result pruning. See the production guide for sensitivity and retention caveats.
-- Schedules accept simple five-field cron numeric, wildcard, list and range forms; names, steps/ranges combinations, DST edge-case guarantees and schedule editing of arbitrary task inputs are not promised.
-- No retry policy, task cancellation endpoint, agent streaming/approval/resume, arbitrary server-rendered custom views, invite/membership UI or external transport. Admin pages may compose the built-in blocks documented in the admin manifest contract.
+Cross-workspace joins and transactions are not built in. A single unusually busy workspace is a single coordination boundary. Global reporting needs an explicitly designed separate read model, not a pretend cross-object database.
 
-The admin manifest uses protocol version 2. Semantic pages and operation presentations are the sole UI contract, projected for the requesting actor and workspace. See the [HTTP/live protocol reference](/protocol) for response envelopes, diagnostics, codec negotiation, and SSE recovery. Periodic refresh is driven by server SSE messages; there is no independent client polling fallback while the stream is disconnected.
-- The API and packages are an initial `0.1.0` design. Run packaged-consumer verification as part of release checks.
+Cloudflare-specific APIs are intentional. A future second backend should be designed around an actual requirement, not speculative adapter contracts.

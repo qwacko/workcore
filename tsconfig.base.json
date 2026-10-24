@@ -1,13 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "strict": true,
     "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
     "declaration": true,
-    "declarationMap": true,
     "sourceMap": true,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,

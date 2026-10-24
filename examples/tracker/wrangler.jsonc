@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "workcore-tracker",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "durable_objects": {
+    "bindings": [{ "name": "WORKSPACES", "class_name": "TrackerWorkspace" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TrackerWorkspace"] }],
+  "vars": { "DEMO_MODE": "false" },
+  "env": {
+    "local": {
+      "vars": { "DEMO_MODE": "true" },
+      "durable_objects": {
+        "bindings": [{ "name": "WORKSPACES", "class_name": "TrackerWorkspace" }]
+      }
+    }
+  }
+}

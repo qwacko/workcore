@@ -1,73 +1,120 @@
-# Authoring operations
+# Authoring and migrations
 
-Workcore has three layers:
-
-1. An **application definition** is the reusable operation catalog created with `defineApplication<Context>()({ ... })`. `defineWorkspace` remains a compatible alias.
-2. A **registration** binds the definition to trusted host factories with `definition.registerApplication(...)`.
-3. A **workspace instance** selects scoped data with `{ applicationId, workspaceId }`. It is not another definition or platform configuration object.
-
-`createPlatform({ applications, auth, services })` combines registrations and infrastructure. The host mounts `platform.httpHandler()`. Start with the [complete minimal integration](/minimal-integration), then use the [configuration reference](/configuration) for every option.
-
-For reusable local catalogs, use [module composition](/composition): `defineModule<Context, Dependencies>()` defines a small module and `composeApplication<Context>()` wires modules through typed, synchronous capabilities and optional callbacks. Existing single-catalog authoring remains unchanged.
-
-## Queries, mutations, and tasks
+## Tables
 
 ```ts
-import { defineApplication } from '@workcore/core';
-import { z } from 'zod';
+const tables = {
+  tasks: table(z.object({
+    title: z.string().min(1),
+    ownerId: z.string(),
+    done: z.boolean(),
+  }), {
+    indexes: { owner: 'ownerId' },
+  }),
+};
+const app = workspace(tables);
+```
 
-export const app = defineApplication<{ count: () => number }>()({
-  id: 'counter',
-  queries: {
-    count: {
-      input: z.object({}),
-      output: z.number(),
-      permission: 'counter.read',
-      api: true,
-      handler: ({ ctx }) => ctx.app.count(),
-    },
+Table definitions describe JSON record contents. Workcore adds `id`, `revision` and `schemaVersion` outside `data`. The workspace identity is implicit in the Durable Object, not repeated in every row.
+
+Use plain JSON schemas: strings, finite numbers, booleans, null, arrays and plain objects. Store timestamps as epoch milliseconds or ISO strings. Schemas must convert to JSON Schema; unsupported transforms or JavaScript-only output types fail during setup. Zod validation remains authoritative for refinements.
+
+There is no automatic relational schema compiler, foreign-key inference or uniqueness declaration. A synchronous mutation can enforce an application invariant atomically; use primary record IDs for natural unique keys where appropriate.
+
+## Database methods
+
+Read contexts provide:
+
+```ts
+db.get('tasks', id); // Row | null
+db.page('tasks', { limit: 25, after: cursor });
+db.page('tasks', { index: { name: 'owner', value: actor.id }, limit: 100 });
+db.all('tasks'); // fails above 1,000 rows; never truncates silently
+db.kv.get('integrationCursor');
+```
+
+Pages are ordered by record ID, not creation time. `nextCursor` is the last returned ID when another page exists; otherwise null. Pages also stop at a conservative 400 KB payload budget, so they can contain fewer rows than the requested limit. Always follow the cursor, not the returned count. `all()` fails rather than return an incomplete byte-limited result.
+
+Declared indexes support equality on a dotted JSON field path. They use real SQLite expression indexes. Arbitrary predicates, range indexes, full-text search and alternate sort orders are not currently provided.
+
+Mutation contexts additionally provide:
+
+```ts
+db.put('tasks', id, data); // upsert, schema validated
+db.put('tasks', id, data, { expectedRevision: previousRevision });
+db.put('tasks', id, data, { expectedRevision: 0 }); // must not already exist
+db.delete('tasks', id, { expectedRevision: previousRevision });
+db.kv.set('integrationCursor', jsonValue);
+db.kv.delete('integrationCursor');
+```
+
+Use record revision checks when an edit must not overwrite another user's intervening change. A conflict returns `CONFLICT` / HTTP 409.
+
+KV is server-only and shares the mutation transaction. Expose a validated projection through a view if the client needs it. KV is not an encrypted secrets manager; use Cloudflare bindings for deployment secrets.
+
+## Mutations and definitions
+
+```ts
+const completeTask = app.mutation({
+  input: z.object({ id: z.string(), expectedRevision: z.number() }),
+  output: z.null(),
+  handler: ({ db, actor }, input) => {
+    const row = db.get('tasks', input.id);
+    if (!row || row.data.ownerId !== actor.id) {
+      throw new WorkcoreError('FORBIDDEN', 'Not your task', 403);
+    }
+    db.put('tasks', input.id, { ...row.data, done: true }, {
+      expectedRevision: input.expectedRevision,
+    });
+    return null;
+  },
+});
+
+export const application = app.define({
+  views: {}, queries: {}, mutations: { completeTask }, jobs: {},
+  authorize: ({ db, actor }, action) => {
+    // Check trusted identity against current workspace membership.
+    return isMember(db, actor.id);
   },
 });
 ```
 
-- Queries must be read-only: subscriptions can refetch without user action.
-- Mutations perform synchronous writes; they are not automatically transactional.
-- Tasks use the same `input`, `output`, `permission`, `api`, and `handler` fields, but execute through the worker queue. See [tasks and schedules](/tasks).
-- `api: true` opts an operation into HTTP exposure. Typed clients exclude explicitly internal operations; sibling callers retain the entire catalog. If a helper erases `api` to `boolean`, the client cannot prove its exposure statically. Keep literal `api: true`/`false` at the definition boundary for precise typing. Server checks are always authoritative.
-- Missing `permission` denies execution. `permission: []` explicitly requires only authenticated workspace access. See [authorization](/authorization).
+`authorize` is synchronous and defaults to nothing implicitly: every application must supply it. Actions use `view:name`, `query:name`, `mutation:name`, `job:name`, `$connect`, `$runs`, and `$admin`. `$admin` grants sensitive table/history/schedule inspection and management. `$runs` permits inspection of the caller's own runs; admins may inspect all runs.
 
-## Schema transformations
+Operation permission checks do not replace record-level checks inside handlers. A view must filter private rows and fields before returning them.
 
-Standard Schema validates both boundaries. Standard JSON Schema is additionally required for exposed operations and agent tools; Zod 4 supplies both. Forms and the manifest use the input schema's **input** JSON Schema and output schema's **output** JSON Schema.
+An optional `initialize(db)` runs once in the same transaction as workspace initialization. It is useful for fixed initial records, not external work. The tracker uses it for demo members and data; production membership provisioning is an application concern.
 
-The handler receives the **output** of input validation and returns the **input** of output validation. The client and sibling callers receive the validated output:
+## Record migrations
 
 ```ts
-{
-  input: z.object({ amount: z.string().transform(Number) }),
-  output: z.string().transform(Number).pipe(z.number()),
-  handler: ({ input }) => String(input.amount + 1),
-}
+tasks: table(taskSchemaV2, {
+  version: 2,
+  migrations: {
+    2: previous => ({ ...taskSchemaV1.parse(previous), done: false }),
+  },
+})
 ```
 
-Here the request contains `{ amount: '41' }`, the handler sees `input.amount === 41`, returns `'42'`, and the client receives `42`. The final `.pipe(z.number())` also gives the manifest an explicit numeric output schema rather than an unconstrained transformed shape. Output validation runs once. A mutation that fails output validation may already have changed domain data; failure does not imply rollback. Rich values require a matching [wire codec](/protocol#codecs).
+The migration key is the version being migrated **to**. To move existing version-1 rows to version 3, supply migrations 2 and 3. Each receives and returns JSON. Validate the final result against the current table schema.
 
-## Context and checked sibling calls
+On workspace startup, Workcore migrates all existing rows in one local transaction before serving requests. Failure rolls the migration back and prevents startup; a schema downgrade is refused. New records always use the current version. Empty, newly introduced tables need no historical data transformations.
 
-Handlers receive `{ ctx, input, operations }`. `ctx` includes the actor, workspace scope, correlation ID, abort signal, scoped services, and host-created `app` context. Interactive handlers also receive request metadata; never persist or log its credential-bearing headers.
+These migrations apply to this implementation's records only. They do not import the previous Workcore database or adapters. Renames and destructive changes are explicit application decisions, never inferred from schema differences.
 
-`operations.query`, `mutate`, `enqueue`, and `enqueueAgent` are inferred from the catalog. They reuse validation and authorization rather than bypassing the boundary. Synchronous sibling calls create their own application context; they do not share the caller's transaction automatically. Repositories must scope their own reads/writes using `ctx.scope`.
+Whole-workspace startup migrations are intentionally simple. Very large migrations can exceed runtime limits; online/batched migration machinery is not implemented.
 
-An application context may implement `dispose(): void | Promise<void>`. Workcore calls it after execution, waits at most five seconds, and logs cleanup failures without replacing the operation result. Timeout abort is cooperative: cleanup can begin while an uncooperative handler is still running. Design resource ownership accordingly. Authentication, authorization, context creation, serialization, and adapter I/O are outside the handler deadline.
+## Typed client
 
-## Optional UI and further guides
+```ts
+const client = createClient<typeof application>({
+  baseUrl: '/api/workspaces/my-workspace',
+});
+const result = await client.mutate('completeTask', { id, expectedRevision });
+```
 
-- [Admin pages, tables, collections, charts, and actions](/admin-pages)
-- [Chat contracts and renderers](/chat)
-- [Queued agents](/agents)
-- [Wire protocol and client diagnostics](/protocol)
-- [Production deployment and upgrade safety](/production-deployment)
+Import the application **type** into frontend code. Operation names, accepted inputs and validated outputs are inferred. Server code is not required in the browser bundle.
 
-## Configurable admin pages
+Mutations and enqueues automatically generate request IDs. To retry after an uncertain network response, retain the ID and pass it explicitly as the third argument. Reusing an ID for different input is rejected. The last 1,000 mutation/enqueue responses per workspace are retained, scoped by actor; this is a bounded deduplication window, not indefinite exactly-once delivery.
 
-The admin guide moved to [Admin pages and views](/admin-pages#configurable-admin-pages). Existing object-style and callback-based configurations remain supported.
+The console uses the same API and authorised manifest. It supplies JSON input editors, table/JSON output, live subscriptions, run traces and schedule controls. It does not bypass mutations to edit records.

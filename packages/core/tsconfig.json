@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist", "composite": true },
+  "compilerOptions": { "rootDir": "src", "outDir": "dist", "types": ["@cloudflare/workers-types"] },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "src/**/type-tests.ts"]
+  "exclude": ["src/**/*.test.ts"]
 }
