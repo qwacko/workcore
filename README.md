@@ -27,7 +27,19 @@ Open the local URL printed by Wrangler (normally <http://localhost:8787>). Choos
 
 The example uses a deterministic assistant by default. Add a Workers AI binding named `AI` to use its model-backed summariser. No paid model call is needed to run the demo or tests.
 
-**Demo authentication works only on localhost, with the explicit local Wrangler environment. Default deployments return 503 until real authentication is installed.**
+**Demo authentication requires the explicit local Wrangler environment and an allowed hostname. Default deployments return 503 until real authentication is installed.**
+
+### Local reverse proxy
+
+`pnpm dev` reads the root `.env`, then `examples/tracker/.env`; exported shell variables take precedence. For example:
+
+```dotenv
+HOST=127.100.0.10
+PORT=8787
+DEMO_ALLOWED_HOSTS=workcore.dev.jmcdowall.com
+```
+
+The listener address is also allowed for direct access. Additional demo hostnames are comma-separated exact names, without schemes or ports. The proxy must preserve the browser-facing host and scheme and forward WebSocket upgrades. Do not expose the demo without proxy access controls: anyone reaching it can select the admin identity.
 
 ## The model
 

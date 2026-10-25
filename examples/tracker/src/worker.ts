@@ -10,15 +10,16 @@ export class TrackerWorkspace extends Workspace<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    // Deliberately not production authentication. Remote deployments fail closed.
-    const local = env.DEMO_MODE === 'true' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    // Deliberately not production authentication. Extra dev hosts require explicit configuration.
+    const allowedHosts = ['localhost', '127.0.0.1', '[::1]', ...(env.DEMO_ALLOWED_HOSTS ?? '').split(',').map(host => host.trim().toLowerCase()).filter(Boolean)];
+    const local = env.DEMO_MODE === 'true' && allowedHosts.includes(url.hostname);
     if (!local) return new Response('This example has no production authentication. Install a real session verifier before exposing it.', { status: 503 });
     if (url.pathname === '/demo/login' && request.method === 'POST') {
       if (request.headers.get('origin') !== url.origin) return new Response('Origin denied', { status: 403 });
       const form = await request.formData();
       const user = form.get('user');
       if (user !== 'alice' && user !== 'bob') return new Response('Unknown demo user', { status: 400 });
-      return new Response(null, { status: 303, headers: { location: '/workspace', 'set-cookie': `demo_user=${user}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600` } });
+      return new Response(null, { status: 303, headers: { location: '/workspace', 'set-cookie': `demo_user=${user}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600${url.protocol === 'https:' ? '; Secure' : ''}` } });
     }
     const user = /(?:^|;\s*)demo_user=(alice|bob)(?:;|$)/.exec(request.headers.get('cookie') ?? '')?.[1];
     if (url.pathname.startsWith('/api/workspaces/')) {

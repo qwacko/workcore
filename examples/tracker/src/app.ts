@@ -2,7 +2,7 @@ import { table, workspace, WorkcoreError } from '@workcore/core';
 import type { ReadContext } from '@workcore/core';
 import { z } from 'zod';
 
-export type Env = { WORKSPACES: DurableObjectNamespace; DEMO_MODE: string; AI?: Ai };
+export type Env = { WORKSPACES: DurableObjectNamespace; DEMO_MODE: string; DEMO_ALLOWED_HOSTS?: string; AI?: Ai };
 const taskSchema = z.object({
   title: z.string().min(1).max(200),
   projectId: z.string().min(1).max(100),

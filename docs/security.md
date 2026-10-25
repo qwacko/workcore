@@ -4,7 +4,7 @@
 
 `routeWorkspace` accepts a server-side session verifier returning `{ actor: { id }, expiresAt }` or null. It replaces incoming session headers before forwarding to the Durable Object. Never derive identity from an unverified browser-supplied actor ID.
 
-The tracker deliberately uses a local-only demo cookie, not production authentication. `pnpm dev` explicitly selects the local Wrangler environment. The default environment and remote hosts fail closed with HTTP 503. Install a real verifier and remove the demo login flow before exposing an application.
+The tracker deliberately uses a development demo cookie, not production authentication. `pnpm dev` explicitly selects the local Wrangler environment. The default environment and unlisted hosts fail closed with HTTP 503. For a protected local reverse proxy, set `HOST`, `PORT` and comma-separated `DEMO_ALLOWED_HOSTS` in `.env` (root, then example, with shell variables taking precedence). The dev launcher configures Wrangler's listener and passes the allowed hostnames to the Worker. Preserve the public host/scheme and WebSocket upgrades at the proxy. Anyone who can reach this demo can select its admin identity; use proxy access controls. Install a real verifier and remove the demo login flow before production use.
 
 The host helper requires same-origin browser requests. JSON APIs require `application/json`, and cross-origin browser requests are rejected. It does not trust forwarded host headers or supply a general CORS configuration. Preserve this boundary when placing a Worker behind other routing infrastructure.
 

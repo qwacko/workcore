@@ -36,6 +36,17 @@ describe('Cloudflare Worker and live protocol', () => {
     expect((await request('/api/workspaces/demo/manifest', '', undefined, { 'x-workcore-session': encodeURIComponent(JSON.stringify({ actor: { id: 'alice' }, expiresAt: Date.now() + 10000 })) })).status).toBe(401);
     expect((await request('/api/workspaces/demo/mutate', 'alice', { name: 'createTask', input: { title: 'No' }, requestId: 'one' }, { origin: 'https://attacker.test' })).status).toBe(403);
   });
+  it('permits explicitly configured proxy hosts only in demo mode', async () => {
+    const configured = { ...bindings, DEMO_ALLOWED_HOSTS: 'workcore.dev.jmcdowall.com' };
+    expect((await worker.fetch(new Request('https://workcore.dev.jmcdowall.com/'), configured)).status).toBe(200);
+    expect((await worker.fetch(new Request('https://unlisted.example/'), configured)).status).toBe(503);
+    expect((await worker.fetch(new Request('https://workcore.dev.jmcdowall.com/'), { ...configured, DEMO_MODE: 'false' })).status).toBe(503);
+    const response = await worker.fetch(new Request('https://workcore.dev.jmcdowall.com/demo/login', {
+      method: 'POST', headers: { origin: 'https://workcore.dev.jmcdowall.com', 'content-type': 'application/x-www-form-urlencoded' }, body: 'user=alice',
+    }), configured);
+    expect(response.status).toBe(303);
+    expect(response.headers.get('set-cookie')).toContain('; Secure');
+  });
   it('isolates workspaces and filters private rows before sending data', async () => {
     const workspace = crypto.randomUUID();
     const alice = await (await api(workspace, 'query', { name: 'tasks', input: {} })).json() as any;
