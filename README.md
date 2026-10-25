@@ -2,7 +2,7 @@
 
 **A Cloudflare-first kit for live workspace applications.**
 
-Define JSON records, typed actions and authorised read models. Workcore supplies SQLite persistence inside a Durable Object, live client subscriptions, background execution, schedules, and a small operational console.
+Define JSON records, typed actions and authorised read models. Workcore supplies SQLite persistence inside a Durable Object, live client subscriptions, background execution, schedules, and a manifest-driven SvelteKit console.
 
 One workspace has one Durable Object and one database. There is no D1 dependency, database adapter layer, Redis, separate queue server, or portable runtime to assemble.
 
@@ -10,7 +10,7 @@ One workspace has one Durable Object and one database. There is no D1 dependency
 
 ## Try it
 
-Node.js 22+ and pnpm 10:
+Node.js 22.17+ and pnpm 10:
 
 ```sh
 pnpm install
@@ -19,11 +19,13 @@ pnpm dev
 
 Open the local URL printed by Wrangler (normally <http://localhost:8787>). Choose Alice or Bob. Alice is an admin; Bob is a member. Use separate browser profiles to compare their private views.
 
-1. Open **tasks**, leave the input as `{}`, and **Subscribe**.
-2. Open another window and run **createTask** with `{"title":"A live update"}`.
-3. Watch the subscribed result change without refetch code.
-4. Launch **assistant**, then inspect **Runs** and **assistantSummary**.
-5. Run **scheduleCompletion** with one of your task IDs and a delay; inspect **Schedules**.
+1. Follow **Start here** on the workspace overview and create a task using the generated form.
+2. Open another window and watch its live task list update.
+3. Use **Edit task**, **Complete**, or **Schedule** directly on your own task rows—no copying IDs.
+4. Use **Assistant** to send a private message, then follow **Inspect run** to its execution timeline.
+5. Browse **Schedules**, **History**, **Tables**, or the schema-backed operation explorer.
+
+The overview, tasks, assistant and data pages are declared by the backend, not hardcoded into the frontend. Table/list/JSON modes, local filters and server scope are explicit and URL-backed. See [Admin authoring](docs/admin.md).
 
 The example uses a deterministic assistant by default. Add a Workers AI binding named `AI` to use its model-backed summariser. No paid model call is needed to run the demo or tests.
 
@@ -40,6 +42,8 @@ DEMO_ALLOWED_HOSTS=workcore.dev.jmcdowall.com
 ```
 
 The listener address is also allowed for direct access. Additional demo hostnames are comma-separated exact names, without schemes or ports. The proxy must preserve the browser-facing host and scheme and forward WebSocket upgrades. Do not expose the demo without proxy access controls: anyone reaching it can select the admin identity.
+
+`pnpm dev` builds the deployable console once, then runs SvelteKit with hot module replacement on this public address and proxies API, login and WebSocket requests to Wrangler on an internal loopback port. Production uses only Worker static assets; no SvelteKit server is deployed. `/workspace` redirects to `/admin/demo`, and admin deep links survive refresh.
 
 ## The model
 
@@ -106,13 +110,13 @@ await tasks.whenRevision(result.revision);
 | --- | --- |
 | `packages/core` | Zod definitions, SQLite records, transactional runtime, runs/schedules, Cloudflare host |
 | `packages/client` | Browser-safe inferred API, WebSocket subscriptions, reconnect and revision tracking |
-| `packages/admin` | Same-origin operational console; no application frontend build required |
+| `packages/admin` | SvelteKit SPA, generated forms, semantic pages and operational inspection; compiled to Worker static assets |
 | `examples/tracker` | Executable Cloudflare application, private/shared data, scheduling and an optional AI agent |
 | `tests` | Real Workers/SQLite integration tests and compile-time API checks |
 
 ## Deliberate boundaries
 
-No offline writes, cross-workspace transactions, arbitrary client query language, automatic incremental SQL views, backend portability, cron/timezones, resumable agents, or raw admin record editing. Records and wire values are plain JSON—not JavaScript dates, maps or custom classes.
+No offline writes, cross-workspace transactions, arbitrary client query language, automatic incremental SQL views, backend portability, cron/timezones, resumable agents, or raw admin record editing. Chat is persisted messaging with background replies, not token streaming or resumable model execution. Records and wire values are plain JSON—not JavaScript dates, maps or custom classes.
 
 Large collections use explicit indexes and pages. `all()` is capped at 1,000 records. Array live views default to 500 rows and fail rather than truncate. Both live results and query responses have a 512 KiB data limit.
 
@@ -132,6 +136,7 @@ pnpm docs:dev
 
 - [Architecture](docs/architecture.md)
 - [Authoring and migrations](docs/authoring.md)
+- [Admin metadata, pages and actions](docs/admin.md)
 - [Live views and large datasets](docs/sync.md)
 - [Tasks, schedules and agents](docs/execution.md)
 - [Security and actual limits](docs/security.md)

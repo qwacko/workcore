@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { compileAdmin, manifestSchema } from './ui.js';
 import type { Actor, Definition, Job, Json, MutationContext, Operation, ReadContext, RunContext } from './definitions.js';
 import { assertSync, checkName, encode, json, WorkcoreError } from './json.js';
 import { getJson, initialize, saveRun, saveSchedule, Store } from './store.js';
@@ -28,6 +29,8 @@ export class Engine {
       }
     }
     for (const table of Object.values(definition.tables)) z.toJSONSchema(table.schema);
+    // Resolve references at startup, even if no actor will be allowed to see them.
+    compileAdmin(definition, () => true);
     storage.transactionSync(() => {
       initialize(storage, definition.tables);
       if (!this.meta('initialized')) {
@@ -184,15 +187,17 @@ export class Engine {
   }
   manifest(actor: Actor): Json {
     return this.read(db => {
-      const manifest: Record<string, Json> = { protocol: 1, admin: this.allowed(db, actor, '$admin'), runs: this.allowed(db, actor, '$runs') };
+      const manifest: Record<string, Json> = { protocol: 2, actor: { id: actor.id }, admin: this.allowed(db, actor, '$admin'), runs: this.allowed(db, actor, '$runs') };
       for (const [kind, operations] of Object.entries({ view: this.definition.views, query: this.definition.queries, mutation: this.definition.mutations, job: this.definition.jobs })) {
         manifest[kind] = Object.fromEntries(Object.entries(operations).filter(([name]) => this.allowed(db, actor, `${kind}:${name}`)).map(([name, operation]) => [name, {
           // Zod annotates schema objects with non-enumerable Standard Schema methods.
           input: JSON.parse(JSON.stringify(z.toJSONSchema(operation.input, { io: 'input' }))) as Json,
           output: JSON.parse(JSON.stringify(z.toJSONSchema(operation.output))) as Json,
+          ...(operation.ui ? { ui: json(operation.ui) } : {}),
         }]));
       }
-      return manifest;
+      manifest.ui = json(compileAdmin(this.definition, (kind, name) => this.allowed(db, actor, `${kind}:${name}`)));
+      return json(manifestSchema.parse(manifest));
     });
   }
   inspect(actor: Actor, resource: string, after = ''): Json {
@@ -212,8 +217,9 @@ export class Engine {
       }
       if (resource === 'tables') return json(Object.fromEntries(Object.keys(this.definition.tables).map(name => [name, this.definition.tables[name]!.version])));
       if (resource.startsWith('table:')) return json(db.page(resource.slice(6), { limit: 100, after }));
-      const table = ({ runs: 'wc_runs', schedules: 'wc_schedules', history: 'wc_history' } as Record<string, string>)[resource];
-      if (!table) throw new WorkcoreError('NOT_FOUND', 'Unknown resource', 404);
+      const resources: Record<string, string> = { runs: 'wc_runs', schedules: 'wc_schedules', history: 'wc_history' };
+      if (!Object.hasOwn(resources, resource)) throw new WorkcoreError('NOT_FOUND', 'Unknown resource', 404);
+      const table = resources[resource]!;
       const projection = resource === 'runs' ? "json_remove(data, '$.input', '$.result')" : resource === 'schedules' ? "json_remove(data, '$.input')" : 'data';
       const ownRuns = resource === 'runs' && !this.allowed(db, actor, '$admin');
       const scope = ownRuns ? " AND json_extract(data, '$.actor.id') = ?" : '';

@@ -6,6 +6,8 @@ test-results/
 .env
 .dev.vars
 .wrangler/
+.svelte-kit/
+packages/admin/build/
 # Local data/generated files from previous checkouts are not source.
 data/
 .svelte-check/

@@ -107,9 +107,14 @@ describe('Cloudflare Worker and live protocol', () => {
       expect(await state.storage.getAlarm()).toBeNull();
     });
   });
-  it('serves the console without a frontend build and only shows allowed operation metadata', async () => {
+  it('serves the compiled SPA and only shows allowed operation metadata', async () => {
     const response = await request('/workspace');
-    expect(await response.text()).toContain('Workspace console');
+    expect(response.status).toBe(303);
+    expect(new URL(response.headers.get('location')!).pathname).toBe('/admin/demo');
+    const admin = await request('/admin/demo/pages/tasks');
+    expect(admin.status).toBe(200);
+    expect(await admin.text()).toContain('/admin/_app/');
+    expect((await request('/admin/demo', '')).status).toBe(303);
     const manifest = await (await request('/api/workspaces/demo/manifest', 'bob')).json() as any;
     expect(manifest.admin).toBe(false);
     expect(manifest.view.tasks.input).toMatchObject({ type: 'object' });

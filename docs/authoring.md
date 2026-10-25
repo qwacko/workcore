@@ -117,4 +117,4 @@ Import the application **type** into frontend code. Operation names, accepted in
 
 Mutations and enqueues automatically generate request IDs. To retry after an uncertain network response, retain the ID and pass it explicitly as the third argument. Reusing an ID for different input is rejected. The last 1,000 mutation/enqueue responses per workspace are retained, scoped by actor; this is a bounded deduplication window, not indefinite exactly-once delivery.
 
-The console uses the same API and authorised manifest. It supplies JSON input editors, table/JSON output, live subscriptions, run traces and schedule controls. It does not bypass mutations to edit records.
+The SvelteKit console uses the same client transport and authorised manifest. It supplies generated forms with advanced JSON fallback, declarative application pages, table/list/record/JSON/Markdown/chat presentations, live subscriptions, run timelines and schedule controls. It does not bypass mutations to edit records. See [admin authoring](./admin).

@@ -1,5 +1,10 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
-  "include": ["src/**/*.ts"]
+  "extends": "$app/tsconfig",
+  "include": ["src", "test", "*"],
+  "exclude": ["src/service-worker"],
+  "compilerOptions": {
+    "allowJs": true, "checkJs": true, "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true, "resolveJsonModule": true,
+    "skipLibCheck": true, "strict": true, "moduleResolution": "bundler"
+  }
 }

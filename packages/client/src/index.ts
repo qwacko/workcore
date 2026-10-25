@@ -1,5 +1,6 @@
 import type { Definition, Json } from '@workcore/core';
-import { encodeJson } from '@workcore/core';
+import { encodeJson, manifestSchema } from '@workcore/core';
+import type { Manifest } from '@workcore/core';
 import type { z } from 'zod';
 
 export type Result<T> = { data: T; revision: number };
@@ -106,6 +107,14 @@ export function createClient<A extends Definition>(options: { baseUrl: string; f
     heartbeat = undefined; reconnectTimer = undefined;
   }
   return {
+    async manifest(): Promise<Manifest> {
+      const response = await request(`${base}/manifest`, { credentials: 'same-origin', cache: 'no-store' });
+      const data = await response.json() as { error?: { code: string; message: string } };
+      if (!response.ok) throw new ClientError(data.error?.code ?? 'HTTP_ERROR', data.error?.message ?? response.statusText, response.status);
+      const parsed = manifestSchema.safeParse(data);
+      if (!parsed.success) throw new ClientError('INVALID_MANIFEST', 'The server returned an unsupported or invalid manifest');
+      return parsed.data;
+    },
     query<K extends (keyof A['views'] | keyof A['queries']) & string>(name: K, input: z.input<(A['views'] & A['queries'])[K]['input']>): Promise<Result<z.output<(A['views'] & A['queries'])[K]['output']>>> {
       return post('query', { name, input });
     },
@@ -160,3 +169,8 @@ export function createClient<A extends Definition>(options: { baseUrl: string; f
     },
   };
 }
+
+/** Runtime-discovered operations share the same transport, errors and subscription lifecycle. */
+export function createRuntimeClient(options: Parameters<typeof createClient>[0]) { return createClient<Definition>(options); }
+export type RuntimeClient = ReturnType<typeof createRuntimeClient>;
+export { createSources } from './sources.js';

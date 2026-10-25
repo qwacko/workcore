@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { AdminDefinition, OperationUI } from './ui.js';
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type Actor = { id: string };
@@ -27,6 +28,7 @@ export type ReadContext<T extends Tables> = { db: Reader<T>; actor: Actor; now: 
 export type Operation<I extends z.ZodType = any, O extends z.ZodType = any, C = any> = {
   input: I;
   output: O;
+  ui?: OperationUI;
   handler: (ctx: C, input: z.output<I>) => z.output<O>;
 };
 export type View<I extends z.ZodType = any, O extends z.ZodType = any, C = any> = Operation<I, O, C> & {
@@ -45,6 +47,7 @@ export type Job<I extends z.ZodType = any, O extends z.ZodType = any, C = any> =
   kind: 'task' | 'agent';
   input: I;
   output: O;
+  ui?: OperationUI;
   handler: (ctx: C, input: z.output<I>) => Promise<z.output<O>>;
   maxAttempts?: number;
   retryDelayMs?: number;
@@ -67,6 +70,7 @@ export type Definition<T extends Tables = Tables, V extends Record<string, View>
   jobs: J;
   authorize: (ctx: ReadContext<T>, action: string) => boolean;
   initialize?: (db: Writer<T>) => void;
+  admin?: AdminDefinition;
 };
 
 /** The map key in migrations is the version being migrated TO. */

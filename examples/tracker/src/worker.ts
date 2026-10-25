@@ -1,5 +1,5 @@
 import { Workspace, routeWorkspace } from '@workcore/core/cloudflare';
-import { adminPage } from '@workcore/admin';
+import { serveAdmin } from '@workcore/admin/server';
 import { tracker } from './app.js';
 import type { Env } from './app.js';
 
@@ -30,7 +30,11 @@ export default {
     }
     if (url.pathname === '/workspace') {
       if (!user) return Response.redirect(new URL('/', request.url).href, 303);
-      return adminPage({ apiBasePath: '/api/workspaces/demo', title: `Tracker · ${user}` });
+      return Response.redirect(new URL('/admin/demo', request.url).href, 303);
+    }
+    if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
+      if (!user) return Response.redirect(new URL('/', request.url).href, 303);
+      return serveAdmin(request, env.ASSETS);
     }
     if (url.pathname !== '/') return new Response('Not found', { status: 404 });
     return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Workcore tracker</title>

@@ -10,6 +10,7 @@ export default defineConfig({
       { text: 'Introduction', link: '/' },
       { text: 'Architecture', link: '/architecture' },
       { text: 'Authoring and migrations', link: '/authoring' },
+      { text: 'Admin metadata, pages and actions', link: '/admin' },
       { text: 'Live views and large datasets', link: '/sync' },
       { text: 'Tasks, schedules and agents', link: '/execution' },
       { text: 'Security and limits', link: '/security' },

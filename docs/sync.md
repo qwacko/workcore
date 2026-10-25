@@ -78,7 +78,7 @@ Workspace revisions advance for background bookkeeping too. Unaffected views rec
 
 ## Wire contract
 
-Protocol version 1 uses JSON. HTTP responses for query/mutation/enqueue are `{ data, revision }`; failures are `{ error: { code, message } }` with an HTTP error status.
+Manifest protocol version 2 includes the actor, permitted operations, annotated input/output schemas and projected admin pages/actions. The client validates this version before using it. The existing live transport uses JSON snapshots. HTTP responses for query/mutation/enqueue are `{ data, revision }`; failures are `{ error: { code, message } }` with an HTTP error status.
 
 WebSocket client messages:
 

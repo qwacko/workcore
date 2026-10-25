@@ -78,7 +78,7 @@ Application code owns instructions, model selection and the agent loop. Workcore
 
 Each checked tool call and explicit external step consumes the run's `maxSteps` budget (default 20, hard maximum 100). External steps persist intent before execution and completion/failure afterwards. Successful local mutation tool traces commit atomically with their data changes. Tool traces contain metadata, not automatic copies of every input/output. Explicit step results are persisted and may contain sensitive model output.
 
-This is a cooperative execution API, not a sandbox: handlers must route model/external work through `step` and tools through `read`/`mutate`. It does not enforce token/currency budgets or a wall-clock deadline, stream tokens, persist a conversation abstraction, request human approvals, or safely resume arbitrary model loops. Those are future product choices, not existing guarantees.
+This is a cooperative execution API, not a sandbox: handlers must route model/external work through `step` and tools through `read`/`mutate`. It does not enforce token/currency budgets or a wall-clock deadline, stream tokens, request human approvals, or safely resume arbitrary model loops. The example persists per-user messages in an ordinary table and exposes them through an authorised live view; it is not a separate general-purpose conversation engine. Its assistant reads bounded recent context and records replies through checked mutations.
 
 ## Inspection and retention
 

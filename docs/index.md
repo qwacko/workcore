@@ -9,9 +9,9 @@ pnpm install
 pnpm dev
 ```
 
-Open Wrangler's local URL. Choose Alice (admin) or Bob (member), subscribe to `tasks` with `{}`, and create a task in a second window. Alice's private row is not sent to Bob.
+Open the local URL printed by `pnpm dev`. Choose Alice (admin) or Bob (member), follow the workspace overview, and create a task in a second window. The task list updates live; Alice's private row is not sent to Bob.
 
-The console can execute typed operations using validated JSON inputs, inspect live results, launch jobs, browse run traces, and manage schedules. It deliberately does not provide raw database editing or a general UI component framework.
+The SvelteKit console reads its pages from the runtime manifest. It generates forms from annotated schemas and renders table, list, record, JSON, safe Markdown and private chat presentations. Row actions bind record IDs and revisions without making users copy them. Execution timelines, schedule controls, history and read-only table inspection remain server-authorised. It deliberately does not provide raw database editing or an arbitrary UI/template language.
 
 The tracker includes a scheduled task and an assistant. Without a Workers AI binding the assistant produces an explicitly labelled deterministic demo summary. With a binding named `AI`, it calls a model inside a recorded execution step.
 
@@ -19,6 +19,7 @@ The tracker includes a scheduled task and an assistant. Without a Workers AI bin
 
 - [Architecture](./architecture): ownership, transaction boundaries and deployment.
 - [Authoring](./authoring): tables, mutations, queries, migrations and the typed client.
+- [Admin authoring](./admin): typed field hints, semantic pages, actions and client state.
 - [Sync](./sync): bounded live views, personalised results and larger datasets.
 - [Execution](./execution): tasks, schedules, agent tools and interruption.
 - [Security](./security): authentication, authorisation, limits and unsupported features.
