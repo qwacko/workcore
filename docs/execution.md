@@ -74,11 +74,13 @@ const assistant = app.agent({
 
 An agent is a job with an explicit operation allowlist and **no automatic retry**. It runs under the initiating actor's current authority, never a special unrestricted agent identity.
 
-Application code owns instructions, model selection and the agent loop. Workcore supplies persistence, checked tools and operational visibility—not an abstract model-provider framework. The tracker demonstrates an optional Workers AI call and a labelled no-model demo fallback.
+Application code owns instructions and model selection. The optional `@workcore/ai` package uses AI SDK for provider calls and provides a bounded, sequential model/tool loop with named profiles and per-request fallback. Workcore retains persistence, checked tools and interruption semantics. The tracker demonstrates this integration and a labelled no-model demo mode. See [AI SDK agents](./ai).
+
+An explicitly terminating tool can complete the loop with a structured outcome instead of a final model-written message. It must be the only call in its response and must succeed; ordinary tool-only responses still continue the loop. Chat/run inspection identifies the completion tool, and handlers choose whether to persist display text, structured data or both.
 
 Each checked tool call and explicit external step consumes the run's `maxSteps` budget (default 20, hard maximum 100). External steps persist intent before execution and completion/failure afterwards. Successful local mutation tool traces commit atomically with their data changes. Tool traces contain metadata, not automatic copies of every input/output. Explicit step results are persisted and may contain sensitive model output.
 
-This is a cooperative execution API, not a sandbox: handlers must route model/external work through `step` and tools through `read`/`mutate`. It does not enforce token/currency budgets or a wall-clock deadline, stream tokens, request human approvals, or safely resume arbitrary model loops. The example persists per-user messages in an ordinary table and exposes them through an authorised live view; it is not a separate general-purpose conversation engine. Its assistant reads bounded recent context and records replies through checked mutations.
+This is a cooperative execution API, not a sandbox: handlers must route model/external work through `step` and tools through `read`/`mutate`. Run contexts expose `signal` for cancellation and `progress(json)` for bounded persisted status. `@workcore/ai` adds turn limits, reported-token stop thresholds and an abort deadline; these are not hard currency quotas and cannot stop non-cooperative code. The runtime does not stream tokens, request human approvals, or safely resume arbitrary model loops. The example persists per-user messages in an ordinary table and exposes them through an authorised live view; it is not a separate general-purpose conversation engine.
 
 ## Inspection and retention
 

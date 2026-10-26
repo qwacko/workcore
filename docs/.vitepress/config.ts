@@ -11,6 +11,7 @@ export default defineConfig({
       { text: 'Architecture', link: '/architecture' },
       { text: 'Authoring and migrations', link: '/authoring' },
       { text: 'Admin metadata, pages and actions', link: '/admin' },
+      { text: 'AI SDK agents', link: '/ai' },
       { text: 'Live views and large datasets', link: '/sync' },
       { text: 'Tasks, schedules and agents', link: '/execution' },
       { text: 'Security and limits', link: '/security' },

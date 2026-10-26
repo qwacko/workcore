@@ -1,5 +1,28 @@
 import { expect, test } from '@playwright/test';
 
+test('run inspection explains structured tool completion without a fabricated answer', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
+  await page.route('**/api/workspaces/demo/inspect', route => {
+    if (route.request().postDataJSON()?.resource !== 'run:terminal-ui-test') return route.continue();
+    return route.fulfill({ json: {
+      id: 'terminal-ui-test', job: 'assistant', kind: 'agent', status: 'completed', actor: { id: 'alice' }, input: {}, attempt: 1,
+      createdAt: 1000, updatedAt: 2000,
+      result: { finishReason: 'tool', tool: { name: 'submitReport', result: { reportId: 'report-1' } }, text: '' },
+      progress: { phase: 'completed', turn: 1, completionMode: 'tool-required', completion: { kind: 'tool', tool: 'submitReport' } },
+    } });
+  });
+  await page.route('**/api/workspaces/demo/trace', route => {
+    if (route.request().postDataJSON()?.runId !== 'terminal-ui-test') return route.continue();
+    return route.fulfill({ json: { rows: [], nextCursor: null } });
+  });
+  await page.goto('/admin/demo/runs/terminal-ui-test');
+  await expect(page.getByLabel('Agent progress')).toContainText(/completed\s+via submitReport/);
+  await expect(page.getByLabel('Agent progress')).toContainText('Terminating tool required');
+  await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'Result', exact: true }) })).toContainText('report-1');
+});
+
 test('guided pages, generated forms, row actions, local filters and deep links', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -33,6 +56,7 @@ test('guided pages, generated forms, row actions, local filters and deep links',
   await page.getByRole('button', { name: 'List', exact: true }).click();
   await expect(page.locator('.record-list')).toContainText(title + ' edited');
   await page.getByRole('button', { name: 'Table', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Table', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.getByLabel('Completion', { exact: true }).selectOption('false');
   await page.getByRole('row').filter({ hasText: title }).getByRole('button', { name: 'Complete', exact: true }).click();
   await expect(page.getByRole('row').filter({ hasText: title })).toHaveCount(0);
@@ -91,9 +115,11 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
   await expect(page.locator('.chat-thread img')).toHaveCount(0);
   await page.reload();
   await expect(page.getByRole('log', { name: 'Conversation' })).toContainText('Demo assistant');
+  await expect(page.getByLabel('Agent progress')).toContainText('Offline demo');
   await page.getByRole('link', { name: 'Inspect run', exact: false }).click();
   await expect(page).toHaveURL(new RegExp('/runs/' + runId));
   await expect(page.getByRole('heading', { name: 'Execution timeline' })).toBeVisible();
+  await expect(page.getByLabel('Agent progress')).toContainText('Turn 1');
   await expect(page.getByText('Summarise the first page of my tasks', { exact: true })).toBeVisible();
   await page.getByText('Step result', { exact: true }).click();
   await expect(page.locator('.timeline').getByText('Demo assistant:', { exact: false })).toBeVisible();

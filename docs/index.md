@@ -13,7 +13,7 @@ Open the local URL printed by `pnpm dev`. Choose Alice (admin) or Bob (member), 
 
 The SvelteKit console reads its pages from the runtime manifest. It generates forms from annotated schemas and renders table, list, record, JSON, safe Markdown and private chat presentations. Row actions bind record IDs and revisions without making users copy them. Execution timelines, schedule controls, history and read-only table inspection remain server-authorised. It deliberately does not provide raw database editing or an arbitrary UI/template language.
 
-The tracker includes a scheduled task and an assistant. Without a Workers AI binding the assistant produces an explicitly labelled deterministic demo summary. With a binding named `AI`, it calls a model inside a recorded execution step.
+The tracker includes a scheduled task and an AI SDK assistant. Without a selected model it produces an explicitly labelled deterministic demo summary. With `WORKCORE_AGENT_MODEL` and provider credentials it uses tracked multi-turn calls, checked tools and optional cross-provider fallback. See [AI SDK agents](./ai).
 
 ## Read next
 

@@ -9,6 +9,7 @@ export type Result = { data: Json; revision: number };
 export type Commit = { revision: number; changed: Set<string> };
 
 export class Engine {
+  private readonly controllers = new Map<string, AbortController>();
   onCommit: (commit: Commit) => void = () => {};
   constructor(readonly storage: Storage, readonly definition: Definition, readonly env: unknown) {
     for (const name of Object.keys(definition.views)) {
@@ -262,6 +263,7 @@ export class Engine {
       }
       this.history(db, actor, `${resource}:${action}`);
     });
+    if (resource === 'run' && action === 'cancel') this.controllers.get(id)?.abort();
   }
   nextDue(): number | null {
     const values = [
@@ -304,6 +306,8 @@ export class Engine {
     });
     let steps = 0;
     let active = true;
+    const controller = new AbortController();
+    this.controllers.set(run.id, controller);
     const current = () => {
       if (!active) throw new WorkcoreError('EXPIRED_CONTEXT', 'Run context is no longer active');
       const saved = getJson<Run>(this.storage.sql, 'wc_runs', run.id)!;
@@ -326,7 +330,16 @@ export class Engine {
       db.changed.add('$runs');
     };
     const context: RunContext<any, unknown> = {
-      actor: run.actor, env: this.env, runId: run.id,
+      actor: run.actor, env: this.env, runId: run.id, signal: controller.signal,
+      progress: value => {
+        current();
+        encode(value, 8192);
+        this.write(db => {
+          const saved = getJson<Run>(this.storage.sql, 'wc_runs', run.id)!;
+          saved.progress = json(value); saved.updatedAt = Date.now();
+          saveRun(this.storage.sql, saved); db.changed.add('$runs');
+        });
+      },
       read: (operation, input) => {
         checkTool(operation);
         const views = Object.values(this.definition.views).some(op => (op as unknown) === operation);
@@ -348,18 +361,20 @@ export class Engine {
       },
       step: async (label, execute) => {
         const sequence = allocateStep();
+        const startedAt = Date.now();
+        label = label.slice(0, 200);
         const recordStep = (data: Json) => {
           if (!active) throw new WorkcoreError('EXPIRED_CONTEXT', 'Run context is no longer active');
           return this.write(db => record(db, sequence, data));
         };
-        recordStep({ kind: 'step', label, status: 'running', at: Date.now() });
+        recordStep({ kind: 'step', label, status: 'running', at: startedAt, startedAt });
         let result;
         try {
           result = await execute();
           encode(result, 32_768);
-          recordStep({ kind: 'step', label: label.slice(0, 200), status: 'completed', at: Date.now(), result: json(result) });
+          recordStep({ kind: 'step', label, status: 'completed', at: Date.now(), startedAt, durationMs: Date.now() - startedAt, result: json(result) });
         } catch (error) {
-          recordStep({ kind: 'step', label, status: 'failed', at: Date.now(), error: error instanceof WorkcoreError ? error.code : 'STEP_FAILED' });
+          recordStep({ kind: 'step', label, status: 'failed', at: Date.now(), startedAt, durationMs: Date.now() - startedAt, error: error instanceof WorkcoreError ? error.code : 'STEP_FAILED' });
           throw error;
         }
         // Cancellation does not rewrite a completed external effect as a failed step.
@@ -373,7 +388,7 @@ export class Engine {
       current();
       run.status = 'completed'; run.result = result; delete run.error;
     } catch (error) {
-      const cancelled = error instanceof WorkcoreError && error.code === 'CANCELLED';
+      const cancelled = controller.signal.aborted || !!getJson<Run>(this.storage.sql, 'wc_runs', run.id)?.cancelRequested || error instanceof WorkcoreError && error.code === 'CANCELLED';
       const terminal = error instanceof z.ZodError || (error instanceof WorkcoreError && ['FORBIDDEN', 'TOOL_DENIED', 'STEP_LIMIT', 'NOT_FOUND', 'UNREGISTERED_OPERATION'].includes(error.code));
       const retry = !cancelled && !terminal && job?.kind === 'task' && run.attempt < Math.min(10, job.maxAttempts ?? 1);
       run.status = cancelled ? 'cancelled' : retry ? 'queued' : 'failed';
@@ -382,7 +397,11 @@ export class Engine {
       console.error(`Run ${run.id} ${run.status}`, error);
     }
     active = false;
+    this.controllers.delete(run.id);
     this.write(db => {
+      const saved = getJson<Run>(this.storage.sql, 'wc_runs', run.id)!;
+      if (saved.progress !== undefined) run.progress = saved.progress;
+      if (saved.cancelRequested) run.cancelRequested = true;
       run.updatedAt = Date.now(); saveRun(this.storage.sql, run); db.changed.add('$runs');
       // Retain the latest 1000 terminal runs and their traces; active runs are never pruned.
       this.storage.sql.exec("DELETE FROM wc_runs WHERE status NOT IN ('queued', 'running') AND rowid NOT IN (SELECT rowid FROM wc_runs WHERE status NOT IN ('queued', 'running') ORDER BY rowid DESC LIMIT 1000)");

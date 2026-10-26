@@ -5,6 +5,7 @@
   import { date, readPath, text } from './data.js';
   import { sessionKey, type SessionStore } from './session.js';
   import Markdown from './Markdown.svelte';
+  import AgentProgress from './AgentProgress.svelte';
   let { block, data }: { block: ManifestBlock; data: Json } = $props();
   const session = getContext<SessionStore>(sessionKey);
   let prompt = $state('');
@@ -48,6 +49,7 @@
   {/each}
 </div>
 {#if runId && $session}
+  {#if run.data && typeof run.data === 'object' && !Array.isArray(run.data) && run.data.progress}<AgentProgress value={run.data.progress} status={run.data.status} />{/if}
   <div class="chat-execution" role="status"><span class:working={running}>{run.data && typeof run.data === 'object' && !Array.isArray(run.data) ? text(run.data.status) : 'Checking execution…'}</span><a href={`/admin/${$session.workspace}/runs/${runId}`}>Inspect run →</a></div>
   {#if run.data && typeof run.data === 'object' && !Array.isArray(run.data) && run.data.error}<p class="error">{text(run.data.error)}</p>{/if}
 {/if}

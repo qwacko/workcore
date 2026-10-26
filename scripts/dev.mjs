@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { devArgs, readEnvironment } from './dev-config.mjs';
+import { createWorkerEnvFile } from './worker-env.mjs';
 
 const require = createRequire(import.meta.url);
 const example = new URL('../examples/tracker/', import.meta.url);
@@ -13,6 +14,8 @@ const args = devArgs(environment);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const built = spawnSync('pnpm', ['--filter', '@workcore/admin', 'build'], { cwd: root, env: environment, stdio: 'inherit' });
 if (built.status !== 0) process.exit(built.status ?? 1);
+const workerEnv = createWorkerEnvFile(environment, fileURLToPath(example));
+process.once('exit', () => workerEnv.dispose());
 
 const backendPort = await new Promise((resolvePort, reject) => {
   const server = createServer();
@@ -26,7 +29,11 @@ const host = args[args.indexOf('--ip') + 1];
 const port = args[args.indexOf('--port') + 1];
 args[args.indexOf('--ip') + 1] = '127.0.0.1';
 args[args.indexOf('--port') + 1] = String(backendPort);
-const backend = spawn(process.execPath, [wrangler, ...args, ...process.argv.slice(2)], { cwd: fileURLToPath(example), env: environment, stdio: 'inherit' });
+const backend = spawn(process.execPath, [wrangler, ...args, '--env-file', workerEnv.path, ...process.argv.slice(2)], {
+  cwd: fileURLToPath(example),
+  env: { ...environment, CLOUDFLARE_INCLUDE_PROCESS_ENV: 'false', CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: 'true' },
+  stdio: 'inherit',
+});
 const frontend = spawn('pnpm', ['--filter', '@workcore/admin', 'dev'], {
   cwd: root, env: { ...environment, HOST: host, PORT: port, WORKCORE_API_ORIGIN: `http://127.0.0.1:${backendPort}` }, stdio: 'inherit',
 });

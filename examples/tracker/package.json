@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@workcore/ai": "workspace:*",
     "@workcore/core": "workspace:*",
     "@workcore/client": "workspace:*",
     "@workcore/admin": "workspace:*",

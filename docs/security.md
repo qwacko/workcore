@@ -44,7 +44,7 @@ This is an initial implementation. Before production use, account for:
 - External effects that can be repeated or have uncertain outcomes.
 - No offline writes, cross-workspace transactions, arbitrary query language, range/full-text indexes or alternate ordering helpers.
 - No durable outbound webhook/email delivery service, managed attachment storage, export/import or configurable retention policies.
-- No agent approval/resume protocol, model-provider abstraction, token stream, enforced monetary budget or conversation persistence API.
+- No agent approval/resume protocol, token stream, enforced monetary budget or conversation persistence API. The optional AI SDK integration supports provider profiles and checked tools; external tools remain trusted application code responsible for their own permissions and outbound access policy.
 - No built-in membership provisioning, invitations or production authentication package.
 
 Use provider bindings for secrets. Explicit step results and run inputs/outputs may be sensitive; apply appropriate access, retention and model-provider policies.

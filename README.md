@@ -27,7 +27,9 @@ Open the local URL printed by Wrangler (normally <http://localhost:8787>). Choos
 
 The overview, tasks, assistant and data pages are declared by the backend, not hardcoded into the frontend. Table/list/JSON modes, local filters and server scope are explicit and URL-backed. See [Admin authoring](docs/admin.md).
 
-The example uses a deterministic assistant by default. Add a Workers AI binding named `AI` to use its model-backed summariser. No paid model call is needed to run the demo or tests.
+The example uses a deterministic assistant when no model is selected. Set `WORKCORE_AGENT_MODEL=openrouter/anthropic/claude-sonnet-4.5` and `OPENROUTER_API_KEY` to use AI SDK; optionally set `WORKCORE_AGENT_FALLBACK_MODEL` to a backup from any supported provider. `WORKCORE_AI_MODE=demo` forces offline responses. No paid model call is needed for tests. See [AI SDK agents](docs/ai.md).
+
+Put model settings and keys in root `.env` or `examples/tracker/.env` (example settings override root settings; exported shell variables win), then restart `pnpm dev`. Use `WORKCORE_AI_MODE=model` to fail explicitly when a primary model is missing. OpenRouter selections must start with `openrouter/` **before** the upstream model ID, for example `openrouter/anthropic/claude-sonnet-4.5`, not just `anthropic/claude-sonnet-4.5`. A configured model/key failure is shown as a failed run, never a demo answer.
 
 **Demo authentication requires the explicit local Wrangler environment and an allowed hostname. Default deployments return 503 until real authentication is installed.**
 
@@ -44,6 +46,8 @@ DEMO_ALLOWED_HOSTS=workcore.dev.jmcdowall.com
 The listener address is also allowed for direct access. Additional demo hostnames are comma-separated exact names, without schemes or ports. The proxy must preserve the browser-facing host and scheme and forward WebSocket upgrades. Do not expose the demo without proxy access controls: anyone reaching it can select the admin identity.
 
 `pnpm dev` builds the deployable console once, then runs SvelteKit with hot module replacement on this public address and proxies API, login and WebSocket requests to Wrangler on an internal loopback port. Production uses only Worker static assets; no SvelteKit server is deployed. `/workspace` redirects to `/admin/demo`, and admin deep links survive refresh.
+
+The launcher forwards only the example's selected agent settings/keys to Wrangler using an owner-only temporary bindings file, cleaned up on exit. Credentials are not passed as command-line variables and unrelated shell secrets are not copied into Worker bindings. Restart the launcher after editing environment settings. For deployment, configure non-secret model settings in Wrangler and use `wrangler secret put` for provider keys; the example still requires real authentication before public deployment.
 
 ## The model
 
@@ -111,6 +115,7 @@ await tasks.whenRevision(result.revision);
 | `packages/core` | Zod definitions, SQLite records, transactional runtime, runs/schedules, Cloudflare host |
 | `packages/client` | Browser-safe inferred API, WebSocket subscriptions, reconnect and revision tracking |
 | `packages/admin` | SvelteKit SPA, generated forms, semantic pages and operational inspection; compiled to Worker static assets |
+| `packages/ai` | Optional AI SDK integration, model profiles, safe fallback and checked agent tools |
 | `examples/tracker` | Executable Cloudflare application, private/shared data, scheduling and an optional AI agent |
 | `tests` | Real Workers/SQLite integration tests and compile-time API checks |
 
@@ -137,6 +142,7 @@ pnpm docs:dev
 - [Architecture](docs/architecture.md)
 - [Authoring and migrations](docs/authoring.md)
 - [Admin metadata, pages and actions](docs/admin.md)
+- [AI SDK agents, model profiles and fallback](docs/ai.md)
 - [Live views and large datasets](docs/sync.md)
 - [Tasks, schedules and agents](docs/execution.md)
 - [Security and actual limits](docs/security.md)

@@ -39,6 +39,9 @@ export type RunContext<T extends Tables, E> = {
   actor: Actor;
   env: E;
   runId: string;
+  signal: AbortSignal;
+  /** Persist JSON-safe progress without consuming a step. Do not include credentials. */
+  progress(value: Json): void;
   read<I extends z.ZodType, O extends z.ZodType>(operation: Operation<I, O>, input: z.input<I>): z.output<O>;
   mutate<I extends z.ZodType, O extends z.ZodType>(operation: Operation<I, O>, input: z.input<I>): z.output<O>;
   step<R extends Json>(label: string, execute: () => Promise<R>): Promise<R>;

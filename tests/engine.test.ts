@@ -34,6 +34,24 @@ async function withEngine(callback: (engine: Engine, state: DurableObjectState) 
 }
 
 describe('workspace storage and execution', () => {
+  it('aborts an active call on cancellation and preserves persisted progress', async () => {
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => entered = resolve);
+    const agent = app.agent({ input: empty, output: z.null(), tools: [], handler: async ctx => {
+      ctx.progress({ phase: 'model', turn: 2 });
+      entered();
+      await new Promise<void>((_resolve, reject) => ctx.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+      return null;
+    } });
+    await withEngine(async engine => {
+      const id = engine.enqueue(alice, 'agent', {}, 'signal-cancel').data as string;
+      const pending = engine.executeNext();
+      await started;
+      engine.control(alice, 'run', id, 'cancel');
+      await pending;
+      expect(engine.inspect(alice, `run:${id}`)).toMatchObject({ status: 'cancelled', cancelRequested: true, progress: { phase: 'model', turn: 2 } });
+    }, definition({ jobs: { agent } }));
+  });
   it('persists JSON rows, indexed pages and complete live views', async () => {
     await withEngine(engine => {
       engine.mutate(alice, 'add', { id: 'a', title: 'First' }, 'one');

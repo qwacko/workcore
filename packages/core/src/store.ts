@@ -24,6 +24,7 @@ export type Run = {
   error?: string;
   cancelRequested?: boolean;
   scheduleId?: string;
+  progress?: Json;
 };
 export type Schedule = {
   id: string;

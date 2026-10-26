@@ -5,6 +5,7 @@
   import type { LiveState } from '@workcore/client';
   import { sessionKey, type SessionStore } from '../../../../lib/session.js';
   import { date, duration, label, text } from '../../../../lib/data.js';
+  import AgentProgress from '../../../../lib/AgentProgress.svelte';
   const session = getContext<SessionStore>(sessionKey);
   let runState = $state<LiveState<Json>>({ status: 'loading', revision: 0 });
   let steps = $state<Record<string, Json>[]>([]);
@@ -41,6 +42,7 @@
 {#if runState.error}<p class="notice error" role="alert">{runState.error.message}</p>{/if}
 {#if error}<p class="error" role="alert">{error}</p>{/if}
 {#if run}
+  {#if run.progress}<AgentProgress value={run.progress} status={run.status} />{/if}
   {#if run.status === 'interrupted'}<div class="notice warning"><strong>Execution was interrupted.</strong> Inspect external effects before retrying. This runtime does not automatically resume an agent loop.</div>{/if}
   <section class="panel"><dl class="record-fields"><div><dt>Started by</dt><dd>{text((run.actor as { id: string })?.id)}</dd></div><div><dt>Created</dt><dd>{date(run.createdAt)}</dd></div><div><dt>Last update</dt><dd>{date(run.updatedAt)}</dd></div><div><dt>Elapsed</dt><dd>{duration(run.createdAt, run.updatedAt)}</dd></div><div><dt>Attempt</dt><dd>{text(run.attempt)}</dd></div>{#if run.scheduleId}<div><dt>Schedule</dt><dd><a href={`${root}/resources/schedules`}>{text(run.scheduleId)}</a></dd></div>{/if}</dl>
     {#if run.error}<p class="error">{text(run.error)}</p>{/if}
