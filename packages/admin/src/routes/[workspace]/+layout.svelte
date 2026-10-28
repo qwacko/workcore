@@ -46,6 +46,10 @@
         <a aria-label="Tables" href={`${root}/resources/tables`} class:active={page.url.pathname.endsWith('/tables')}><span aria-hidden="true">▤</span> <span>Tables</span></a>
         <a aria-label="History" href={`${root}/resources/history`} class:active={page.url.pathname.endsWith('/history')}><span aria-hidden="true">≡</span> <span>History</span></a>
       {/if}
+      {#if $session?.manifest.files.enabled && $session.manifest.files.list}
+        <div class="nav-label">Storage</div>
+        <a aria-label="Files" href={`${root}/resources/files`} class:active={page.url.pathname.endsWith('/files')}><span aria-hidden="true">▧</span> <span>Files</span></a>
+      {/if}
       <div class="nav-label">Operation explorer</div>
       {#each ['view', 'query', 'mutation', 'job'] as kind}
         <details class="nav-group"><summary>{{ view: 'Live views', query: 'Queries', mutation: 'Mutations', job: 'Tasks & agents' }[kind]}</summary>

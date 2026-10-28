@@ -10,6 +10,12 @@ export type Table = {
   indexes: Record<string, string>;
 };
 export type Tables = Record<string, Table>;
+export type FileBucket = {
+  put(key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
+  head(key: string): Promise<{ size: number } | null>;
+  get(key: string): Promise<{ body: ReadableStream; size: number } | null>;
+  delete(key: string): Promise<void>;
+};
 export type Row<T> = { id: string; revision: number; schemaVersion: number; data: T };
 export type Page<T> = { rows: Row<T>[]; nextCursor: string | null };
 export type PageInput = { limit?: number; after?: string; index?: { name: string; value: string | number | boolean | null } };
@@ -74,6 +80,8 @@ export type Definition<T extends Tables = Tables, V extends Record<string, View>
   authorize: (ctx: ReadContext<T>, action: string) => boolean;
   initialize?: (db: Writer<T>) => void;
   admin?: AdminDefinition;
+  /** Optional, explicit R2-backed file capability contributed by a package. */
+  files?: { table: string; bucket: (env: unknown) => FileBucket; maxSize: number };
 };
 
 /** The map key in migrations is the version being migrated TO. */

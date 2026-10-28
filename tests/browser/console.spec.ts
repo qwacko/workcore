@@ -23,6 +23,26 @@ test('run inspection explains structured tool completion without a fabricated an
   await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'Result', exact: true }) })).toContainText('report-1');
 });
 
+test('file administration uploads, downloads and deletes R2-backed files', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.getByRole('link', { name: 'Files', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
+  await page.getByLabel('Upload a file').setInputFiles({ name: 'admin-note.txt', mimeType: 'text/plain', buffer: Buffer.from('stored in R2') });
+  const fileRow = page.getByRole('row').filter({ hasText: 'admin-note.txt' });
+  await expect(fileRow).toContainText('ready');
+  await expect(fileRow).toContainText('alice');
+  const download = page.waitForEvent('download');
+  await fileRow.getByRole('button', { name: 'Download' }).click();
+  expect((await download).suggestedFilename()).toBe('admin-note.txt');
+  page.once('dialog', dialog => dialog.accept());
+  await fileRow.getByRole('button', { name: 'Delete' }).click();
+  await expect(page.getByText('No files found')).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test('guided pages, generated forms, row actions, local filters and deep links', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));

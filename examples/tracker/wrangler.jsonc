@@ -4,6 +4,7 @@
   "main": "src/worker.ts",
   "compatibility_date": "2026-10-01",
   "assets": { "directory": "../../packages/admin/build", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "single-page-application" },
+  "r2_buckets": [{ "binding": "FILES_BUCKET", "bucket_name": "workcore-files" }],
   "durable_objects": {
     "bindings": [{ "name": "WORKSPACES", "class_name": "TrackerWorkspace" }]
   },
@@ -12,6 +13,7 @@
   "env": {
     "local": {
       "vars": { "DEMO_MODE": "true" },
+      "r2_buckets": [{ "binding": "FILES_BUCKET", "bucket_name": "workcore-files-local" }],
       "durable_objects": {
         "bindings": [{ "name": "WORKSPACES", "class_name": "TrackerWorkspace" }]
       }

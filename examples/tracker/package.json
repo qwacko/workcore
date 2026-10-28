@@ -12,6 +12,7 @@
     "@workcore/ai": "workspace:*",
     "@workcore/core": "workspace:*",
     "@workcore/client": "workspace:*",
+    "@workcore/files": "workspace:*",
     "@workcore/admin": "workspace:*",
     "zod": "^4.6.7"
   }

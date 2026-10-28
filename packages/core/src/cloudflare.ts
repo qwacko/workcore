@@ -104,6 +104,8 @@ export class Workspace<E = unknown> extends DurableObject<E> {
       const session = z.object({ actor: z.object({ id: z.string().min(1).max(200) }), expiresAt: z.number().finite() }).parse(JSON.parse(decodeURIComponent(request.headers.get('x-workcore-session') ?? '')));
       this.valid(session);
       const path = new URL(request.url).pathname;
+      const fileRoute = /^\/files(?:\/([a-f0-9-]{36}))?$/.exec(path);
+      if (fileRoute) return await this.fileRequest(request, session, fileRoute[1]);
       if (path === '/live' && request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
         // A workspace action must be permitted before opening a connection.
         if (!this.engine.can(session.actor, '$connect')) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
@@ -142,6 +144,63 @@ export class Workspace<E = unknown> extends DurableObject<E> {
       return Response.json(result, { headers: { 'cache-control': 'no-store' } });
     } catch (error) { return errorResponse(error); }
   }
+  private async fileRequest(request: Request, session: Session, id?: string): Promise<Response> {
+    const files = this.engine.definition.files;
+    if (!files) throw new WorkcoreError('FILES_DISABLED', 'File storage is not configured', 404);
+    const bucket = files.bucket(this.env);
+    if (request.method === 'POST' && !id) {
+      if (!request.body) throw new WorkcoreError('INVALID_BODY', 'Expected a file body');
+      const size = Number(request.headers.get('content-length'));
+      if (!Number.isSafeInteger(size) || size < 0 || size > files.maxSize) throw new WorkcoreError('FILE_TOO_LARGE', 'A valid Content-Length within the file size limit is required', 413);
+      await this.arm();
+      const created = this.engine.createFile(session.actor, {
+        filename: request.headers.get('x-file-name') ?? 'file',
+        contentType: request.headers.get('content-type') ?? 'application/octet-stream',
+        size,
+      });
+      try {
+        await bucket.put(`workcore/files/${created.id}`, request.body, {
+          httpMetadata: { contentType: request.headers.get('content-type') ?? 'application/octet-stream' },
+        });
+        const object = await bucket.head(`workcore/files/${created.id}`);
+        if (!object || object.size !== size || object.size > files.maxSize) throw new WorkcoreError('UPLOAD_VERIFY_FAILED', 'Stored file size did not match the upload or configured limit', 502);
+        this.engine.finishFileUpload(session.actor, created.id, size);
+        return Response.json({ id: created.id, status: 'ready' }, { status: 201, headers: { 'cache-control': 'no-store' } });
+      } catch (error) {
+        throw error;
+      }
+    }
+    if (request.method === 'GET' && !id) {
+      const cursor = new URL(request.url).searchParams.get('after') ?? '';
+      return Response.json(this.engine.listFiles(session.actor, cursor), { headers: { 'cache-control': 'no-store' } });
+    }
+    if (!id) throw new WorkcoreError('METHOD_NOT_ALLOWED', 'Use GET or POST for the file collection', 405);
+    if (request.method === 'GET') {
+      const row = this.engine.getFile(session.actor, id);
+      const object = await bucket.get(`workcore/files/${id}`);
+      if (!object) throw new WorkcoreError('FILE_NOT_FOUND', 'Stored file is unavailable', 404);
+      const headers = new Headers({
+        'content-type': String(row.data.contentType),
+        'content-length': String(object.size),
+        'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(String(row.data.filename))}`,
+        'cache-control': 'private, no-store',
+        'x-content-type-options': 'nosniff',
+      });
+      return new Response(object.body, { headers });
+    }
+    if (request.method === 'DELETE') {
+      await this.arm();
+      this.engine.beginFileDelete(session.actor, id);
+      try {
+        await bucket.delete(`workcore/files/${id}`);
+        this.engine.finishFileDelete(session.actor, id);
+        return new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } });
+      } catch (error) {
+        throw error;
+      }
+    }
+    throw new WorkcoreError('METHOD_NOT_ALLOWED', 'Use GET or DELETE for a file', 405);
+  }
   webSocketMessage(socket: WebSocket, data: string | ArrayBuffer): void {
     try {
       const attachment = socket.deserializeAttachment() as Attachment;
@@ -174,11 +233,23 @@ export class Workspace<E = unknown> extends DurableObject<E> {
     try {
       // Durable watchdog remains if execution is interrupted before rearm.
       await this.ctx.storage.setAlarm(Date.now() + 60_000);
+      await this.cleanupFiles();
       for (const socket of this.ctx.getWebSockets()) this.refresh(socket, socket.deserializeAttachment() as Attachment);
       this.engine.dispatchSchedules();
       await this.engine.executeNext();
       await this.rearm();
     } finally { this.executing = false; }
+  }
+  private async cleanupFiles(): Promise<void> {
+    const files = this.engine.definition.files;
+    if (!files) return;
+    const bucket = files.bucket(this.env);
+    for (const candidate of this.engine.fileCleanupCandidates()) {
+      try {
+        await bucket.delete(`workcore/files/${candidate.id}`);
+        this.engine.completeFileCleanup(candidate.id);
+      } catch (error) { console.error('File cleanup will retry', candidate.id, error); }
+    }
   }
 }
 
@@ -193,8 +264,8 @@ export async function routeWorkspace(request: Request, options: {
     const prefix = options.prefix ?? '/api/workspaces/';
     if (!url.pathname.startsWith(prefix)) throw new WorkcoreError('NOT_FOUND', 'Unknown route', 404);
     const parts = url.pathname.slice(prefix.length).split('/');
-    const [workspaceId, endpoint] = parts;
-    if (parts.length !== 2 || !workspaceId || !/^[a-zA-Z0-9_-]{1,100}$/.test(workspaceId) || !endpoint) throw new WorkcoreError('NOT_FOUND', 'Unknown route', 404);
+    const [workspaceId, endpoint, ...tail] = parts;
+    if (!workspaceId || !/^[a-zA-Z0-9_-]{1,100}$/.test(workspaceId) || !endpoint || tail.length > 1 || endpoint !== 'files' && tail.length) throw new WorkcoreError('NOT_FOUND', 'Unknown route', 404);
     if (request.headers.has('origin') && request.headers.get('origin') !== url.origin) throw new WorkcoreError('ORIGIN_DENIED', 'Same-origin requests only', 403);
     const session = await options.authenticate(request);
     if (!session || !session.actor.id || session.expiresAt <= Date.now()) throw new WorkcoreError('UNAUTHENTICATED', 'Sign in first', 401);
@@ -202,7 +273,7 @@ export async function routeWorkspace(request: Request, options: {
     // Only an identity and expiry cross this trusted boundary, never a permission snapshot.
     headers.set('x-workcore-session', encodeURIComponent(encode({ actor: { id: session.actor.id }, expiresAt: Math.min(session.expiresAt, Date.now() + 3_600_000) })));
     const target = new URL(request.url);
-    target.pathname = `/${endpoint}`;
+    target.pathname = `/${endpoint}${tail.length ? `/${tail[0]}` : ''}`;
     const forwarded = new Request(target, { method: request.method, headers, body: request.body, redirect: 'manual' });
     return await options.namespace.get(options.namespace.idFromName(workspaceId)).fetch(forwarded);
   } catch (error) { return errorResponse(error); }

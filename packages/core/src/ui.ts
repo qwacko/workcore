@@ -141,6 +141,7 @@ const operationSchema = z.object({ input: schemaSchema, output: schemaSchema, ui
 }).optional() });
 export const manifestSchema = z.object({
   protocol: z.literal(2), actor: z.object({ id: z.string() }), admin: z.boolean(), runs: z.boolean(),
+  files: z.object({ enabled: z.boolean(), upload: z.boolean(), list: z.boolean(), download: z.boolean(), delete: z.boolean() }),
   view: z.record(z.string(), operationSchema), query: z.record(z.string(), operationSchema),
   mutation: z.record(z.string(), operationSchema), job: z.record(z.string(), operationSchema),
   ui: z.object({ title: z.string(), description: z.string(), pages: z.record(z.string(), z.object({ title: z.string(), description: z.string().optional(), blocks: z.array(blockSchema) })) }),

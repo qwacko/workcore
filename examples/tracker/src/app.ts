@@ -2,9 +2,10 @@ import { field, table, ui, workspace, WorkcoreError } from '@workcore/core';
 import type { ReadContext } from '@workcore/core';
 import { z } from 'zod';
 import { createAI, modelSpec, operationTool, terminatingTool } from '@workcore/ai';
+import { fileStorage, fileTable } from '@workcore/files';
 
 export type Env = {
-  WORKSPACES: DurableObjectNamespace; ASSETS: Fetcher; DEMO_MODE: string; DEMO_ALLOWED_HOSTS?: string;
+  WORKSPACES: DurableObjectNamespace; ASSETS: Fetcher; FILES_BUCKET: R2Bucket; DEMO_MODE: string; DEMO_ALLOWED_HOSTS?: string;
   WORKCORE_AGENT_MODEL?: string; WORKCORE_AGENT_FALLBACK_MODEL?: string; WORKCORE_AI_MODE?: string;
   OPENROUTER_API_KEY?: string; OPENAI_API_KEY?: string; ANTHROPIC_API_KEY?: string; OPENCODE_API_KEY?: string;
 };
@@ -22,6 +23,7 @@ const tables = {
   members: table(z.object({ name: z.string(), role: z.enum(['member', 'admin']) })),
   tasks: table(taskSchema, { indexes: { owner: 'ownerId', project: 'projectId' } }),
   messages: table(z.object({ ownerId: z.string(), role: z.enum(['user', 'assistant']), content: z.string().max(20_000), at: z.number() }), { indexes: { owner: 'ownerId' } }),
+  files: fileTable,
 };
 const app = workspace<typeof tables, Env>(tables);
 const empty = z.object({});
@@ -206,6 +208,7 @@ const taskList = ui.collection(tasks, ({ form, command }) => ({
 }));
 
 export const tracker = app.define({
+  files: fileStorage<Env>({ bucket: env => env.FILES_BUCKET, maxSize: 25 * 1024 * 1024 }),
   views: { tasks, summary, assistantSummary, conversation },
   queries: { myTaskPage, guide },
   mutations: { createTask, editTask, completeTask, saveSummary, saveReply, scheduleCompletion, sendMessage },

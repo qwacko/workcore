@@ -48,6 +48,14 @@ export function createClient<A extends Definition>(options: { baseUrl: string; f
     if (!response.ok) throw new ClientError(payload.error?.code ?? 'HTTP_ERROR', payload.error?.message ?? response.statusText, response.status);
     return payload;
   }
+  async function fileRequest(path: string, init: RequestInit = {}): Promise<Response> {
+    const response = await request(`${base}/files${path}`, { ...init, credentials: 'same-origin', cache: 'no-store' });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as { error?: { code?: string; message?: string } };
+      throw new ClientError(payload.error?.code ?? 'HTTP_ERROR', payload.error?.message ?? response.statusText, response.status);
+    }
+    return response;
+  }
   function connect(): void {
     if (closed || !entries.size || socket || reconnectTimer) return;
     const url = new URL(`${base}/live`, globalThis.location?.href);
@@ -159,6 +167,16 @@ export function createClient<A extends Definition>(options: { baseUrl: string; f
     inspect(resource: string, after?: string): Promise<Json> { return post('inspect', { resource, ...(after === undefined ? {} : { after }) }); },
     trace(runId: string, after = 0): Promise<Json> { return post('trace', { runId, after }); },
     control(resource: 'run' | 'schedule', id: string, action: 'retry' | 'cancel' | 'enable' | 'disable'): Promise<{ revision: number }> { return post('control', { resource, id, action }); },
+    files: {
+      list(after?: string) { return fileRequest(after ? `?after=${encodeURIComponent(after)}` : '').then(response => response.json() as Promise<{ rows: { id: string; revision: number; schemaVersion: number; data: { ownerId: string; filename: string; contentType: string; size: number; status: string; createdAt: number; uploadedAt: number | null } }[]; nextCursor: string | null }>); },
+      async upload(file: Blob & { name?: string }, options: { signal?: AbortSignal } = {}) {
+        const headers = new Headers({ 'content-type': file.type || 'application/octet-stream', 'x-file-name': file.name || 'file' });
+        const response = await fileRequest('', { method: 'POST', headers, body: file, signal: options.signal });
+        return response.json() as Promise<{ id: string; status: 'ready' }>;
+      },
+      async download(id: string) { return (await fileRequest(`/${encodeURIComponent(id)}`)).blob(); },
+      async remove(id: string) { await fileRequest(`/${encodeURIComponent(id)}`, { method: 'DELETE' }); },
+    },
     close() {
       closed = true;
       for (const entry of entries.values()) {

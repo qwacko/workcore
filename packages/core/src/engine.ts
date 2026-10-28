@@ -82,6 +82,90 @@ export class Engine {
   private authorize(db: Store<any>, actor: Actor, action: string): void {
     if (!this.allowed(db, actor, action)) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
   }
+  private fileConfig() {
+    const files = this.definition.files;
+    if (!files || !Object.hasOwn(this.definition.tables, files.table)) throw new WorkcoreError('FILES_DISABLED', 'File storage is not configured', 404);
+    return files;
+  }
+  private fileRow(db: Store<any>, id: string): any {
+    const row = db.get(this.fileConfig().table, id);
+    if (!row) throw new WorkcoreError('NOT_FOUND', 'File not found', 404);
+    return row;
+  }
+  private canAccessFile(db: Store<any>, actor: Actor, row: any): void {
+    if (row.data.ownerId !== actor.id && !this.allowed(db, actor, '$admin')) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
+  }
+  createFile(actor: Actor, input: { filename: string; contentType: string; size: number }): { id: string; status: string } {
+    return this.write(db => {
+      this.authorize(db, actor, 'file:upload');
+      const files = this.fileConfig();
+      if (!Number.isSafeInteger(input.size) || input.size < 0 || input.size > files.maxSize) throw new WorkcoreError('FILE_TOO_LARGE', 'File size is outside the configured limit', 413);
+      const id = crypto.randomUUID();
+      const filename = input.filename.normalize('NFC').replace(/[\/\0-\x1f\x7f]/g, '_').slice(0, 255) || 'file';
+      const contentType = /^[\w.+-]+\/[\w.+-]+$/.test(input.contentType) ? input.contentType.slice(0, 255) : 'application/octet-stream';
+      db.put(files.table, id, { ownerId: actor.id, filename, contentType, size: input.size, status: 'pending', createdAt: Date.now(), uploadedAt: null });
+      return { id, status: 'pending' };
+    });
+  }
+  finishFileUpload(actor: Actor, id: string, size: number): void {
+    this.write(db => {
+      this.authorize(db, actor, 'file:upload');
+      const row = this.fileRow(db, id);
+      if (row.data.ownerId !== actor.id || row.data.status !== 'pending' || row.data.size !== size) throw new WorkcoreError('INVALID_FILE_STATE', 'Upload cannot be finalized', 409);
+      db.put(this.fileConfig().table, id, { ...row.data, status: 'ready', uploadedAt: Date.now() }, { expectedRevision: row.revision });
+    });
+  }
+  getFile(actor: Actor, id: string): any {
+    return this.read(db => {
+      this.authorize(db, actor, 'file:download');
+      const row = this.fileRow(db, id);
+      this.canAccessFile(db, actor, row);
+      if (row.data.status !== 'ready') throw new WorkcoreError('FILE_NOT_READY', 'File is not available', 404);
+      return row;
+    });
+  }
+  listFiles(actor: Actor, after = ''): { rows: unknown[]; nextCursor: string | null } {
+    return this.read(db => {
+      this.authorize(db, actor, 'file:list');
+      const admin = this.allowed(db, actor, '$admin');
+      return db.page(this.fileConfig().table, { limit: 100, after, ...(!admin ? { index: { name: 'owner', value: actor.id } } : {}) });
+    });
+  }
+  beginFileDelete(actor: Actor, id: string): any {
+    return this.write(db => {
+      this.authorize(db, actor, 'file:delete');
+      const row = this.fileRow(db, id);
+      this.canAccessFile(db, actor, row);
+      if (row.data.status !== 'deleting') db.put(this.fileConfig().table, id, { ...row.data, status: 'deleting' }, { expectedRevision: row.revision });
+      return row;
+    });
+  }
+  finishFileDelete(actor: Actor, id: string): void {
+    this.write(db => {
+      this.authorize(db, actor, 'file:delete');
+      const row = this.fileRow(db, id);
+      this.canAccessFile(db, actor, row);
+      if (row.data.status !== 'deleting') throw new WorkcoreError('INVALID_FILE_STATE', 'File deletion is not pending', 409);
+      db.delete(this.fileConfig().table, id, { expectedRevision: row.revision });
+    });
+  }
+  fileCleanupCandidates(now = Date.now()): { id: string; ownerId: string; status: string; createdAt: number }[] {
+    const table = this.definition.files?.table;
+    if (!table) return [];
+    return this.read(db => db.page(table, { limit: 1000 }).rows
+      .filter(row => row.data.status === 'deleting' || row.data.status === 'pending' && Number(row.data.createdAt) < now - 86_400_000)
+      .map(row => ({ id: row.id, ownerId: String(row.data.ownerId), status: String(row.data.status), createdAt: Number(row.data.createdAt) })));
+  }
+  completeFileCleanup(id: string): void {
+    this.write(db => {
+      const table = this.definition.files?.table;
+      if (!table) return;
+      const row = db.get(table, id);
+      if (row && (row.data.status === 'deleting' || row.data.status === 'pending' && Number(row.data.createdAt) < Date.now() - 86_400_000)) {
+        db.delete(table, id, { expectedRevision: row.revision });
+      }
+    });
+  }
   can(actor: Actor, action: string): boolean { return this.read(db => this.allowed(db, actor, action)); }
   private lookup<T>(map: Record<string, T>, name: string): T {
     if (!Object.hasOwn(map, name)) throw new WorkcoreError('NOT_FOUND', 'Unknown operation', 404);
@@ -188,7 +272,13 @@ export class Engine {
   }
   manifest(actor: Actor): Json {
     return this.read(db => {
-      const manifest: Record<string, Json> = { protocol: 2, actor: { id: actor.id }, admin: this.allowed(db, actor, '$admin'), runs: this.allowed(db, actor, '$runs') };
+      const manifest: Record<string, Json> = { protocol: 2, actor: { id: actor.id }, admin: this.allowed(db, actor, '$admin'), runs: this.allowed(db, actor, '$runs'), files: {
+        enabled: !!this.definition.files,
+        upload: !!this.definition.files && this.allowed(db, actor, 'file:upload'),
+        list: !!this.definition.files && this.allowed(db, actor, 'file:list'),
+        download: !!this.definition.files && this.allowed(db, actor, 'file:download'),
+        delete: !!this.definition.files && this.allowed(db, actor, 'file:delete'),
+      } };
       for (const [kind, operations] of Object.entries({ view: this.definition.views, query: this.definition.queries, mutation: this.definition.mutations, job: this.definition.jobs })) {
         manifest[kind] = Object.fromEntries(Object.entries(operations).filter(([name]) => this.allowed(db, actor, `${kind}:${name}`)).map(([name, operation]) => [name, {
           // Zod annotates schema objects with non-enumerable Standard Schema methods.
@@ -270,6 +360,7 @@ export class Engine {
       this.storage.sql.exec<{ due: number | null }>("SELECT min(due) AS due FROM wc_runs WHERE status = 'queued'").toArray()[0]?.due,
       this.storage.sql.exec<{ due: number | null }>('SELECT min(at) AS due FROM wc_schedules WHERE enabled = 1').toArray()[0]?.due,
     ].filter((value): value is number => typeof value === 'number');
+    for (const file of this.fileCleanupCandidates()) values.push(file.status === 'deleting' ? Date.now() + 60_000 : file.createdAt + 86_400_000);
     return values.length ? Math.min(...values) : null;
   }
   dispatchSchedules(now = Date.now()): void {

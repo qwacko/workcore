@@ -58,6 +58,47 @@ describe('Cloudflare Worker and live protocol', () => {
     const other = await (await api(crypto.randomUUID(), 'query', { name: 'tasks', input: {} })).json() as any;
     expect(other.data).toHaveLength(2);
   });
+  it('streams files to R2, scopes metadata and bytes by owner, and deletes both stores', async () => {
+    const workspace = crypto.randomUUID();
+    const response = await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files`, {
+      method: 'POST', headers: { cookie: 'demo_user=alice', origin: 'http://localhost', 'content-type': 'text/plain', 'content-length': '11', 'x-file-name': 'hello.txt' }, body: 'hello world',
+    }), bindings);
+    expect(response.status).toBe(201);
+    const created = await response.json() as { id: string; status: string };
+    expect(created.status).toBe('ready');
+    const listed = await (await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files`, { headers: { cookie: 'demo_user=alice' } }), bindings)).json() as any;
+    expect(listed.rows).toHaveLength(1);
+    expect(listed.rows[0].data).toMatchObject({ filename: 'hello.txt', size: 11, status: 'ready', ownerId: 'alice' });
+    expect(listed.rows[0].data).not.toHaveProperty('objectKey');
+    const bobList = await (await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files`, { headers: { cookie: 'demo_user=bob' } }), bindings)).json() as any;
+    expect(bobList.rows).toHaveLength(0);
+    expect((await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files/${created.id}`, { headers: { cookie: 'demo_user=bob' } }), bindings)).status).toBe(403);
+    expect((await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files/${created.id}`, { method: 'DELETE', headers: { cookie: 'demo_user=bob' } }), bindings)).status).toBe(403);
+    const downloaded = await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files/${created.id}`, { headers: { cookie: 'demo_user=alice' } }), bindings);
+    expect(downloaded.status).toBe(200);
+    expect(await downloaded.text()).toBe('hello world');
+    expect(downloaded.headers.get('content-disposition')).toContain('hello.txt');
+    expect((await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files/${created.id}`, { method: 'DELETE', headers: { cookie: 'demo_user=alice' } }), bindings)).status).toBe(204);
+    expect((await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files/${created.id}`, { headers: { cookie: 'demo_user=alice' } }), bindings)).status).toBe(404);
+  });
+  it('cleans up a pending metadata row and orphaned R2 object after an interrupted upload', async () => {
+    const workspace = crypto.randomUUID();
+    const response = await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files`, {
+      method: 'POST', headers: { cookie: 'demo_user=alice', 'content-type': 'text/plain', 'content-length': '7', 'x-file-name': 'orphan.txt' }, body: 'orphan!',
+    }), bindings);
+    expect(response.status).toBe(201);
+    const { id } = await response.json() as { id: string };
+    const stub = bindings.WORKSPACES.get(bindings.WORKSPACES.idFromName(workspace));
+    await runInDurableObject(stub, (instance: TrackerWorkspace) => {
+      const stored = instance.engine.storage.sql.exec<{ data: string }>('SELECT data FROM wc_records WHERE table_name = ? AND id = ?', 'files', id).toArray()[0]!;
+      const data = JSON.parse(stored.data); data.status = 'pending'; data.createdAt = Date.now() - 86_400_001;
+      instance.engine.storage.sql.exec('UPDATE wc_records SET data = ? WHERE table_name = ? AND id = ?', JSON.stringify(data), 'files', id);
+    });
+    await runDurableObjectAlarm(stub);
+    expect(await bindings.FILES_BUCKET.head(`workcore/files/${id}`)).toBeNull();
+    const page = await (await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files`, { headers: { cookie: 'demo_user=alice' } }), bindings)).json() as any;
+    expect(page.rows).toHaveLength(0);
+  });
   it('sends full snapshots after mutation and after reconnect', async () => {
     const workspace = crypto.randomUUID();
     const connection = await socket(workspace, 'bob');

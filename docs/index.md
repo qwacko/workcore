@@ -21,6 +21,7 @@ The tracker includes a scheduled task and an AI SDK assistant. Without a selecte
 - [Authoring](./authoring): tables, mutations, queries, migrations and the typed client.
 - [Admin authoring](./admin): typed field hints, semantic pages, actions and client state.
 - [Sync](./sync): bounded live views, personalised results and larger datasets.
+- [File storage](./files): optional R2-backed files, metadata and lifecycle.
 - [Execution](./execution): tasks, schedules, agent tools and interruption.
 - [Security](./security): authentication, authorisation, limits and unsupported features.
 
