@@ -6,7 +6,8 @@ import { APICallError } from 'ai';
 import { z } from 'zod';
 import { createAI, externalTool, modelSpec, operationTool, resolveModel, terminatingTool } from '../packages/ai/src/index.js';
 import type { ModelProfile } from '../packages/ai/src/index.js';
-import { table, workspace } from '../packages/core/src/index.js';
+import { defineSchema, workspace } from '../packages/core/src/index.js';
+import { sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import type { Json } from '../packages/core/src/index.js';
 import { Engine } from '../packages/core/src/engine.js';
 import type { Run } from '../packages/core/src/store.js';
@@ -24,9 +25,17 @@ function context() {
   const controller = new AbortController();
   return { env: {}, signal: controller.signal, controller, progress: vi.fn(), step: async <R extends Json>(_label: string, execute: () => Promise<R>) => execute() };
 }
-const app = workspace({ notes: table(z.object({ title: z.string() })) });
+const notes = sqliteTable('ai_notes', { id: text('id').primaryKey(), title: text('title').notNull() });
+const app = workspace(defineSchema({ notes }), { journal: { entries: [{ idx: 0, when: 1, tag: '0000_ai', breakpoints: true }] }, migrations: { m0000: [
+  'CREATE TABLE `wc_meta` (`key` text PRIMARY KEY NOT NULL, `value` text NOT NULL);', 'CREATE TABLE `wc_kv` (`key` text PRIMARY KEY NOT NULL, `value` text NOT NULL);',
+  'CREATE TABLE `wc_runs` (`id` text PRIMARY KEY NOT NULL, `status` text NOT NULL, `due` integer NOT NULL, `data` text NOT NULL);',
+  'CREATE TABLE `wc_schedules` (`id` text PRIMARY KEY NOT NULL, `enabled` integer NOT NULL, `at` integer NOT NULL, `data` text NOT NULL);',
+  'CREATE TABLE `wc_steps` (`run_id` text NOT NULL, `sequence` integer NOT NULL, `data` text NOT NULL, PRIMARY KEY(`run_id`, `sequence`));',
+  'CREATE TABLE `wc_history` (`id` text PRIMARY KEY NOT NULL, `data` text NOT NULL);', 'CREATE TABLE `wc_requests` (`id` text PRIMARY KEY NOT NULL, `fingerprint` text NOT NULL, `response` text NOT NULL);',
+  'CREATE TABLE `ai_notes` (`id` text PRIMARY KEY NOT NULL, `title` text NOT NULL);',
+].join('\n--> statement-breakpoint\n') } });
 const empty = z.object({});
-const write = app.mutation({ input: z.object({ title: z.string() }), output: z.string(), handler: ({ db }, input) => { db.put('notes', 'one', input); return 'one'; } });
+const write = app.mutation({ input: z.object({ title: z.string() }), output: z.string(), handler: ({ db }, input) => { db.insert(notes).values({ id: 'one', ...input }).run(); return 'one'; } });
 
 describe('AI SDK integration', () => {
   it.each([undefined, 'text-or-tool'] as const)('allows text completion with the default/explicit policy (%s)', async completion => {
@@ -180,7 +189,7 @@ describe('AI SDK integration', () => {
       const id = engine.enqueue({ id: 'alice' }, 'agent', {}, 'terminal').data as string;
       await engine.executeNext();
       expect(engine.inspect({ id: 'alice' }, `run:${id}`)).toMatchObject({ status: 'completed', result: { finishReason: 'tool', text: '', tool: { name: 'write', result: 'one' } }, progress: { completion: { kind: 'tool', tool: 'write' } } });
-      expect(engine.inspect({ id: 'alice' }, 'table:notes')).toMatchObject({ rows: [{ data: { title: 'Created' } }] });
+      expect(engine.inspect({ id: 'alice' }, 'table:ai_notes')).toMatchObject({ rows: [{ title: 'Created' }] });
       expect(model.doGenerateCalls).toHaveLength(1);
     });
   });
@@ -240,7 +249,7 @@ describe('AI SDK integration', () => {
       const id = engine.enqueue({ id: 'alice' }, 'agent', {}, crypto.randomUUID()).data as string;
       await engine.executeNext();
       expect(engine.inspect({ id: 'alice' }, `run:${id}`)).toMatchObject({ status: 'completed', progress: { turn: 2, fallbackAttempts: 1, usage: { totalTokens: 30 } } });
-      expect(engine.inspect({ id: 'alice' }, 'table:notes')).toMatchObject({ rows: [{ revision: expect.any(Number), data: { title: 'Created' } }] });
+      expect(engine.inspect({ id: 'alice' }, 'table:ai_notes')).toMatchObject({ rows: [{ title: 'Created' }] });
       const history = engine.inspect({ id: 'alice' }, 'history') as { rows: { operation: string }[] };
       expect(history.rows.filter(row => row.operation === 'mutation:write')).toHaveLength(1);
       const trace = engine.trace({ id: 'alice' }, id) as { rows: Json[] };
@@ -262,7 +271,7 @@ describe('AI SDK integration', () => {
       const id = engine.enqueue({ id: 'alice' }, 'agent', {}, 'denied').data as string;
       await engine.executeNext();
       expect(engine.inspect({ id: 'alice' }, `run:${id}`)).toMatchObject({ status: 'failed', error: 'TOOL_DENIED' });
-      expect(engine.inspect({ id: 'alice' }, 'table:notes')).toMatchObject({ rows: [] });
+      expect(engine.inspect({ id: 'alice' }, 'table:ai_notes')).toMatchObject({ rows: [] });
     });
   });
   it('enforces turn/token limits before further tool effects', async () => {
@@ -334,7 +343,7 @@ describe('AI SDK integration', () => {
       const id = engine.enqueue({ id: 'alice' }, 'agent', {}, 'authority').data as string;
       await engine.executeNext();
       expect(engine.inspect({ id: 'alice' }, `run:${id}`)).toMatchObject({ status: 'failed', error: 'FORBIDDEN' });
-      expect(engine.inspect({ id: 'alice' }, 'table:notes')).toMatchObject({ rows: [] });
+      expect(engine.inspect({ id: 'alice' }, 'table:ai_notes')).toMatchObject({ rows: [] });
     });
   });
 });

@@ -68,8 +68,8 @@ describe('Cloudflare Worker and live protocol', () => {
     expect(created.status).toBe('ready');
     const listed = await (await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files`, { headers: { cookie: 'demo_user=alice' } }), bindings)).json() as any;
     expect(listed.rows).toHaveLength(1);
-    expect(listed.rows[0].data).toMatchObject({ filename: 'hello.txt', size: 11, status: 'ready', ownerId: 'alice' });
-    expect(listed.rows[0].data).not.toHaveProperty('objectKey');
+    expect(listed.rows[0]).toMatchObject({ filename: 'hello.txt', size: 11, status: 'ready', ownerId: 'alice' });
+    expect(listed.rows[0]).not.toHaveProperty('objectKey');
     const bobList = await (await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files`, { headers: { cookie: 'demo_user=bob' } }), bindings)).json() as any;
     expect(bobList.rows).toHaveLength(0);
     expect((await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files/${created.id}`, { headers: { cookie: 'demo_user=bob' } }), bindings)).status).toBe(403);
@@ -90,16 +90,14 @@ describe('Cloudflare Worker and live protocol', () => {
     const { id } = await response.json() as { id: string };
     const stub = bindings.WORKSPACES.get(bindings.WORKSPACES.idFromName(workspace));
     await runInDurableObject(stub, (instance: TrackerWorkspace) => {
-      const stored = instance.engine.storage.sql.exec<{ data: string }>('SELECT data FROM wc_records WHERE table_name = ? AND id = ?', 'files', id).toArray()[0]!;
-      const data = JSON.parse(stored.data); data.status = 'pending'; data.createdAt = Date.now() - 86_400_001;
-      instance.engine.storage.sql.exec('UPDATE wc_records SET data = ? WHERE table_name = ? AND id = ?', JSON.stringify(data), 'files', id);
+      instance.engine.storage.sql.exec('UPDATE files SET status = ?, created_at = ? WHERE id = ?', 'pending', Date.now() - 86_400_001, id);
     });
     await runDurableObjectAlarm(stub);
     expect(await bindings.FILES_BUCKET.head(`workcore/files/${id}`)).toBeNull();
     const page = await (await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files`, { headers: { cookie: 'demo_user=alice' } }), bindings)).json() as any;
     expect(page.rows).toHaveLength(0);
   });
-  it('sends full snapshots after mutation and after reconnect', async () => {
+  it('selectively snapshots matching views, acknowledges unrelated revisions, and refreshes after reconnect', async () => {
     const workspace = crypto.randomUUID();
     const connection = await socket(workspace, 'bob');
     let response = next(connection);
@@ -107,7 +105,10 @@ describe('Cloudflare Worker and live protocol', () => {
     expect(await response).toMatchObject({ type: 'snapshot', id: 'tasks', data: [expect.objectContaining({ id: 'welcome' })] });
     response = next(connection);
     const mutation = await (await api(workspace, 'mutate', { name: 'createTask', input: { title: 'Live update' }, requestId: 'one' })).json() as any;
-    expect(await response).toMatchObject({ type: 'snapshot', revision: mutation.revision, data: expect.arrayContaining([expect.objectContaining({ data: expect.objectContaining({ title: 'Live update' }) })]) });
+    expect(await response).toMatchObject({ type: 'snapshot', revision: mutation.revision, data: expect.arrayContaining([expect.objectContaining({ title: 'Live update' })]) });
+    response = next(connection);
+    const unrelated = await (await api(workspace, 'mutate', { name: 'saveSummary', input: { text: 'Not a task change' }, requestId: 'summary' }, 'bob')).json() as any;
+    expect(await response).toMatchObject({ type: 'revision', revision: unrelated.revision });
     connection.close();
     const reconnected = await socket(workspace, 'bob');
     response = next(reconnected);
@@ -124,7 +125,7 @@ describe('Cloudflare Worker and live protocol', () => {
     response = next(connection);
     const stub = bindings.WORKSPACES.get(bindings.WORKSPACES.idFromName(workspace));
     await runInDurableObject(stub, (instance: TrackerWorkspace) => {
-      instance.engine.storage.sql.exec("DELETE FROM wc_records WHERE table_name = 'members' AND id = 'bob'");
+      instance.engine.storage.sql.exec("DELETE FROM members WHERE id = 'bob'");
     });
     // Explicit heartbeat performs a fresh authorization check, including after a missed broadcast.
     connection.send(JSON.stringify({ type: 'refresh' }));

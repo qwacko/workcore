@@ -6,14 +6,19 @@
     "dev": "node ../../scripts/dev.mjs",
     "deploy": "wrangler deploy --env=''",
     "build": "wrangler deploy --env='' --dry-run --outdir dist",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "db:generate": "drizzle-kit generate && node scripts/ingest-migrations.mjs"
   },
   "dependencies": {
-    "@workcore/ai": "workspace:*",
-    "@workcore/core": "workspace:*",
-    "@workcore/client": "workspace:*",
-    "@workcore/files": "workspace:*",
     "@workcore/admin": "workspace:*",
+    "@workcore/ai": "workspace:*",
+    "@workcore/client": "workspace:*",
+    "@workcore/core": "workspace:*",
+    "@workcore/files": "workspace:*",
+    "drizzle-orm": "^0.45.4",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.11"
   }
 }

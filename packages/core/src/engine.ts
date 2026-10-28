@@ -1,17 +1,23 @@
 import { z } from 'zod';
+import { getTableName } from 'drizzle-orm';
+import { and, eq, gt, lt, or } from 'drizzle-orm';
+import { workcoreSchema } from './schema.js';
 import { compileAdmin, manifestSchema } from './ui.js';
 import type { Actor, Definition, Job, Json, MutationContext, Operation, ReadContext, RunContext } from './definitions.js';
 import { assertSync, checkName, encode, json, WorkcoreError } from './json.js';
-import { getJson, initialize, saveRun, saveSchedule, Store } from './store.js';
+import { applyMigrations, getJson, saveRun, saveSchedule, Store } from './store.js';
 import type { Run, Schedule, Storage } from './store.js';
+import { builtinTriggers, shouldRefreshView } from './triggers.js';
 
 export type Result = { data: Json; revision: number };
 export type Commit = { revision: number; changed: Set<string> };
 
 export class Engine {
   private readonly controllers = new Map<string, AbortController>();
+  private readonly validTriggers: Set<string>;
   onCommit: (commit: Commit) => void = () => {};
-  constructor(readonly storage: Storage, readonly definition: Definition, readonly env: unknown) {
+  constructor(readonly storage: Storage, readonly definition: Definition<any>, readonly env: unknown) {
+    this.validTriggers = new Set(['*', ...definition.triggerKeys, ...Object.values(builtinTriggers)]);
     for (const name of Object.keys(definition.views)) {
       if (Object.hasOwn(definition.queries, name)) throw new Error(`Views and queries cannot share the name ${name}`);
     }
@@ -23,20 +29,22 @@ export class Engine {
         if (group === 'view') {
           const view = definition.views[name]!;
           if (!Number.isInteger(view.maxRows ?? 500) || (view.maxRows ?? 500) < 1 || (view.maxRows ?? 500) > 1000) throw new Error(`Invalid maxRows for ${name}`);
-          for (const dependency of view.dependsOn) {
-            if (!(dependency in definition.tables) && dependency !== '$kv') throw new Error(`Unknown dependency ${dependency}`);
-          }
+          for (const dependency of view.dependsOn ?? []) this.assertTrigger(dependency);
         }
       }
     }
-    for (const table of Object.values(definition.tables)) z.toJSONSchema(table.schema);
+    for (const [name, mutation] of Object.entries(definition.mutations)) {
+      for (const trigger of mutation.triggers ?? []) {
+        try { this.assertTrigger(trigger); } catch { throw new Error(`Unknown trigger ${trigger} in mutation ${name}`); }
+      }
+    }
     // Resolve references at startup, even if no actor will be allowed to see them.
     compileAdmin(definition, () => true);
+    applyMigrations(storage, definition.migrations);
     storage.transactionSync(() => {
-      initialize(storage, definition.tables);
       if (!this.meta('initialized')) {
-        const db = new Store(storage.sql, definition.tables, 1, true);
-        try { assertSync(definition.initialize?.(db)); } finally { db.close(); }
+        const store = new Store(storage.sql, definition.tables, 1, true);
+        try { assertSync(definition.initialize?.(store.db)); } finally { store.close(); }
         this.setMeta('initialized', 'true');
         this.setMeta('revision', '1');
       }
@@ -54,9 +62,9 @@ export class Engine {
     this.storage.sql.exec('INSERT OR REPLACE INTO wc_meta (key, value) VALUES (?, ?)', key, value);
   }
   get revision(): number { return Number(this.meta('revision') ?? '0'); }
-  private read<T>(callback: (db: Store<any>) => T): T {
-    const db = new Store(this.storage.sql, this.definition.tables, this.revision, false);
-    try { return callback(db); } finally { db.close(); }
+  private read<T>(callback: (store: Store<any>) => T): T {
+    const store = new Store(this.storage.sql, this.definition.tables, this.revision, false);
+    try { return callback(store); } finally { store.close(); }
   }
   private write<T>(callback: (db: Store<any>) => T): T {
     let commit: Commit | undefined;
@@ -66,7 +74,7 @@ export class Engine {
         const result = callback(db);
         assertSync(result);
         this.setMeta('revision', String(db.revision));
-        commit = { revision: db.revision, changed: db.changed };
+        commit = { revision: Number(this.meta('revision')), changed: new Set(db.changed) };
         return result;
       } finally { db.close(); }
     });
@@ -74,13 +82,16 @@ export class Engine {
     if (commit) { try { this.onCommit(commit); } catch (error) { console.error('View publication failed', error); } }
     return value;
   }
-  private allowed(db: Store<any>, actor: Actor, action: string): boolean {
-    const result = this.definition.authorize({ db, actor, now: Date.now() }, action);
+  private assertTrigger(key: string): void {
+    if (!this.validTriggers.has(key)) throw new WorkcoreError('INVALID_TRIGGER', `Unknown trigger key ${key}`);
+  }
+  private allowed(store: Store<any>, actor: Actor, action: string): boolean {
+    const result = this.definition.authorize({ db: store.db, kv: store.kv, actor, now: Date.now() }, action);
     assertSync(result);
     return result === true;
   }
-  private authorize(db: Store<any>, actor: Actor, action: string): void {
-    if (!this.allowed(db, actor, action)) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
+  private authorize(store: Store<any>, actor: Actor, action: string): void {
+    if (!this.allowed(store, actor, action)) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
   }
   private fileConfig() {
     const files = this.definition.files;
@@ -88,12 +99,13 @@ export class Engine {
     return files;
   }
   private fileRow(db: Store<any>, id: string): any {
-    const row = db.get(this.fileConfig().table, id);
+    const table = this.definition.tables[this.fileConfig().table] as any;
+    const row = db.db.select().from(table).where(eq(table.id, id)).get();
     if (!row) throw new WorkcoreError('NOT_FOUND', 'File not found', 404);
     return row;
   }
   private canAccessFile(db: Store<any>, actor: Actor, row: any): void {
-    if (row.data.ownerId !== actor.id && !this.allowed(db, actor, '$admin')) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
+    if (row.ownerId !== actor.id && !this.allowed(db, actor, '$admin')) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
   }
   createFile(actor: Actor, input: { filename: string; contentType: string; size: number }): { id: string; status: string } {
     return this.write(db => {
@@ -103,7 +115,9 @@ export class Engine {
       const id = crypto.randomUUID();
       const filename = input.filename.normalize('NFC').replace(/[\/\0-\x1f\x7f]/g, '_').slice(0, 255) || 'file';
       const contentType = /^[\w.+-]+\/[\w.+-]+$/.test(input.contentType) ? input.contentType.slice(0, 255) : 'application/octet-stream';
-      db.put(files.table, id, { ownerId: actor.id, filename, contentType, size: input.size, status: 'pending', createdAt: Date.now(), uploadedAt: null });
+      const table = this.definition.tables[files.table] as any;
+      db.db.insert(table).values({ id, ownerId: actor.id, filename, contentType, size: input.size, status: 'pending', createdAt: Date.now(), uploadedAt: null }).run();
+      db.changed.add(builtinTriggers.files);
       return { id, status: 'pending' };
     });
   }
@@ -111,8 +125,10 @@ export class Engine {
     this.write(db => {
       this.authorize(db, actor, 'file:upload');
       const row = this.fileRow(db, id);
-      if (row.data.ownerId !== actor.id || row.data.status !== 'pending' || row.data.size !== size) throw new WorkcoreError('INVALID_FILE_STATE', 'Upload cannot be finalized', 409);
-      db.put(this.fileConfig().table, id, { ...row.data, status: 'ready', uploadedAt: Date.now() }, { expectedRevision: row.revision });
+      if (row.ownerId !== actor.id || row.status !== 'pending' || row.size !== size) throw new WorkcoreError('INVALID_FILE_STATE', 'Upload cannot be finalized', 409);
+      const table = this.definition.tables[this.fileConfig().table] as any;
+      db.db.update(table).set({ status: 'ready', uploadedAt: Date.now() }).where(eq(table.id, id)).run();
+      db.changed.add(builtinTriggers.files);
     });
   }
   getFile(actor: Actor, id: string): any {
@@ -120,7 +136,7 @@ export class Engine {
       this.authorize(db, actor, 'file:download');
       const row = this.fileRow(db, id);
       this.canAccessFile(db, actor, row);
-      if (row.data.status !== 'ready') throw new WorkcoreError('FILE_NOT_READY', 'File is not available', 404);
+      if (row.status !== 'ready') throw new WorkcoreError('FILE_NOT_READY', 'File is not available', 404);
       return row;
     });
   }
@@ -128,7 +144,9 @@ export class Engine {
     return this.read(db => {
       this.authorize(db, actor, 'file:list');
       const admin = this.allowed(db, actor, '$admin');
-      return db.page(this.fileConfig().table, { limit: 100, after, ...(!admin ? { index: { name: 'owner', value: actor.id } } : {}) });
+      const table = this.definition.tables[this.fileConfig().table] as any;
+      const rows = db.db.select().from(table).where(admin ? gt(table.id, after) : and(gt(table.id, after), eq(table.ownerId, actor.id))).orderBy(table.id).limit(101).all();
+      return { rows: rows.slice(0, 100), nextCursor: rows.length > 100 ? String(rows[99]!.id) : null };
     });
   }
   beginFileDelete(actor: Actor, id: string): any {
@@ -136,7 +154,11 @@ export class Engine {
       this.authorize(db, actor, 'file:delete');
       const row = this.fileRow(db, id);
       this.canAccessFile(db, actor, row);
-      if (row.data.status !== 'deleting') db.put(this.fileConfig().table, id, { ...row.data, status: 'deleting' }, { expectedRevision: row.revision });
+      if (row.status !== 'deleting') {
+        const table = this.definition.tables[this.fileConfig().table] as any;
+        db.db.update(table).set({ status: 'deleting' }).where(eq(table.id, id)).run();
+        db.changed.add(builtinTriggers.files);
+      }
       return row;
     });
   }
@@ -145,24 +167,31 @@ export class Engine {
       this.authorize(db, actor, 'file:delete');
       const row = this.fileRow(db, id);
       this.canAccessFile(db, actor, row);
-      if (row.data.status !== 'deleting') throw new WorkcoreError('INVALID_FILE_STATE', 'File deletion is not pending', 409);
-      db.delete(this.fileConfig().table, id, { expectedRevision: row.revision });
+       if (row.status !== 'deleting') throw new WorkcoreError('INVALID_FILE_STATE', 'File deletion is not pending', 409);
+      const table = this.definition.tables[this.fileConfig().table] as any;
+      db.db.delete(table).where(eq(table.id, id)).run();
+      db.changed.add(builtinTriggers.files);
     });
   }
   fileCleanupCandidates(now = Date.now()): { id: string; ownerId: string; status: string; createdAt: number }[] {
     const table = this.definition.files?.table;
     if (!table) return [];
-    return this.read(db => db.page(table, { limit: 1000 }).rows
-      .filter(row => row.data.status === 'deleting' || row.data.status === 'pending' && Number(row.data.createdAt) < now - 86_400_000)
-      .map(row => ({ id: row.id, ownerId: String(row.data.ownerId), status: String(row.data.status), createdAt: Number(row.data.createdAt) })));
+    return this.read(db => {
+      const files = this.definition.tables[table] as any;
+      return db.db.select().from(files).where(or(eq(files.status, 'deleting'), and(eq(files.status, 'pending'), lt(files.createdAt, now - 86_400_000)))).limit(1000).all()
+        .filter((row: any) => row.status === 'deleting' || Number(row.createdAt) < now - 86_400_000)
+        .map((row: any) => ({ id: row.id, ownerId: String(row.ownerId), status: String(row.status), createdAt: Number(row.createdAt) }));
+    });
   }
   completeFileCleanup(id: string): void {
     this.write(db => {
       const table = this.definition.files?.table;
       if (!table) return;
-      const row = db.get(table, id);
-      if (row && (row.data.status === 'deleting' || row.data.status === 'pending' && Number(row.data.createdAt) < Date.now() - 86_400_000)) {
-        db.delete(table, id, { expectedRevision: row.revision });
+       const files = this.definition.tables[table] as any;
+       const row = db.db.select().from(files).where(eq(files.id, id)).get() as any;
+       if (row && (row.status === 'deleting' || row.status === 'pending' && Number(row.createdAt) < Date.now() - 86_400_000)) {
+         db.db.delete(files).where(eq(files.id, id)).run();
+         db.changed.add(builtinTriggers.files);
       }
     });
   }
@@ -180,7 +209,7 @@ export class Engine {
       const isView = Object.hasOwn(this.definition.views, name);
       const operation = live || isView ? this.lookup(this.definition.views, name) : this.lookup(this.definition.queries, name);
       this.authorize(db, actor, `${isView || live ? 'view' : 'query'}:${name}`);
-      const data = this.output(operation, operation.handler({ db, actor, now: Date.now() }, operation.input.parse(input)));
+      const data = this.output(operation, operation.handler({ db: db.db, kv: db.kv, actor, now: Date.now() }, operation.input.parse(input)));
       if ((live || isView) && Array.isArray(data) && data.length > (this.definition.views[name]!.maxRows ?? 500)) {
         throw new WorkcoreError('VIEW_TOO_LARGE', 'Narrow the view scope; complete live views cannot be truncated');
       }
@@ -201,12 +230,16 @@ export class Engine {
     const run: Run = { id, job: name, kind: job.kind, actor, input: json(input), status: 'queued', attempt: 0, due: now, createdAt: now, updatedAt: now };
     if (scheduleId) run.scheduleId = scheduleId;
     saveRun(this.storage.sql, run);
-    db.changed.add('$runs');
+    db.changed.add(builtinTriggers.runs);
     return id;
   }
   private context(db: Store<any>, actor: Actor): MutationContext<any> {
     return {
-      db, actor, now: Date.now(),
+      db: db.db, kv: db.kv, actor, now: Date.now(),
+      trigger: (...keys) => {
+        db.assertWritable();
+        for (const key of keys) { this.assertTrigger(key); db.changed.add(key); }
+      },
       enqueue: (job, input) => this.queue(db, actor, job, input),
       schedule: (job, input, options) => {
         db.assertWritable();
@@ -219,7 +252,7 @@ export class Engine {
         const schedule: Schedule = { id: crypto.randomUUID(), job: name, actor, input: json(input), at: options.at, enabled: true, createdAt: Date.now() };
         if (options.everyMs !== undefined) schedule.everyMs = options.everyMs;
         saveSchedule(this.storage.sql, schedule);
-        db.changed.add('$schedules');
+        db.changed.add(builtinTriggers.schedules);
         return schedule.id;
       },
       cancelSchedule: id => {
@@ -228,7 +261,7 @@ export class Engine {
         if (!schedule) throw new WorkcoreError('NOT_FOUND', 'Unknown schedule', 404);
         if (schedule.actor.id !== actor.id) this.authorize(db, actor, '$admin');
         saveSchedule(this.storage.sql, { ...schedule, enabled: false });
-        db.changed.add('$schedules');
+        db.changed.add(builtinTriggers.schedules);
       },
     };
   }
@@ -250,11 +283,14 @@ export class Engine {
     if (runId) entry.runId = runId;
     this.storage.sql.exec('INSERT INTO wc_history (id, data) VALUES (?, ?)', crypto.randomUUID(), encode(entry));
     this.storage.sql.exec('DELETE FROM wc_history WHERE rowid NOT IN (SELECT rowid FROM wc_history ORDER BY rowid DESC LIMIT 1000)');
+    db.changed.add(builtinTriggers.history);
   }
   private executeMutation(db: Store<any>, actor: Actor, name: string, input: unknown, runId?: string): Json {
     const operation = this.lookup(this.definition.mutations, name);
     this.authorize(db, actor, `mutation:${name}`);
     const data = this.output(operation, operation.handler(this.context(db, actor), operation.input.parse(input)));
+    if (operation.triggers === undefined) db.changed.add('*');
+    else for (const key of operation.triggers) db.changed.add(key);
     this.history(db, actor, `mutation:${name}`, runId);
     return data;
   }
@@ -306,8 +342,36 @@ export class Engine {
         if (!schedule) throw new WorkcoreError('NOT_FOUND', 'Unknown schedule', 404);
         return json(schedule);
       }
-      if (resource === 'tables') return json(Object.fromEntries(Object.keys(this.definition.tables).map(name => [name, this.definition.tables[name]!.version])));
-      if (resource.startsWith('table:')) return json(db.page(resource.slice(6), { limit: 100, after }));
+      const appTables = Object.entries(this.definition.tables).filter(([key]) => !Object.hasOwn(workcoreSchema, key));
+      if (resource === 'tables') return json(Object.fromEntries(appTables.map(([key, table]) => {
+        const name = getTableName(table as any);
+        const columns = this.storage.sql.exec<{ name: string; type: string; notnull: number; pk: number }>(`PRAGMA table_info("${name.replaceAll('"', '""')}")`).toArray();
+        const display = this.definition.tableDisplay[key] ?? {};
+        return [name, { label: display.label ?? key, columns: columns.map(column => ({ name: column.name, type: column.type, required: !!column.notnull, primaryKey: column.pk > 0, ...(display.columns?.[column.name] ?? {}) })) }];
+      })));
+      if (resource.startsWith('table:')) {
+        const name = resource.slice(6);
+        const [key, table] = appTables.find(([, value]) => getTableName(value as any) === name) ?? [];
+        if (!table) throw new WorkcoreError('NOT_FOUND', 'Unknown table', 404);
+        const cursor = after ? Number(after) : 0;
+        if (!Number.isSafeInteger(cursor) || cursor < 0) throw new WorkcoreError('INVALID_CURSOR', 'Invalid table cursor');
+        const quoted = `"${name.replaceAll('"', '""')}"`;
+        const fetched = this.storage.sql.exec<Record<string, any>>(`SELECT rowid AS __workcore_cursor, * FROM ${quoted} WHERE rowid > ? ORDER BY rowid LIMIT 101`, cursor).toArray();
+        const result: Record<string, Json>[] = [];
+        let bytes = 0;
+        for (const row of fetched.slice(0, 100)) {
+          const { __workcore_cursor, ...values } = row;
+          const normalized = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value instanceof ArrayBuffer ? [...new Uint8Array(value)].map(byte => byte.toString(16).padStart(2, '0')).join('') : value instanceof Uint8Array ? [...value].map(byte => byte.toString(16).padStart(2, '0')).join('') : value])) as Record<string, Json>;
+          const size = new TextEncoder().encode(JSON.stringify(normalized)).length;
+          if (result.length && bytes + size > 400_000) break;
+          result.push(normalized); bytes += size;
+        }
+        const more = fetched.length > result.length;
+        const display = this.definition.tableDisplay[key!] ?? {};
+        const columns = this.storage.sql.exec<{ name: string; type: string; notnull: number; pk: number }>(`PRAGMA table_info("${name.replaceAll('"', '""')}")`).toArray()
+          .map(column => ({ name: column.name, label: display.columns?.[column.name]?.label ?? column.name, type: column.type, hidden: display.columns?.[column.name]?.hidden ?? false, format: display.columns?.[column.name]?.format ?? 'text' }));
+        return json({ rows: result, columns, nextCursor: more && result.length ? String(fetched[result.length - 1]!.__workcore_cursor) : null });
+      }
       const resources: Record<string, string> = { runs: 'wc_runs', schedules: 'wc_schedules', history: 'wc_history' };
       if (!Object.hasOwn(resources, resource)) throw new WorkcoreError('NOT_FOUND', 'Unknown resource', 404);
       const table = resources[resource]!;
@@ -336,7 +400,7 @@ export class Engine {
         if (!schedule) throw new WorkcoreError('NOT_FOUND', 'Unknown schedule', 404);
         if (action !== 'enable' && action !== 'disable') throw new WorkcoreError('INVALID_ACTION', 'Use enable or disable');
         saveSchedule(this.storage.sql, { ...schedule, enabled: action === 'enable' });
-        db.changed.add('$schedules');
+        db.changed.add(builtinTriggers.schedules);
       } else {
         const run = getJson<Run>(this.storage.sql, 'wc_runs', id);
         if (!run) throw new WorkcoreError('NOT_FOUND', 'Unknown run', 404);
@@ -349,7 +413,7 @@ export class Engine {
           run.updatedAt = Date.now();
           saveRun(this.storage.sql, run);
         } else throw new WorkcoreError('INVALID_ACTION', 'Use retry or cancel');
-        db.changed.add('$runs');
+        db.changed.add(builtinTriggers.runs);
       }
       this.history(db, actor, `${resource}:${action}`);
     });
@@ -382,7 +446,7 @@ export class Engine {
           console.error('Schedule dispatch denied or invalid', error);
         }
         saveSchedule(this.storage.sql, schedule);
-        db.changed.add('$schedules');
+        db.changed.add(builtinTriggers.schedules);
       }
     });
   }
@@ -393,7 +457,7 @@ export class Engine {
     const job = this.definition.jobs[run.job];
     this.write(db => {
       run.status = 'running'; run.attempt++; run.updatedAt = Date.now();
-      saveRun(this.storage.sql, run); db.changed.add('$runs');
+      saveRun(this.storage.sql, run); db.changed.add(builtinTriggers.runs);
     });
     let steps = 0;
     let active = true;
@@ -418,7 +482,7 @@ export class Engine {
     };
     const record = (db: Store<any>, sequence: number, data: Json) => {
       this.storage.sql.exec('INSERT OR REPLACE INTO wc_steps (run_id, sequence, data) VALUES (?, ?, ?)', run.id, sequence, encode(data));
-      db.changed.add('$runs');
+      db.changed.add(builtinTriggers.runs);
     };
     const context: RunContext<any, unknown> = {
       actor: run.actor, env: this.env, runId: run.id, signal: controller.signal,
@@ -428,7 +492,7 @@ export class Engine {
         this.write(db => {
           const saved = getJson<Run>(this.storage.sql, 'wc_runs', run.id)!;
           saved.progress = json(value); saved.updatedAt = Date.now();
-          saveRun(this.storage.sql, saved); db.changed.add('$runs');
+          saveRun(this.storage.sql, saved); db.changed.add(builtinTriggers.runs);
         });
       },
       read: (operation, input) => {
@@ -493,7 +557,7 @@ export class Engine {
       const saved = getJson<Run>(this.storage.sql, 'wc_runs', run.id)!;
       if (saved.progress !== undefined) run.progress = saved.progress;
       if (saved.cancelRequested) run.cancelRequested = true;
-      run.updatedAt = Date.now(); saveRun(this.storage.sql, run); db.changed.add('$runs');
+      run.updatedAt = Date.now(); saveRun(this.storage.sql, run); db.changed.add(builtinTriggers.runs);
       // Retain the latest 1000 terminal runs and their traces; active runs are never pruned.
       this.storage.sql.exec("DELETE FROM wc_runs WHERE status NOT IN ('queued', 'running') AND rowid NOT IN (SELECT rowid FROM wc_runs WHERE status NOT IN ('queued', 'running') ORDER BY rowid DESC LIMIT 1000)");
       this.storage.sql.exec('DELETE FROM wc_steps WHERE run_id NOT IN (SELECT id FROM wc_runs)');

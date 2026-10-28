@@ -1,26 +1,27 @@
 # File storage
 
-`@workcore/files` is an optional R2-backed file feature. It contributes no implicit framework tables: add its predefined `fileTable` to your workspace tables and set the definition's `files` capability explicitly.
+`@workcore/files` is an optional R2-backed file feature. Add its predefined Drizzle `fileTable` to the schema passed to `defineSchema`, and set the definition's `files` capability explicitly. Include the table in your Drizzle Kit schema so its SQL migration is bundled with the application.
 
 ```ts
+import { defineSchema, workspace } from '@workcore/core';
 import { fileStorage, fileTable } from '@workcore/files';
 
-const tables = { users: userTable, files: fileTable };
-const app = workspace<typeof tables, Env>(tables);
+const tables = defineSchema({ users: userTable, files: fileTable });
+const app = workspace(tables, migrations);
 
 const definition = app.define({
   // views, mutations, jobs, admin and authorize are application-owned
   files: fileStorage<Env>({ bucket: env => env.FILES_BUCKET, maxSize: 25 * 1024 * 1024 }),
   authorize: ({ db, actor }, action) => {
-    const member = db.get('users', actor.id);
+    const member = db.select().from(userTable).where(eq(userTable.id, actor.id)).get();
     if (!member) return false;
-    if (action === '$admin') return member.data.role === 'admin';
+    if (action === '$admin') return member?.role === 'admin';
     return true; // file access still enforces owner-only access unless admin
   },
 });
 ```
 
-Bind a Cloudflare R2 bucket as `FILES_BUCKET`. Use the authenticated Workcore worker routes `POST /api/workspaces/:workspace/files`, `GET /files`, `GET /files/:id` and `DELETE /files/:id`. The client exposes matching `client.files.upload(file)`, `list()`, `download(id)` and `remove(id)` helpers. Upload bodies are streamed; file bytes never enter SQLite or JSON records.
+Bind a Cloudflare R2 bucket as `FILES_BUCKET`. Use the authenticated Workcore worker routes `POST /api/workspaces/:workspace/files`, `GET /files`, `GET /files/:id` and `DELETE /files/:id`. The client exposes matching `client.files.upload(file)`, `list()`, `download(id)` and `remove(id)` helpers. Upload bodies are streamed; file bytes never enter SQLite.
 
 Each metadata row gets a server-generated file ID and contains owner, filename, content type, size and lifecycle timestamps. Clients never supply storage keys. Operations require the `file:upload`, `file:list`, `file:download` and `file:delete` authorization actions; downloads and deletes are owner-scoped unless the actor is a `$admin`. Keep file relationships such as task attachments in application-owned tables referencing file IDs.
 

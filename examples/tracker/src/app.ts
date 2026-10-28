@@ -1,41 +1,40 @@
-import { field, table, ui, workspace, WorkcoreError } from '@workcore/core';
+import { builtinTriggers, field, ui, workspace, WorkcoreError } from '@workcore/core';
 import type { ReadContext } from '@workcore/core';
 import { z } from 'zod';
+import { and, asc, eq, gt } from 'drizzle-orm';
 import { createAI, modelSpec, operationTool, terminatingTool } from '@workcore/ai';
-import { fileStorage, fileTable } from '@workcore/files';
+import { fileStorage } from '@workcore/files';
+import { tasks as taskTable, messages as messageTable, members as memberTable, schema } from './schema.js';
+import migrations from './migrations.js';
 
 export type Env = {
   WORKSPACES: DurableObjectNamespace; ASSETS: Fetcher; FILES_BUCKET: R2Bucket; DEMO_MODE: string; DEMO_ALLOWED_HOSTS?: string;
   WORKCORE_AGENT_MODEL?: string; WORKCORE_AGENT_FALLBACK_MODEL?: string; WORKCORE_AI_MODE?: string;
   OPENROUTER_API_KEY?: string; OPENAI_API_KEY?: string; ANTHROPIC_API_KEY?: string; OPENCODE_API_KEY?: string;
 };
-const taskSchema = z.object({
+const taskInput = z.object({
   title: field(z.string().min(1).max(200), { label: 'Task title', description: 'A short description of the work.', placeholder: 'Review the proposal' }),
   projectId: field(z.string().min(1).max(100), { label: 'Project', description: 'The server-selected working set. Use inbox to get started.' }),
-  ownerId: z.string(),
   private: field(z.boolean(), { label: 'Private task', description: 'Only you can receive this task in live views.' }),
   done: field(z.boolean(), { label: 'Completed' }),
-  createdAt: z.number(),
 });
-const taskRow = z.object({ id: z.string(), revision: z.number(), schemaVersion: z.number(), data: taskSchema });
+const taskRow = z.object({ id: z.string(), version: z.number(), title: z.string(), projectId: z.string(), ownerId: z.string(), private: z.boolean(), done: z.boolean(), createdAt: z.number(), updatedAt: z.number() });
 const taskPage = z.object({ rows: z.array(taskRow), nextCursor: z.string().nullable() });
-const tables = {
-  members: table(z.object({ name: z.string(), role: z.enum(['member', 'admin']) })),
-  tasks: table(taskSchema, { indexes: { owner: 'ownerId', project: 'projectId' } }),
-  messages: table(z.object({ ownerId: z.string(), role: z.enum(['user', 'assistant']), content: z.string().max(20_000), at: z.number() }), { indexes: { owner: 'ownerId' } }),
-  files: fileTable,
-};
-const app = workspace<typeof tables, Env>(tables);
+const tables = schema;
+const app = workspace<typeof tables, Env, readonly ['tasks', 'members', 'messages']>(tables, migrations, {
+  triggerKeys: ['tasks', 'members', 'messages'],
+  tableDisplay: { tasks: { label: 'Tasks', columns: { version: { hidden: true } } }, messages: { label: 'Assistant messages' }, files: { label: 'File metadata' } },
+});
 const empty = z.object({});
 
 function projectTasks(ctx: ReadContext<typeof tables>, projectId: string) {
-  const page = ctx.db.page('tasks', { index: { name: 'project', value: projectId }, limit: 500 });
-  if (page.nextCursor) throw new WorkcoreError('VIEW_TOO_LARGE', 'Use myTaskPage or split this project into smaller working sets');
-  return page.rows.filter(row => !row.data.private || row.data.ownerId === ctx.actor.id);
+  const rows = ctx.db.select().from(taskTable).where(eq(taskTable.projectId, projectId)).orderBy(asc(taskTable.id)).limit(501).all();
+  if (rows.length > 500) throw new WorkcoreError('VIEW_TOO_LARGE', 'Use myTaskPage or split this project into smaller working sets');
+  return rows.filter(row => !row.private || row.ownerId === ctx.actor.id);
 }
 
 const tasks = app.view({
-  input: z.object({ projectId: taskSchema.shape.projectId.default('inbox') }),
+  input: z.object({ projectId: z.string().min(1).max(100).default('inbox') }),
   output: z.array(taskRow),
   dependsOn: ['tasks', 'members'],
   maxRows: 500,
@@ -43,90 +42,102 @@ const tasks = app.view({
   handler: (ctx, input) => projectTasks(ctx, input.projectId),
 });
 const summary = app.view({
-  input: z.object({ projectId: taskSchema.shape.projectId.default('inbox') }),
+  input: z.object({ projectId: z.string().min(1).max(100).default('inbox') }),
   output: z.object({ total: field(z.number(), { label: 'Total tasks' }), complete: field(z.number(), { label: 'Completed' }), open: field(z.number(), { label: 'Still open' }) }),
   ui: { label: 'Project summary', presentation: 'record' },
   dependsOn: ['tasks', 'members'],
   handler: (ctx, input) => {
     const rows = projectTasks(ctx, input.projectId);
-    const complete = rows.filter(row => row.data.done).length;
+    const complete = rows.filter(row => row.done).length;
     return { total: rows.length, complete, open: rows.length - complete };
   },
 });
 const assistantSummary = app.view({
-  input: empty, output: z.string().nullable(), dependsOn: ['$kv', 'members'],
-  handler: ({ db, actor }) => db.kv.get(`summary:${actor.id}`) as string | null,
+  input: empty, output: z.string().nullable(), dependsOn: [builtinTriggers.kv, 'members'],
+  handler: ({ kv, actor }) => kv.get(`summary:${actor.id}`) as string | null,
   ui: { label: 'Latest assistant summary', presentation: 'markdown' },
 });
 const conversation = app.view({
   input: empty,
   output: z.object({ messages: z.array(z.object({ id: z.string(), role: z.enum(['user', 'assistant']), content: z.string(), at: z.number() })), runId: z.string().nullable() }),
-  dependsOn: ['messages', '$kv', 'members'],
+  dependsOn: ['messages', builtinTriggers.kv, 'members'],
   ui: { label: 'Private conversation', description: 'Your messages and assistant replies. Each identity has a separate conversation.' },
-  handler: ({ db, actor }) => {
-    const page = db.page('messages', { index: { name: 'owner', value: actor.id }, limit: 200 });
-    if (page.nextCursor) throw new WorkcoreError('VIEW_TOO_LARGE', 'This demo conversation has exceeded its bounded live working set');
-    return { messages: page.rows.map(row => ({ id: row.id, role: row.data.role, content: row.data.content, at: row.data.at })).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)), runId: db.kv.get(`chat-run:${actor.id}`) as string | null };
+   handler: ({ db, kv, actor }) => {
+    const messages = db.select({ id: messageTable.id, role: messageTable.role, content: messageTable.content, at: messageTable.at }).from(messageTable)
+      .where(eq(messageTable.ownerId, actor.id)).orderBy(asc(messageTable.at), asc(messageTable.id)).limit(201).all();
+    if (messages.length > 200) throw new WorkcoreError('VIEW_TOO_LARGE', 'This demo conversation has exceeded its bounded live working set');
+    return { messages, runId: kv.get(`chat-run:${actor.id}`) as string | null };
   },
 });
 const myTaskPage = app.query({
   input: z.object({ after: z.string().optional(), limit: z.number().int().min(1).max(100).default(25) }),
   output: taskPage,
-  handler: ({ db, actor }, input) => db.page('tasks', { ...input, index: { name: 'owner', value: actor.id } }),
+  handler: ({ db, actor }, input) => {
+    const rows = db.select().from(taskTable).where(and(eq(taskTable.ownerId, actor.id), ...(input.after ? [gt(taskTable.id, input.after)] : [])))
+      .orderBy(asc(taskTable.id)).limit(input.limit + 1).all();
+    return { rows: rows.slice(0, input.limit), nextCursor: rows.length > input.limit ? rows[input.limit - 1]!.id : null };
+  },
   ui: { label: 'My tasks · paginated', description: 'An indexed page of your own tasks, rather than the complete live project view.' },
 });
 const createTask = app.mutation({
-  input: z.object({ title: taskSchema.shape.title, projectId: taskSchema.shape.projectId.default('inbox'), private: taskSchema.shape.private.default(false) }),
+  input: z.object({ title: taskInput.shape.title, projectId: z.string().min(1).max(100).default('inbox'), private: taskInput.shape.private.default(false) }),
   output: taskRow,
+  triggers: ['tasks'],
   ui: { label: 'Create task', description: 'Create a shared or private task. Connected project views update automatically.', submitLabel: 'Create task' },
-  handler: ({ db, actor, now }, input) => db.put('tasks', crypto.randomUUID(), { ...input, ownerId: actor.id, done: false, createdAt: now }),
+  handler: ({ db, actor, now }, input) => db.insert(taskTable).values({ id: crypto.randomUUID(), ...input, ownerId: actor.id, done: false, version: 1, createdAt: now, updatedAt: now }).returning().get(),
 });
 const editTask = app.mutation({
-  input: z.object({ id: z.string(), expectedRevision: z.number().int(), title: taskSchema.shape.title, projectId: taskSchema.shape.projectId, private: taskSchema.shape.private }),
+  input: z.object({ id: z.string(), expectedRevision: z.number().int(), title: taskInput.shape.title, projectId: z.string().min(1).max(100), private: taskInput.shape.private }),
   output: taskRow,
+  triggers: ['tasks'],
   ui: { label: 'Edit task', description: 'Edit your task. Concurrent changes are rejected instead of overwritten.', submitLabel: 'Save changes' },
   handler: ({ db, actor }, input) => {
-    const row = db.get('tasks', input.id);
-    if (!row || row.data.ownerId !== actor.id) throw new WorkcoreError('FORBIDDEN', 'Choose one of your own tasks', 403);
-    return db.put('tasks', input.id, { ...row.data, title: input.title, projectId: input.projectId, private: input.private }, { expectedRevision: input.expectedRevision });
+    const result = db.update(taskTable).set({ title: input.title, projectId: input.projectId, private: input.private, version: input.expectedRevision + 1 })
+      .where(and(eq(taskTable.id, input.id), eq(taskTable.ownerId, actor.id), eq(taskTable.version, input.expectedRevision))).returning().get();
+    if (!result) throw new WorkcoreError('CONFLICT', 'Task has changed or is not yours', 409);
+    return result;
   },
 });
 const completeTask = app.mutation({
-  input: z.object({ id: z.string(), expectedRevision: z.number().int().optional() }),
+  input: z.object({ id: z.string(), expectedRevision: z.number().int() }),
   output: taskRow,
+  triggers: ['tasks'],
   ui: { label: 'Complete task', submitLabel: 'Complete task' },
   handler: ({ db, actor }, input) => {
-    const row = db.get('tasks', input.id);
-    if (!row) throw new WorkcoreError('NOT_FOUND', 'Task not found', 404);
-    if (row.data.ownerId !== actor.id) throw new WorkcoreError('FORBIDDEN', 'Only the owner can complete this task', 403);
-    return db.put('tasks', input.id, { ...row.data, done: true }, { expectedRevision: input.expectedRevision });
+    const result = db.update(taskTable).set({ done: true, version: input.expectedRevision + 1 })
+      .where(and(eq(taskTable.id, input.id), eq(taskTable.ownerId, actor.id), eq(taskTable.version, input.expectedRevision))).returning().get();
+    if (!result) throw new WorkcoreError('CONFLICT', 'Task has changed or is not yours', 409);
+    return result;
   },
 });
 const saveSummary = app.mutation({
   input: z.object({ text: field(z.string().max(20_000), { label: 'Summary', control: 'textarea' }) }), output: z.null(),
-  handler: ({ db, actor }, input) => { db.kv.set(`summary:${actor.id}`, input.text); return null; },
+  triggers: [],
+  handler: ({ kv, actor }, input) => { kv.set(`summary:${actor.id}`, input.text); return null; },
 });
 const saveReply = app.mutation({
   input: z.object({ text: z.string().min(1).max(20_000) }), output: z.object({ text: z.string() }),
+  triggers: ['messages'],
   ui: { label: 'Save assistant reply', description: 'Checked tool used by the demo assistant.' },
-  handler: ({ db, actor, now }, input) => {
-    db.put('messages', crypto.randomUUID(), { ownerId: actor.id, role: 'assistant', content: input.text, at: now });
-    db.kv.set(`summary:${actor.id}`, input.text);
+  handler: ({ db, kv, actor, now }, input) => {
+    db.insert(messageTable).values({ id: crypto.randomUUID(), ownerId: actor.id, role: 'assistant', content: input.text, at: now }).run();
+    kv.set(`summary:${actor.id}`, input.text);
     return { text: input.text };
   },
 });
 const completeLater = app.task({
-  input: z.object({ id: z.string() }), output: taskRow,
+  input: z.object({ id: z.string(), expectedRevision: z.number().int() }), output: taskRow,
   handler: async (ctx, input) => ctx.mutate(completeTask, input),
 });
 const scheduleCompletion = app.mutation({
   input: z.object({ id: z.string(), delaySeconds: field(z.number().int().min(1).max(86400).default(10), { label: 'Delay in seconds', description: 'The task will complete even if you close the browser.' }) }),
   output: z.object({ scheduleId: z.string() }),
+  triggers: [],
   ui: { label: 'Schedule completion', submitLabel: 'Schedule completion' },
   handler: ({ db, actor, now, schedule }, input) => {
-    const row = db.get('tasks', input.id);
-    if (!row || row.data.ownerId !== actor.id) throw new WorkcoreError('FORBIDDEN', 'Choose one of your own tasks', 403);
-    return { scheduleId: schedule(completeLater, { id: input.id }, { at: now + input.delaySeconds * 1000 }) };
+    const row = db.select().from(taskTable).where(eq(taskTable.id, input.id)).get();
+    if (!row || row.ownerId !== actor.id) throw new WorkcoreError('FORBIDDEN', 'Choose one of your own tasks', 403);
+    return { scheduleId: schedule(completeLater, { id: input.id, expectedRevision: row.version }, { at: now + input.delaySeconds * 1000 }) };
   },
 });
 const assistant = app.agent({
@@ -147,7 +158,7 @@ const assistant = app.agent({
     const messages = (anchor >= 0 ? history.messages.slice(0, anchor + 1) : history.messages).slice(-20);
     let result: { text: string };
     if (ctx.env.WORKCORE_AI_MODE === 'demo' || !primaryModel) {
-      result = await ctx.step('Summarise the first page of my tasks', async () => ({ text: `Demo assistant: ${page.rows.filter(row => !row.data.done).length} open tasks on this page. Configure WORKCORE_AGENT_MODEL for an AI SDK response.` }));
+      result = await ctx.step('Summarise the first page of my tasks', async () => ({ text: `Demo assistant: ${page.rows.filter(row => !row.done).length} open tasks on this page. Configure WORKCORE_AGENT_MODEL for an AI SDK response.` }));
       ctx.progress({ phase: 'completed', mode: 'demo', turn: 1 });
     } else {
       const ai = createAI({ profiles: { assistant: {
@@ -180,12 +191,13 @@ const assistant = app.agent({
 const sendMessage = app.mutation({
   input: z.object({ message: field(z.string().min(1).max(4000), { label: 'Message', control: 'textarea', placeholder: 'What should I work on next?' }) }),
   output: z.object({ runId: z.string() }),
+  triggers: ['messages'],
   ui: { label: 'Send assistant message', submitLabel: 'Send message' },
-  handler: ({ db, actor, now, enqueue }, input) => {
+  handler: ({ db, kv, actor, now, enqueue }, input) => {
     const messageId = crypto.randomUUID();
-    db.put('messages', messageId, { ownerId: actor.id, role: 'user', content: input.message, at: now });
+    db.insert(messageTable).values({ id: messageId, ownerId: actor.id, role: 'user', content: input.message, at: now }).run();
     const runId = enqueue(assistant, { message: input.message, messageId });
-    db.kv.set(`chat-run:${actor.id}`, runId);
+    kv.set(`chat-run:${actor.id}`, runId);
     return { runId };
   },
 });
@@ -197,13 +209,13 @@ const guide = app.query({
 
 const taskList = ui.collection(tasks, ({ form, command }) => ({
   title: 'Project tasks', description: 'A bounded, live dataset. Use row actions instead of copying record IDs.',
-  columns: [{ path: 'data.title', label: 'Task' }, { path: 'data.done', label: 'Complete', format: 'badge' }, { path: 'data.private', label: 'Private', format: 'badge' }, { path: 'data.ownerId', label: 'Owner' }],
-  search: ['data.title'],
-  filters: [{ path: 'data.done', label: 'Completion', options: [{ label: 'Open', value: false }, { label: 'Completed', value: true }] }],
+  columns: [{ path: 'title', label: 'Task' }, { path: 'done', label: 'Complete', format: 'badge' }, { path: 'private', label: 'Private', format: 'badge' }, { path: 'ownerId', label: 'Owner' }],
+  search: ['title'],
+  filters: [{ path: 'done', label: 'Completion', options: [{ label: 'Open', value: false }, { label: 'Completed', value: true }] }],
   actions: [
-    form(editTask, { label: 'Edit task', bind: { id: 'id', expectedRevision: 'revision' }, initial: { title: 'data.title', projectId: 'data.projectId', private: 'data.private' }, visibleWhen: { path: 'data.ownerId', equals: { actor: true } } }),
-    command(completeTask, { label: 'Complete', bind: { id: 'id', expectedRevision: 'revision' }, visibleWhen: { path: 'data.ownerId', equals: { actor: true } }, disabledWhen: { path: 'data.done', equals: true } }),
-    form(scheduleCompletion, { label: 'Schedule', bind: { id: 'id' }, visibleWhen: { path: 'data.ownerId', equals: { actor: true } } }),
+    form(editTask, { label: 'Edit task', bind: { id: 'id', expectedRevision: 'version' }, initial: { title: 'title', projectId: 'projectId', private: 'private' }, visibleWhen: { path: 'ownerId', equals: { actor: true } } }),
+    command(completeTask, { label: 'Complete', bind: { id: 'id', expectedRevision: 'version' }, visibleWhen: { path: 'ownerId', equals: { actor: true } }, disabledWhen: { path: 'done', equals: true } }),
+    form(scheduleCompletion, { label: 'Schedule', bind: { id: 'id' }, visibleWhen: { path: 'ownerId', equals: { actor: true } } }),
   ],
 }));
 
@@ -219,19 +231,21 @@ export const tracker = app.define({
       overview: ui.page({ title: 'Workspace overview', description: 'A small application, not just a database browser. Every panel is declared by the backend.', blocks: [ui.markdown(guide, { title: 'Start here' }), ui.record(summary, { title: 'At a glance' }), taskList, ui.form(createTask, { title: 'Add something to do', label: 'Create task' })] }),
       tasks: ui.page({ title: 'Tasks', description: 'Manage a live project working set. Local filters are preserved in the URL.', blocks: [taskList, ui.form(createTask, { title: 'Create task', label: 'Create task' })] }),
       assistant: ui.page({ title: 'Assistant', description: 'A private, persisted conversation with checked background execution.', blocks: [ui.chat(conversation, sendMessage, { title: 'Workspace assistant', messages: 'messages', message: { id: 'id', role: 'role', content: 'content', at: 'at' }, promptField: 'message', runId: 'runId' }), ui.markdown(assistantSummary, { title: 'Latest summary' })] }),
-      data: ui.page({ title: 'Data explorer', description: 'Inspect the same authorised data as JSON or browse an explicit indexed page.', blocks: [ui.json(tasks, { title: 'Live project JSON' }), ui.collection(myTaskPage, () => ({ title: 'My paginated tasks', columns: [{ path: 'data.title', label: 'Task' }, { path: 'id', label: 'Record ID' }] }))] }),
+      data: ui.page({ title: 'Data explorer', description: 'Inspect authorised application data and browse raw registered tables as an administrator.', blocks: [ui.json(tasks, { title: 'Live project JSON' }), ui.collection(myTaskPage, () => ({ title: 'My paginated tasks', columns: [{ path: 'title', label: 'Task' }, { path: 'id', label: 'Record ID' }] }))] }),
     },
   },
   authorize: ({ db, actor }, action) => {
-    const member = db.get('members', actor.id);
+    const member = db.select().from(memberTable).where(eq(memberTable.id, actor.id)).get();
     if (!member) return false;
-    if (action === '$admin') return member.data.role === 'admin';
+    if (action === '$admin') return member.role === 'admin';
     return true;
   },
   initialize: db => {
-    db.put('members', 'alice', { name: 'Alice', role: 'admin' });
-    db.put('members', 'bob', { name: 'Bob', role: 'member' });
-    db.put('tasks', 'welcome', { title: 'Open this workspace in two browser windows', projectId: 'inbox', ownerId: 'alice', private: false, done: false, createdAt: Date.now() });
-    db.put('tasks', 'private', { title: 'Alice’s private task — Bob cannot sync this row', projectId: 'inbox', ownerId: 'alice', private: true, done: false, createdAt: Date.now() });
+    db.insert(memberTable).values([{ id: 'alice', name: 'Alice', role: 'admin' }, { id: 'bob', name: 'Bob', role: 'member' }]).run();
+    const now = Date.now();
+    db.insert(taskTable).values([
+      { id: 'welcome', title: 'Open this workspace in two browser windows', projectId: 'inbox', ownerId: 'alice', private: false, done: false, version: 1, createdAt: now, updatedAt: now },
+      { id: 'private', title: 'Alice’s private task — Bob cannot sync this row', projectId: 'inbox', ownerId: 'alice', private: true, done: false, version: 1, createdAt: now, updatedAt: now },
+    ]).run();
   },
 });

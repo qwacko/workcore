@@ -16,18 +16,18 @@ Every view, query, mutation, enqueue and job tool invocation checks the definiti
 
 Table access is server-only. View and query handlers must enforce record/field-level permissions. Sharing a workspace does not imply sharing every row. Client filters never hide data already sent to a user.
 
-Permission checks happen on each subscription refresh and commit, including commits unrelated to that view's data dependencies. A denied result clears the client's data. Already downloaded information cannot be retracted from a user.
+Permission checks happen on each subscription refresh and every commit, even when invalidation keys do not match. Matching views are selectively recomputed. A denied result clears the client's data. Already downloaded information cannot be retracted from a user.
 
-`$admin` is intentionally powerful: it permits raw **read** inspection of records and all users' execution payloads/traces. Do not grant it just to expose a dashboard. The console does not expose internal KV directly or permit raw record writes.
+`$admin` is intentionally powerful: it permits bounded raw **read** inspection of registered application tables and all users' execution payloads/traces. Do not grant it just to expose a dashboard. The console does not expose internal KV directly or permit raw SQL writes.
 
 ## JSON and size limits
 
-- Records and KV values: 256 KiB encoded JSON each.
+- KV values: 256 KiB encoded JSON each.
 - Query/view/mutation output data: 512 KiB.
 - Public HTTP request bodies and WebSocket messages: 64 KiB.
 - Live subscriptions: 20 per connection, with 8,000 bytes maximum hibernation metadata.
 - Array view results: 500 rows by default; configurable up to 1,000. Oversized views fail, not truncate.
-- Database pages: 1–1,000 rows; `all()` fails above 1,000.
+- Raw-table inspection: at most 100 rows / about 400 KB per page.
 - Execution steps/tools: default 20 per attempt, maximum 100.
 - Explicit step results: 32 KiB each; traces are paginated.
 - Task attempts: default 1, maximum 10.
@@ -40,7 +40,7 @@ No rich-value codecs are supported. Dates, undefined, non-finite numbers, bigint
 This is an initial implementation. Before production use, account for:
 
 - Cloudflare's storage, CPU, alarm and connection limits; a workspace is one coordination boundary.
-- Whole-workspace synchronous record migrations and their startup cost.
+- Synchronous bundled SQL migrations and their startup cost.
 - External effects that can be repeated or have uncertain outcomes.
 - No offline writes, cross-workspace transactions, arbitrary query language, range/full-text indexes or alternate ordering helpers.
 - No durable outbound webhook/email delivery service, managed attachment storage, export/import or configurable retention policies.

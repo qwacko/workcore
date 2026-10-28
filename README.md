@@ -2,7 +2,7 @@
 
 **A Cloudflare-first kit for live workspace applications.**
 
-Define JSON records, typed actions and authorised read models. Workcore supplies SQLite persistence inside a Durable Object, live client subscriptions, background execution, schedules, and a manifest-driven SvelteKit console.
+Define Drizzle SQLite tables, typed actions and authorised read models. Workcore supplies transactional SQLite persistence inside a Durable Object, live client subscriptions, background execution, schedules, and a manifest-driven SvelteKit console.
 
 One workspace has one Durable Object and one database. There is no D1 dependency, database adapter layer, Redis, separate queue server, or portable runtime to assemble.
 
@@ -51,10 +51,10 @@ The launcher forwards only the example's selected agent settings/keys to Wrangle
 
 ## The model
 
-- **Tables** store validated JSON records with IDs, record revisions and schema versions.
-- **Mutations** synchronously commit records, internal KV, queued jobs and schedules together.
-- **Views** are read-only, bounded, authorised results. Table changes trigger recomputation and complete replacement snapshots.
-- **Queries** fetch data once, including indexed cursor-paginated pages for larger datasets.
+- **Tables** are ordinary Drizzle SQLite tables with constraints, indexes, and SQL types.
+- **Mutations** synchronously commit SQL, internal KV, queued jobs and schedules together.
+- **Views** are read-only, bounded, authorised results. Typed trigger keys selectively invalidate subscribed views, with wildcard-safe defaults.
+- **Queries** fetch data once, including application-defined cursor-paginated pages for larger datasets.
 - **Tasks and agents** have persisted runs, outcomes, step traces and explicit interruption semantics.
 - **Schedules** launch jobs once or on a fixed interval, driven by Durable Object alarms.
 
@@ -62,33 +62,7 @@ The server determines what a user may receive. The browser can filter, group and
 
 ## Authoring
 
-```ts
-import { table, workspace } from '@workcore/core';
-import { z } from 'zod';
-
-const tables = {
-  notes: table(z.object({ text: z.string(), ownerId: z.string() }), {
-    indexes: { owner: 'ownerId' },
-  }),
-};
-const app = workspace(tables);
-
-const addNote = app.mutation({
-  input: z.object({ text: z.string().min(1) }),
-  output: z.string(),
-  handler: ({ db, actor }, input) => {
-    const id = crypto.randomUUID();
-    db.put('notes', id, { text: input.text, ownerId: actor.id });
-    return id;
-  },
-});
-
-export const notes = app.define({
-  views: {}, queries: {}, mutations: { addNote }, jobs: {},
-  // Replace this with a current workspace membership check.
-  authorize: ({ actor }, action) => actor.id === 'owner',
-});
-```
+See the [authoring guide](docs/authoring.md) for Drizzle schema definition, migration generation/ingestion, and operation examples.
 
 Extend `Workspace` from `@workcore/core/cloudflare` with this definition and route authenticated requests through `routeWorkspace`. See the [complete tracker](examples/tracker/src/app.ts), its [Cloudflare host](examples/tracker/src/worker.ts), and [authoring guide](docs/authoring.md).
 
@@ -112,7 +86,7 @@ await tasks.whenRevision(result.revision);
 
 | Path | Responsibility |
 | --- | --- |
-| `packages/core` | Zod definitions, SQLite records, transactional runtime, runs/schedules, Cloudflare host |
+| `packages/core` | Drizzle schema/runtime, transactional operations, runs/schedules, Cloudflare host |
 | `packages/client` | Browser-safe inferred API, WebSocket subscriptions, reconnect and revision tracking |
 | `packages/admin` | SvelteKit SPA, generated forms, semantic pages and operational inspection; compiled to Worker static assets |
 | `packages/ai` | Optional AI SDK integration, model profiles, safe fallback and checked agent tools |
@@ -121,7 +95,7 @@ await tasks.whenRevision(result.revision);
 
 ## Deliberate boundaries
 
-No offline writes, cross-workspace transactions, arbitrary client query language, automatic incremental SQL views, backend portability, cron/timezones, resumable agents, or raw admin record editing. Chat is persisted messaging with background replies, not token streaming or resumable model execution. Records and wire values are plain JSON—not JavaScript dates, maps or custom classes.
+No offline writes, cross-workspace transactions, arbitrary client query language, automatic incremental SQL views, backend portability, cron/timezones, resumable agents, or raw admin record editing. Chat is persisted messaging with background replies, not token streaming or resumable model execution. Wire values are plain JSON—not JavaScript dates, maps or custom classes.
 
 Large collections use explicit indexes and pages. `all()` is capped at 1,000 records. Array live views default to 500 rows and fail rather than truncate. Both live results and query responses have a 512 KiB data limit.
 

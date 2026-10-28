@@ -168,7 +168,7 @@ export function createClient<A extends Definition>(options: { baseUrl: string; f
     trace(runId: string, after = 0): Promise<Json> { return post('trace', { runId, after }); },
     control(resource: 'run' | 'schedule', id: string, action: 'retry' | 'cancel' | 'enable' | 'disable'): Promise<{ revision: number }> { return post('control', { resource, id, action }); },
     files: {
-      list(after?: string) { return fileRequest(after ? `?after=${encodeURIComponent(after)}` : '').then(response => response.json() as Promise<{ rows: { id: string; revision: number; schemaVersion: number; data: { ownerId: string; filename: string; contentType: string; size: number; status: string; createdAt: number; uploadedAt: number | null } }[]; nextCursor: string | null }>); },
+      list(after?: string) { return fileRequest(after ? `?after=${encodeURIComponent(after)}` : '').then(response => response.json() as Promise<{ rows: { id: string; ownerId: string; filename: string; contentType: string; size: number; status: string; createdAt: number; uploadedAt: number | null }[]; nextCursor: string | null }>); },
       async upload(file: Blob & { name?: string }, options: { signal?: AbortSignal } = {}) {
         const headers = new Headers({ 'content-type': file.type || 'application/octet-stream', 'x-file-name': file.name || 'file' });
         const response = await fileRequest('', { method: 'POST', headers, body: file, signal: options.signal });

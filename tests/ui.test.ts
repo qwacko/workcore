@@ -7,7 +7,7 @@ import type { JsonSchema } from '../packages/core/src/index.js';
 import { Engine } from '../packages/core/src/engine.js';
 import { actionValues, defaults, readPath, validation } from '../packages/admin/src/lib/data.js';
 
-const app = workspace({});
+const app = workspace((await import('../examples/tracker/src/schema.js')).schema, (await import('../examples/tracker/src/migrations.js')).default);
 const rows = app.view({ input: z.object({}), output: z.array(z.object({ id: z.string(), revision: z.number(), title: z.string() })), dependsOn: [], handler: () => [] });
 const edit = app.mutation({ input: z.object({ id: z.string(), revision: z.number(), title: z.string().min(1) }), output: z.null(), handler: () => null });
 const definition = app.define({

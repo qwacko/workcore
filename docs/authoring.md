@@ -1,120 +1,146 @@
-# Authoring and migrations
+# Authoring and SQL migrations
 
-## Tables
+## Define a Drizzle schema
 
-```ts
-const tables = {
-  tasks: table(z.object({
-    title: z.string().min(1),
-    ownerId: z.string(),
-    done: z.boolean(),
-  }), {
-    indexes: { owner: 'ownerId' },
-  }),
-};
-const app = workspace(tables);
-```
-
-Table definitions describe JSON record contents. Workcore adds `id`, `revision` and `schemaVersion` outside `data`. The workspace identity is implicit in the Durable Object, not repeated in every row.
-
-Use plain JSON schemas: strings, finite numbers, booleans, null, arrays and plain objects. Store timestamps as epoch milliseconds or ISO strings. Schemas must convert to JSON Schema; unsupported transforms or JavaScript-only output types fail during setup. Zod validation remains authoritative for refinements.
-
-There is no automatic relational schema compiler, foreign-key inference or uniqueness declaration. A synchronous mutation can enforce an application invariant atomically; use primary record IDs for natural unique keys where appropriate.
-
-## Database methods
-
-Read contexts provide:
+Application data is ordinary Drizzle SQLite schema, not a JSON-record abstraction. Use standard SQLite constraints, indexes, relations, and SQL expressions. Workcore adds its own internal tables through `defineSchema`; those framework tables are excluded from the raw application-table inspector.
 
 ```ts
-db.get('tasks', id); // Row | null
-db.page('tasks', { limit: 25, after: cursor });
-db.page('tasks', { index: { name: 'owner', value: actor.id }, limit: 100 });
-db.all('tasks'); // fails above 1,000 rows; never truncates silently
-db.kv.get('integrationCursor');
+import { defineSchema, idColumn, timestampColumns, versionColumn, workspace } from '@workcore/core';
+import { integer, index, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import migrations from './migrations.js';
+
+export const tasks = sqliteTable('tasks', {
+  ...idColumn(),
+  ...timestampColumns(),
+  ...versionColumn(),
+  title: text('title').notNull(),
+  ownerId: text('owner_id').notNull(),
+  done: integer('done', { mode: 'boolean' }).notNull().default(false),
+}, table => [index('tasks_owner_id').on(table.ownerId, table.id)]);
+
+export const schema = defineSchema({ tasks });
+const app = workspace(schema, migrations, { triggerKeys: ['tasks', 'permissions'] as const });
 ```
 
-Pages are ordered by record ID, not creation time. `nextCursor` is the last returned ID when another page exists; otherwise null. Pages also stop at a conservative 400 KB payload budget, so they can contain fewer rows than the requested limit. Always follow the cursor, not the returned count. `all()` fails rather than return an incomplete byte-limited result.
+`idColumn()` creates a string primary key. `timestampColumns()` provides epoch-millisecond `createdAt` and `updatedAt` fields with defaults. `versionColumn()` provides an integer optimistic-concurrency field; update it in the same SQL `UPDATE` whose `WHERE` checks the prior version.
 
-Declared indexes support equality on a dotted JSON field path. They use real SQLite expression indexes. Arbitrary predicates, range indexes, full-text search and alternate sort orders are not currently provided.
+## Generate and ingest migrations
 
-Mutation contexts additionally provide:
+Configure Drizzle Kit with the combined schema, including the Workcore internal tables:
 
 ```ts
-db.put('tasks', id, data); // upsert, schema validated
-db.put('tasks', id, data, { expectedRevision: previousRevision });
-db.put('tasks', id, data, { expectedRevision: 0 }); // must not already exist
-db.delete('tasks', id, { expectedRevision: previousRevision });
-db.kv.set('integrationCursor', jsonValue);
-db.kv.delete('integrationCursor');
+// drizzle.config.ts
+import { defineConfig } from 'drizzle-kit';
+export default defineConfig({ dialect: 'sqlite', schema: './src/schema.ts', out: './drizzle' });
 ```
 
-Use record revision checks when an edit must not overwrite another user's intervening change. A conflict returns `CONFLICT` / HTTP 409.
+Export the framework tables alongside application tables from `src/schema.ts` so Drizzle Kit snapshots the complete database. Generate and ingest SQL into a TypeScript bundle that can be included in the Worker:
 
-KV is server-only and shares the mutation transaction. Expose a validated projection through a view if the client needs it. KV is not an encrypted secrets manager; use Cloudflare bindings for deployment secrets.
+```sh
+pnpm --filter @workcore/example db:generate
+```
 
-## Mutations and definitions
+The command runs `drizzle-kit generate` and `scripts/ingest-migrations.mjs`. Commit the generated SQL, snapshots, journal, and `src/migrations.ts`. At workspace startup Workcore applies every unapplied bundled migration synchronously in SQLite transactions, before accepting requests. Missing bundle entries or failed SQL stop startup. There is no data-retention compatibility migration from the earlier JSON-record implementation.
+
+For another application, use the same pattern: keep Drizzle Kit schema/config and a migration-ingestion script in the app package, then pass the imported `MigrationBundle` to `workspace(schema, migrations)`.
+
+## Read and write in operations
+
+Each operation receives a transaction-scoped Drizzle database typed to the workspace schema:
+
+```ts
+const addTask = app.mutation({
+  input: z.object({ title: z.string().min(1) }),
+  output: z.string(),
+  handler: ({ db, actor }, input) => {
+    const id = crypto.randomUUID();
+    db.insert(tasks).values({ id, title: input.title, ownerId: actor.id, done: false }).run();
+    return id;
+  },
+});
+```
+
+Queries and views are read-only. Their Drizzle context is guarded against writes, and a captured query builder cannot be used after its operation has returned. Mutations, KV changes, enqueue/schedule changes, and request deduplication are committed atomically. KV is server-only and shares the SQL transaction; it is not an encrypted secrets manager.
+
+## Trigger keys and view invalidation
+
+Trigger keys are typed invalidation labels, not events or channels with payloads. Declare application keys in `workspace` and use the same keys in mutation and view declarations:
+
+```ts
+const app = workspace(schema, migrations, {
+  triggerKeys: ['tasks', 'permissions', 'dashboard'] as const,
+});
+
+const createTask = app.mutation({
+  input: z.object({ title: z.string() }), output: z.string(),
+  triggers: ['tasks'],
+  handler: ({ db, actor, trigger }, input) => {
+    const id = crypto.randomUUID();
+    db.insert(tasks).values({ id, title: input.title, ownerId: actor.id, done: false }).run();
+    if (input.title.startsWith('!')) trigger('dashboard');
+    return id;
+  },
+});
+
+const taskList = app.view({
+  input: z.object({}), output: z.array(taskRow),
+  dependsOn: ['tasks', 'permissions'],
+  handler: ({ db, actor }) => db.select().from(tasks).where(eq(tasks.ownerId, actor.id)).all(),
+});
+```
+
+`triggers` and `dependsOn` are arrays, and their values are checked against the configured keys and Workcore's exported `builtinTriggers` (`files`, `runs`, `schedules`, `history`, `kv`). `trigger(...keys)` is available only in mutation contexts. Runtime validation remains in place if types are bypassed.
+
+- Omitted mutation `triggers` means wildcard invalidation. `triggers: []` declares no static application keys; dynamic calls and automatic framework keys can still publish.
+- Omitted view `dependsOn` means it refreshes after every commit. `dependsOn: []` means no automatic recomputation (initial load, reconnect, heartbeat, and explicit refresh still work).
+- `'*'` in either array means wildcard. Matching views rerun once per commit and receive replacement snapshots; unmatched views still receive a revision acknowledgement.
+- Dynamic and static keys publish only after the mutation transaction commits. Rollbacks, including output-validation failures, publish nothing. Calls after the mutation context expires fail.
+- Workcore emits built-in keys when its own KV, file, run, schedule, or history state changes. A job's `ctx.mutate(...)` emits the called mutation's keys when that mutation executes; merely scheduling future work does not emit the future mutation's keys.
+- Authorization is rechecked for every subscription on every commit, even when keys do not match. If membership affects the rows a still-authorized view returns, that view must also depend on the application's permissions key.
+
+Declarations are promises: Workcore does not inspect SQL to verify that a mutation only changes its declared data. Missing a key may leave a subscription stale until its next full refresh. Use wildcard defaults where the impact is uncertain.
+
+Use normal Drizzle methods (`select`, `insert`, `update`, `delete`, joins, predicates, and ordering). Define explicit, bounded pagination in your query handler with a stable cursor (usually the primary key) and a `limit + 1` fetch. Workcore does not synthesize indexes or query plans from application schemas.
+
+## Mutations and authorization
 
 ```ts
 const completeTask = app.mutation({
-  input: z.object({ id: z.string(), expectedRevision: z.number() }),
+  input: z.object({ id: z.string(), expectedVersion: z.number().int() }),
   output: z.null(),
   handler: ({ db, actor }, input) => {
-    const row = db.get('tasks', input.id);
-    if (!row || row.data.ownerId !== actor.id) {
-      throw new WorkcoreError('FORBIDDEN', 'Not your task', 403);
-    }
-    db.put('tasks', input.id, { ...row.data, done: true }, {
-      expectedRevision: input.expectedRevision,
-    });
+    const changed = db.update(tasks).set({ done: true, version: input.expectedVersion + 1 })
+      .where(and(eq(tasks.id, input.id), eq(tasks.ownerId, actor.id), eq(tasks.version, input.expectedVersion)))
+      .returning({ id: tasks.id }).get();
+    if (!changed) throw new WorkcoreError('CONFLICT', 'Task has changed or is not yours', 409);
     return null;
   },
 });
+```
 
-export const application = app.define({
-  views: {}, queries: {}, mutations: { completeTask }, jobs: {},
-  authorize: ({ db, actor }, action) => {
-    // Check trusted identity against current workspace membership.
-    return isMember(db, actor.id);
-  },
+`authorize` is synchronous and every application must supply it. Actions use `view:name`, `query:name`, `mutation:name`, `job:name`, `$connect`, `$runs`, and `$admin`. `$admin` grants sensitive history/schedule/raw-table inspection and management. Operation permission checks do not replace row-level checks inside handlers; views must filter private rows and fields before returning them.
+
+An optional `initialize(db)` runs once after schema migrations, in a transaction. Use it for fixed initial records, not external work.
+
+## Raw-table display
+
+Admins can inspect registered application tables using the bounded raw-table resource. Workcore returns column metadata from SQLite and at most 100 rows / about 400 KB per page; the cursor is a rowid cursor and the inspector is read-only. Add optional presentation-only labels, hidden columns, and simple `text`, `badge`, or `date` formatting with `tableDisplay`:
+
+```ts
+workspace(schema, migrations, {
+  tableDisplay: { tasks: { label: 'Tasks', columns: { version: { hidden: true } } } },
 });
 ```
 
-`authorize` is synchronous and defaults to nothing implicitly: every application must supply it. Actions use `view:name`, `query:name`, `mutation:name`, `job:name`, `$connect`, `$runs`, and `$admin`. `$admin` grants sensitive table/history/schedule inspection and management. `$runs` permits inspection of the caller's own runs; admins may inspect all runs.
-
-Operation permission checks do not replace record-level checks inside handlers. A view must filter private rows and fields before returning them.
-
-An optional `initialize(db)` runs once in the same transaction as workspace initialization. It is useful for fixed initial records, not external work. The tracker uses it for demo members and data; production membership provisioning is an application concern.
-
-## Record migrations
-
-```ts
-tasks: table(taskSchemaV2, {
-  version: 2,
-  migrations: {
-    2: previous => ({ ...taskSchemaV1.parse(previous), done: false }),
-  },
-})
-```
-
-The migration key is the version being migrated **to**. To move existing version-1 rows to version 3, supply migrations 2 and 3. Each receives and returns JSON. Validate the final result against the current table schema.
-
-On workspace startup, Workcore migrates all existing rows in one local transaction before serving requests. Failure rolls the migration back and prevents startup; a schema downgrade is refused. New records always use the current version. Empty, newly introduced tables need no historical data transformations.
-
-These migrations apply to this implementation's records only. They do not import the previous Workcore database or adapters. Renames and destructive changes are explicit application decisions, never inferred from schema differences.
-
-Whole-workspace startup migrations are intentionally simple. Very large migrations can exceed runtime limits; online/batched migration machinery is not implemented.
+Display overrides are not authorization controls. Raw inspection remains admin-only, and hiding a column does not make its contents secret.
 
 ## Typed client
 
 ```ts
-const client = createClient<typeof application>({
-  baseUrl: '/api/workspaces/my-workspace',
-});
-const result = await client.mutate('completeTask', { id, expectedRevision });
+const client = createClient<typeof application>({ baseUrl: '/api/workspaces/my-workspace' });
+const result = await client.mutate('completeTask', { id, expectedVersion });
 ```
 
-Import the application **type** into frontend code. Operation names, accepted inputs and validated outputs are inferred. Server code is not required in the browser bundle.
+Import the application **type** into frontend code. Operation names, accepted inputs and validated outputs are inferred. The SvelteKit console uses the same transport and authorised manifest; it does not bypass mutations to edit records. See [admin authoring](./admin).
 
-Mutations and enqueues automatically generate request IDs. To retry after an uncertain network response, retain the ID and pass it explicitly as the third argument. Reusing an ID for different input is rejected. The last 1,000 mutation/enqueue responses per workspace are retained, scoped by actor; this is a bounded deduplication window, not indefinite exactly-once delivery.
-
-The SvelteKit console uses the same client transport and authorised manifest. It supplies generated forms with advanced JSON fallback, declarative application pages, table/list/record/JSON/Markdown/chat presentations, live subscriptions, run timelines and schedule controls. It does not bypass mutations to edit records. See [admin authoring](./admin).
+Mutations and enqueues automatically generate request IDs. Retain an ID to retry after an uncertain network response; reusing an ID for different input is rejected. This is a bounded deduplication window, not indefinite exactly-once delivery.

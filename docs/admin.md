@@ -48,25 +48,25 @@ The operation explorer works without custom pages. Read operations may suggest `
 const taskList = ui.collection(tasks, ({ form, command }) => ({
   title: 'Project tasks',
   columns: [
-    { path: 'data.title', label: 'Task' },
-    { path: 'data.done', label: 'Complete', format: 'badge' },
+    { path: 'title', label: 'Task' },
+    { path: 'done', label: 'Complete', format: 'badge' },
   ],
-  search: ['data.title'],
+  search: ['title'],
   filters: [{
-    path: 'data.done', label: 'Completion',
+    path: 'done', label: 'Completion',
     options: [{ label: 'Open', value: false }, { label: 'Complete', value: true }],
   }],
   actions: [
     form(editTask, {
       label: 'Edit task',
-      bind: { id: 'id', expectedRevision: 'revision' },
-      initial: { title: 'data.title' },
-      visibleWhen: { path: 'data.ownerId', equals: { actor: true } },
+      bind: { id: 'id', expectedVersion: 'version' },
+      initial: { title: 'title' },
+      visibleWhen: { path: 'ownerId', equals: { actor: true } },
     }),
     command(completeTask, {
       label: 'Complete',
-      bind: { id: 'id', expectedRevision: 'revision' },
-      disabledWhen: { path: 'data.done', equals: true },
+      bind: { id: 'id', expectedVersion: 'version' },
+      disabledWhen: { path: 'done', equals: true },
     }),
   ],
 }));

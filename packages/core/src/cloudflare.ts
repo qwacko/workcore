@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Actor, Definition } from './definitions.js';
 import { Engine } from './engine.js';
 import { encode, WorkcoreError } from './json.js';
+import { shouldRefreshView } from './triggers.js';
 
 export type Session = { actor: Actor; expiresAt: number };
 type Subscription = { id: string; name: string; input: unknown };
@@ -48,7 +49,7 @@ async function readBody(request: Request): Promise<unknown> {
 export class Workspace<E = unknown> extends DurableObject<E> {
   readonly engine: Engine;
   private executing = false;
-  constructor(ctx: DurableObjectState, env: E, definition: Definition) {
+  constructor(ctx: DurableObjectState, env: E, definition: Definition<any>) {
     super(ctx, env);
     this.engine = new Engine(ctx.storage, definition, env);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
@@ -71,7 +72,7 @@ export class Workspace<E = unknown> extends DurableObject<E> {
       try {
         if (!this.engine.can(attachment.session.actor, `view:${subscription.name}`)) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
         const view = this.engine.definition.views[subscription.name];
-        if (!changed || view?.dependsOn.some(name => changed.has(name))) {
+        if (!changed || shouldRefreshView(view?.dependsOn, changed)) {
           const result = this.engine.query(attachment.session.actor, subscription.name, subscription.input, true);
           socket.send(encode({ type: 'snapshot', id: subscription.id, ...result }, 600_000));
         } else {
@@ -180,9 +181,9 @@ export class Workspace<E = unknown> extends DurableObject<E> {
       const object = await bucket.get(`workcore/files/${id}`);
       if (!object) throw new WorkcoreError('FILE_NOT_FOUND', 'Stored file is unavailable', 404);
       const headers = new Headers({
-        'content-type': String(row.data.contentType),
+        'content-type': String(row.contentType),
         'content-length': String(object.size),
-        'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(String(row.data.filename))}`,
+        'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(String(row.filename))}`,
         'cache-control': 'private, no-store',
         'x-content-type-options': 'nosniff',
       });

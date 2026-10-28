@@ -46,8 +46,8 @@ describe('tracker agent application wiring', () => {
         const history = engine.inspect(alice, 'history') as { rows: { operation: string }[] };
         expect(history.rows.filter(row => row.operation === 'mutation:saveReply')).toHaveLength(1);
         expect(history.rows.filter(row => row.operation === 'mutation:saveSummary')).toHaveLength(0);
-        const tasks = engine.query(alice, 'myTaskPage', {}).data as { rows: { data: { title: string; ownerId: string; private: boolean } }[] };
-        expect(tasks.rows.filter(row => row.data.title === 'Created by SDK')).toMatchObject([{ data: { ownerId: 'alice', private: true } }]);
+        const tasks = engine.query(alice, 'myTaskPage', {}).data as { rows: { title: string; ownerId: string; private: boolean }[] };
+        expect(tasks.rows.filter(row => row.title === 'Created by SDK')).toMatchObject([{ ownerId: 'alice', private: true }]);
       });
       expect(requests).toHaveLength(4);
       expect(requests[0]!.body.model).toBe('test/model');

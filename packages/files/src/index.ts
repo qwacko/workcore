@@ -1,21 +1,17 @@
-import { table } from '@workcore/core';
-import type { Definition, FileBucket, Table } from '@workcore/core';
-import { z } from 'zod';
+import type { Definition, FileBucket } from '@workcore/core';
+import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
-/** Explicitly add this predefined metadata table to workspace(tables). */
-export const fileTable: Table & { schema: z.ZodObject<any> } = table(z.object({
-  ownerId: z.string().min(1).max(200),
-  filename: z.string().min(1).max(255),
-  contentType: z.string().min(1).max(255),
-  size: z.number().int().nonnegative().max(5_000_000_000),
-  status: z.enum(['pending', 'ready', 'deleting']),
-  createdAt: z.number().int().nonnegative(),
-  uploadedAt: z.number().int().nonnegative().nullable(),
-}), { indexes: { owner: 'ownerId', status: 'status' } });
+/** File bytes live in R2; this typed SQL table stores only authorised metadata. */
+export const fileTable = sqliteTable('files', {
+  id: text('id').primaryKey(), ownerId: text('owner_id').notNull(), filename: text('filename').notNull(),
+  contentType: text('content_type').notNull(), size: integer('size').notNull(),
+  status: text('status', { enum: ['pending', 'ready', 'deleting'] }).notNull(),
+  createdAt: integer('created_at').notNull(), uploadedAt: integer('uploaded_at'),
+}, table => [index('files_owner_id').on(table.ownerId), index('files_status').on(table.status)]);
 
 /** Compose the R2 binding into a normal Workcore definition. Bytes never enter SQLite. */
-export function fileStorage<E>(options: { bucket: (env: E) => FileBucket; maxSize?: number } ): NonNullable<Definition['files']> {
+export function fileStorage<E>(options: { bucket: (env: E) => FileBucket; maxSize?: number }): NonNullable<Definition['files']> {
   const maxSize = options.maxSize ?? 25 * 1024 * 1024;
   if (!Number.isSafeInteger(maxSize) || maxSize < 1 || maxSize > 5_000_000_000) throw new Error('maxSize must be between 1 byte and 5GB');
-  return { table: 'files', bucket: options.bucket as (env: unknown) => FileBucket, maxSize };
+  return { table: 'files' as const, bucket: options.bucket as (env: unknown) => FileBucket, maxSize };
 }

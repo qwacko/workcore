@@ -12,7 +12,7 @@
   let resourceState = $state<LiveState<Json>>({ status: 'loading', revision: 0 });
   let error = $state('');
   let detail = $state<unknown>();
-  let filePage = $state<{ rows: { id: string; revision: number; data: { ownerId: string; filename: string; contentType: string; size: number; status: string; createdAt: number; uploadedAt: number | null } }[]; nextCursor: string | null } | null>(null);
+  let filePage = $state<{ rows: { id: string; ownerId: string; filename: string; contentType: string; size: number; status: string; createdAt: number; uploadedAt: number | null }[]; nextCursor: string | null } | null>(null);
   let fileBusy = $state(false);
   const resource = $derived(page.params.resource ?? 'runs');
   const table = $derived(page.url.searchParams.get('table'));
@@ -21,6 +21,9 @@
   const root = $derived(`/admin/${page.params.workspace}`);
   const rows = $derived(resourceState.data && typeof resourceState.data === 'object' && !Array.isArray(resourceState.data) && Array.isArray(resourceState.data.rows) ? resourceState.data.rows as Record<string, Json>[] : []);
   const next = $derived(resourceState.data && typeof resourceState.data === 'object' && !Array.isArray(resourceState.data) ? resourceState.data.nextCursor : null);
+  const rawColumns = $derived(resourceState.data && typeof resourceState.data === 'object' && !Array.isArray(resourceState.data) && Array.isArray(resourceState.data.columns) ? resourceState.data.columns as { name: string; label: string; hidden: boolean; format: 'text' | 'badge' | 'date' }[] : []);
+  const rawSchema = $derived({ items: { properties: Object.fromEntries(rawColumns.map(column => [column.name, { title: column.label, 'x-workcore': { hidden: column.hidden } }])) } });
+  const rawBlock = $derived({ id: 'inspect-table', kind: 'collection', title: table ?? 'Table', columns: rawColumns.filter(column => !column.hidden).map(({ name, label, format }) => ({ path: name, label, format })) } as ManifestBlock);
   const authorized = $derived(resource === 'runs' ? $session?.manifest.runs : resource === 'files' ? $session?.manifest.files.list : $session?.manifest.admin);
   $effect(() => {
     if ($session && authorized && resource !== 'files') return $session.sources.watch({ kind: 'resource', name }, { after }, value => resourceState = value);
@@ -69,15 +72,15 @@
       {#if $session?.manifest.files.upload}<label class="button primary">Upload a file<input aria-label="Upload a file" type="file" hidden disabled={fileBusy} onchange={uploadFile} /></label><p class="help">Files are streamed to R2. The configured maximum size is enforced by the server.</p>{/if}
       {#if !filePage?.rows.length}<div class="empty"><strong>No files found</strong><p>Upload a file to this workspace to get started.</p></div>{:else}
         <div class="table-wrap"><table><thead><tr><th>File</th><th>Status</th><th>Owner</th><th>Size</th><th>Uploaded</th><th>Actions</th></tr></thead><tbody>
-          {#each filePage.rows as file}<tr><td><strong>{file.data.filename}</strong><div class="help">{file.data.contentType} · <code>{file.id.slice(0, 8)}</code></div></td><td><span class="badge" data-tone={file.data.status === 'ready' ? 'success' : 'neutral'}>{file.data.status}</span></td><td>{file.data.ownerId}</td><td>{file.data.size.toLocaleString()} bytes</td><td>{date(file.data.uploadedAt ?? file.data.createdAt)}</td><td><div class="row-actions">{#if file.data.status === 'ready' && $session?.manifest.files.download}<button class="small" onclick={() => downloadFile(file.id, file.data.filename)}>Download</button>{/if}{#if $session?.manifest.files.delete}<button class="small" disabled={fileBusy} onclick={() => deleteFile(file.id)}>Delete</button>{/if}</div></td></tr>{/each}
+          {#each filePage.rows as file}<tr><td><strong>{file.filename}</strong><div class="help">{file.contentType} · <code>{file.id.slice(0, 8)}</code></div></td><td><span class="badge" data-tone={file.status === 'ready' ? 'success' : 'neutral'}>{file.status}</span></td><td>{file.ownerId}</td><td>{file.size.toLocaleString()} bytes</td><td>{date(file.uploadedAt ?? file.createdAt)}</td><td><div class="row-actions">{#if file.status === 'ready' && $session?.manifest.files.download}<button class="small" onclick={() => downloadFile(file.id, file.filename)}>Download</button>{/if}{#if $session?.manifest.files.delete}<button class="small" disabled={fileBusy} onclick={() => deleteFile(file.id)}>Delete</button>{/if}</div></td></tr>{/each}
         </tbody></table></div>
       {/if}
       <div class="pagination">{#if after}<button onclick={() => navigate('')}>First page</button>{/if}{#if filePage?.nextCursor}<button onclick={() => navigate(filePage!.nextCursor!)}>Next page →</button>{/if}</div>
     {:else if resource === 'tables' && !table && resourceState.data && typeof resourceState.data === 'object'}
-      <div class="table-cards">{#each Object.entries(resourceState.data) as [name, version]}<a class="table-card" href={`${root}/resources/tables?table=${name}`}><span>▤</span><strong>{label(name)}</strong><small>Schema version {text(version)}</small><span>Browse records →</span></a>{/each}</div>
+      <div class="table-cards">{#each Object.entries(resourceState.data) as [name, metadata]}<a class="table-card" href={`${root}/resources/tables?table=${name}`}><span>▤</span><strong>{text((metadata as Record<string, Json>).label ?? label(name))}</strong><small>{Array.isArray((metadata as Record<string, Json>).columns) ? ((metadata as Record<string, Json>).columns as Json[]).length : 0} columns</small><span>Browse records →</span></a>{/each}</div>
     {:else if resource === 'tables' && table && resourceState.data}
       <a class="text-button" href={`${root}/resources/tables`}>← All tables</a>
-      <Collection block={{ id: 'inspect-table', kind: 'collection', title: table } as ManifestBlock} data={resourceState.data} schema={{ items: { properties: rows[0]?.data && typeof rows[0].data === 'object' ? { data: { properties: Object.fromEntries(Object.keys(rows[0].data).map(key => [key, {}])) } } : {} } }} />
+      <Collection block={rawBlock} data={resourceState.data} schema={rawSchema} />
     {:else if resource === 'runs'}
       <p class="help">Updates every 3 seconds. ID-ordered pages; completed payloads are available in run details.</p>
       {#if !rows.length}<div class="empty"><strong>No execution runs yet</strong><p>Launch a task or send a message to the assistant.</p></div>{:else}

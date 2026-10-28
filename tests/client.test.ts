@@ -23,7 +23,7 @@ describe('typed browser client lifecycle', () => {
     expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toMatchObject({ requestId: 'stable' });
     await expect(client.mutate('createTask', { title: new Date() } as any)).rejects.toThrow('plain JSON');
     fetcher.mockResolvedValue(Response.json({ error: { code: 'CONFLICT', message: 'Changed' } }, { status: 409 }));
-    await expect(client.mutate('completeTask', { id: 'one' })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 });
+    await expect(client.mutate('completeTask', { id: 'one', expectedRevision: 1 })).rejects.toMatchObject({ code: 'CONFLICT', status: 409 });
     fetcher.mockResolvedValue(Response.json({ id: 'run', status: 'failed', error: 'EXECUTION_FAILED' }));
     expect(await client.inspect('run:run')).toMatchObject({ error: 'EXECUTION_FAILED' });
     client.close();

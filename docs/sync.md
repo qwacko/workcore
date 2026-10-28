@@ -11,16 +11,15 @@ const myTasks = app.view({
   dependsOn: ['tasks', 'members'],
   maxRows: 500,
   handler: ({ db, actor }) => {
-    const page = db.page('tasks', {
-      index: { name: 'owner', value: actor.id }, limit: 500,
-    });
-    if (page.nextCursor) throw new WorkcoreError('VIEW_TOO_LARGE', 'Narrow the scope');
-    return page.rows;
+    const rows = db.select().from(tasks).where(eq(tasks.ownerId, actor.id))
+      .orderBy(asc(tasks.id)).limit(501).all();
+    if (rows.length > 500) throw new WorkcoreError('VIEW_TOO_LARGE', 'Narrow the scope');
+    return rows;
   },
 });
 ```
 
-Dependencies are explicit, not inferred. Include tables that affect the **projection**, not just the main data table. `$kv` is the dependency for internal KV values. Changes to membership always trigger a fresh operation authorisation check, even if membership was omitted from `dependsOn`; include it when membership also changes which fields/rows an otherwise permitted view returns.
+`dependsOn` contains configured trigger keys, not table names. Mutations publish their declared `triggers` plus any keys emitted through `ctx.trigger(...)`; Workcore also publishes built-in keys for framework state. Keys publish only after commit. Omitted view dependencies mean wildcard; an empty array means no automatic recomputation. SQL is not parsed, so declarations must be complete. See [authoring and triggers](./authoring#trigger-keys-and-view-invalidation).
 
 Views may return small objects, summaries or scalars as well as arrays. Array outputs enforce `maxRows` (default 500, maximum 1,000). All outputs enforce a 512 KiB data limit. Workcore cannot infer whether a custom object contains a truncated dataset: handlers are responsible for making their completeness contract honest.
 
@@ -42,10 +41,12 @@ A complete view must fail when it becomes too large, rather than silently return
 const myTaskPage = app.query({
   input: z.object({ after: z.string().optional() }),
   output: taskPageSchema,
-  handler: ({ db, actor }, input) => db.page('tasks', {
-    ...input, limit: 50,
-    index: { name: 'owner', value: actor.id },
-  }),
+  handler: ({ db, actor }, input) => {
+    const rows = db.select().from(tasks)
+      .where(and(eq(tasks.ownerId, actor.id), ...(input.after ? [gt(tasks.id, input.after)] : [])))
+      .orderBy(asc(tasks.id)).limit(51).all();
+    return { rows: rows.slice(0, 50), nextCursor: rows.length > 50 ? rows[49]!.id : null };
+  },
 });
 ```
 
@@ -74,7 +75,7 @@ One client multiplexes subscriptions over one WebSocket. Reconnects use bounded 
 
 After transient network loss, data may remain available with `reconnecting` status and must be treated as stale. Policy/session errors clear the result; an access-denied subscription is removed on the server. The client reconnects after the connection closes, but a denied individual view must be explicitly subscribed again once access changes.
 
-Workspace revisions advance for background bookkeeping too. Unaffected views receive revision acknowledgements, so `whenRevision` can finish without forcing unrelated recomputation. Revision waits reject on subscription errors or a configurable timeout.
+Workspace revisions advance for background bookkeeping too. Matching views are recomputed; other subscriptions receive revision acknowledgements. Authorisation is rechecked for every subscription regardless of trigger matching. Revision waits reject on subscription errors or a configurable timeout.
 
 ## Wire contract
 

@@ -1,6 +1,6 @@
 # Workcore
 
-An opinionated kit for live workspace applications on Cloudflare. One workspace is one SQLite-backed Durable Object. Zod defines records and operations; mutations own writes; authorised views supply live client datasets.
+An opinionated kit for live workspace applications on Cloudflare. One workspace is one SQLite-backed Durable Object. Drizzle defines application tables; Zod validates operations; mutations own writes; authorised views supply live client datasets.
 
 ## Start locally
 
@@ -11,7 +11,7 @@ pnpm dev
 
 Open the local URL printed by `pnpm dev`. Choose Alice (admin) or Bob (member), follow the workspace overview, and create a task in a second window. The task list updates live; Alice's private row is not sent to Bob.
 
-The SvelteKit console reads its pages from the runtime manifest. It generates forms from annotated schemas and renders table, list, record, JSON, safe Markdown and private chat presentations. Row actions bind record IDs and revisions without making users copy them. Execution timelines, schedule controls, history and read-only table inspection remain server-authorised. It deliberately does not provide raw database editing or an arbitrary UI/template language.
+The SvelteKit console reads its pages from the runtime manifest. It generates forms from annotated schemas and renders table, list, record, JSON, safe Markdown and private chat presentations. Row actions bind record IDs and application-defined versions without making users copy them. Execution timelines, schedule controls, history and bounded read-only raw-table inspection remain server-authorised. It deliberately does not provide raw database editing or an arbitrary UI/template language.
 
 The tracker includes a scheduled task and an AI SDK assistant. Without a selected model it produces an explicitly labelled deterministic demo summary. With `WORKCORE_AGENT_MODEL` and provider credentials it uses tracked multi-turn calls, checked tools and optional cross-provider fallback. See [AI SDK agents](./ai).
 

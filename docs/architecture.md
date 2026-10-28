@@ -6,9 +6,9 @@ A public Cloudflare Worker authenticates the request and routes a workspace name
 
 The database stores:
 
-- JSON application records and explicit indexes.
+- Application-owned Drizzle SQLite tables, constraints and indexes.
 - Internal, server-only KV values.
-- Table schema versions and the workspace revision.
+- Migration journal and the workspace revision.
 - Queued/running/terminal task and agent runs.
 - One-off and interval schedules.
 - Recorded execution steps and metadata-only mutation history.
@@ -20,17 +20,17 @@ Workspace names are routed with `namespace.idFromName`. They are identifiers, no
 
 ## The local transaction boundary
 
-Mutation handlers are synchronous. Record writes, internal KV changes, job enqueues, schedule changes, output validation, history and the deduplicated response commit within one SQLite transaction.
+Mutation handlers are synchronous. Drizzle writes, internal KV changes, job enqueues, schedule changes, output validation, history and the deduplicated response commit within one SQLite transaction.
 
 If validation or the handler fails, those local changes roll back together. Database contexts expire after their callback and reject later use. Queries use read-only database contexts.
 
 External HTTP calls, model requests and notification delivery are not part of a database transaction. Execute external work in a task or agent, not inside a mutation. Workcore cannot prevent application code from starting an unawaited external call; doing so breaks the intended contract.
 
-Every successful write transaction advances the workspace revision. Individual records retain the revision at which they were last written. This revision is separate from the schema version and wire protocol version.
+Every successful write transaction advances the workspace revision. Application tables use ordinary application-defined concurrency fields where needed; the workspace revision is separate from the migration journal and wire protocol version.
 
 ## Changes and live delivery
 
-After a transaction commits, the object knows which tables or internal resources changed. Active views declaring those dependencies are recomputed per subscriber and sent as full replacement snapshots. Authorisation is rechecked even for views not needing recomputation.
+After a transaction commits, its invalidation keys are matched against active view dependencies. Matching views are recomputed per subscriber and sent as full replacement snapshots; unmatched subscriptions receive revision acknowledgements. SQL is not parsed, so mutations declare their keys or retain wildcard behavior. Authorisation is rechecked for every subscription on every commit.
 
 The database commit is authoritative; a failed broadcast does not undo it. Clients resubscribe after reconnect, and request complete refreshes every 30 seconds while connected. This recovers missed publication without keeping an indefinite change log.
 
@@ -67,7 +67,7 @@ export default {
 };
 ```
 
-Bind the class in Wrangler and create its namespace with `new_sqlite_classes`. See the tracker's `wrangler.jsonc` for the executable configuration. Wrangler's namespace migration is distinct from application record migrations.
+Bind the class in Wrangler and create its namespace with `new_sqlite_classes`. See the tracker's `wrangler.jsonc` for the executable configuration. Wrangler's namespace migration is distinct from Drizzle application migrations.
 
 The helper serves `/api/workspaces/:workspaceId/:endpoint`, defaults to same-origin access, and replaces caller-supplied session headers with the host-verified identity. No application permission snapshot is trusted from the browser.
 

@@ -39,7 +39,7 @@ export default {
     if (url.pathname !== '/') return new Response('Not found', { status: 404 });
     return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Workcore tracker</title>
       <style>body{font:16px/1.6 system-ui;background:#111318;color:#e8eaf0;max-width:620px;margin:12vh auto;padding:24px}h1{font-size:40px;letter-spacing:-1.5px}p{color:#a0a9bb}button{font:inherit;background:#30271f;color:#ffb673;border:1px solid #735338;border-radius:8px;padding:12px 24px;margin:8px 8px 8px 0;cursor:pointer}code{color:#ffb673}</style>
-      <p>WORKCORE / CLOUDFLARE-FIRST</p><h1>A live workspace.<br>One durable home.</h1><p>JSON records, typed mutations, private live views, schedules and agent runs—backed by one SQLite Durable Object.</p>
+      <p>WORKCORE / CLOUDFLARE-FIRST</p><h1>A live workspace.<br>One durable home.</h1><p>Drizzle SQL tables, typed mutations, private live views, schedules and agent runs—backed by one SQLite Durable Object.</p>
       <form method="post" action="/demo/login"><button name="user" value="alice">Open as Alice · admin</button><button name="user" value="bob">Open as Bob · member</button></form>
       <p>Local demo only. Use separate browser profiles to compare Alice and Bob. Open <code>tasks</code> and subscribe with <code>{}</code>; create a task in another window to see live updates.</p></html>`, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
   },
