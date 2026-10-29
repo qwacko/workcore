@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createClient } from '../packages/client/src/index.js';
+import { createActionDispatcher, createClient } from '../packages/client/src/index.js';
 import type { tracker } from '../examples/tracker/src/app.js';
 
 class FakeSocket extends EventTarget {
@@ -16,6 +16,24 @@ class FakeSocket extends EventTarget {
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); FakeSocket.instances = []; });
 
 describe('typed browser client lifecycle', () => {
+  it('shares stable mutation/job retry IDs across renderer implementations', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ error: { code: 'TEMPORARY', message: 'Retry' } }, { status: 503 }))
+      .mockImplementation(async () => Response.json({ data: { id: 'task' }, revision: 1 }));
+    const client = createClient<typeof tracker>({ baseUrl: 'http://localhost/api/workspaces/demo', fetch: fetcher });
+    const actions = createActionDispatcher(client);
+    const operation = { kind: 'mutation' as const, name: 'createTask' };
+    const input = { title: 'Stable retry' };
+    await expect(actions.execute('task-form', operation, input)).rejects.toThrow('Retry');
+    await actions.execute('task-form', operation, input);
+    const retryRequest = JSON.parse(String(fetcher.mock.calls[0]![1]!.body));
+    const secondRequest = JSON.parse(String(fetcher.mock.calls[1]![1]!.body));
+    expect(secondRequest.requestId).toBe(retryRequest.requestId);
+    await actions.execute('task-form', operation, { title: 'Intentional new input' });
+    const thirdRequest = JSON.parse(String(fetcher.mock.calls[2]![1]!.body));
+    expect(thirdRequest.requestId).not.toBe(retryRequest.requestId);
+    actions.close(); client.close();
+  });
   it('sends stable request IDs, reports server errors and rejects lossy input', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ data: 'created', revision: 2 }));
     const client = createClient<typeof tracker>({ baseUrl: 'http://localhost/api/workspaces/demo', fetch: fetcher });

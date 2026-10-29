@@ -7,9 +7,9 @@ export function sourceKey(value: unknown): string {
   if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${JSON.stringify(key)}:${sourceKey(value)}`).join(',')}}`;
   return JSON.stringify(value);
 }
-type Source = { kind: 'view' | 'query' | 'resource'; name: string };
+export type SourceReference = { kind: 'view' | 'display' | 'query' | 'resource' | 'system'; name: string };
 type Entry = {
-  source: Source; input: Json; state: LiveState<Json>; listeners: Set<(state: LiveState<Json>) => void>;
+  source: SourceReference; input: Json; state: LiveState<Json>; listeners: Set<(state: LiveState<Json>) => void>;
   subscription?: Subscription<any>; timer?: ReturnType<typeof setInterval>; generation: number; loading: boolean;
   dirty: boolean;
 };
@@ -26,7 +26,9 @@ export function createSources(client: RuntimeClient) {
     try {
       const result = entry.source.kind === 'resource'
         ? { data: await client.inspect(entry.source.name, (entry.input as { after?: string }).after), revision: 0 }
-        : await client.query(entry.source.name, entry.input);
+        : entry.source.kind === 'system'
+          ? { data: await client.system(entry.source.name, entry.input), revision: 0 }
+          : await client.query(entry.source.name, entry.input);
       if (generation !== entry.generation) return;
       entry.state = { status: 'live', data: result.data, revision: result.revision };
     } catch (error) {
@@ -44,7 +46,7 @@ export function createSources(client: RuntimeClient) {
     if (entry.timer) clearInterval(entry.timer);
   }
   return {
-    watch(source: Source, input: Json, listener: (state: LiveState<Json>) => void): () => void {
+    watch(source: SourceReference, input: Json, listener: (state: LiveState<Json>) => void): () => void {
       const key = sourceKey([source.kind, source.name, input]);
       let entry = entries.get(key);
       if (!entry) {
@@ -56,14 +58,19 @@ export function createSources(client: RuntimeClient) {
       notify(listener, active.state);
       if (active.listeners.size === 1) {
         if (source.kind === 'view') active.subscription = client.subscribe(source.name, input, state => { active.state = state; emit(active); });
+        else if (source.kind === 'display') active.subscription = client.subscribeDisplay(source.name, input, state => { active.state = state as unknown as LiveState<Json>; emit(active); });
         else {
           void refresh(active);
-          if (source.kind === 'resource') active.timer = setInterval(() => { void refresh(active); }, 3000);
+          if (source.kind === 'resource' || source.kind === 'system') active.timer = setInterval(() => { void refresh(active); }, 3000);
         }
       }
       return () => { active.listeners.delete(listener); if (!active.listeners.size) { dispose(active); entries.delete(key); } };
     },
-    refresh() { for (const entry of entries.values()) if (entry.source.kind !== 'view') void refresh(entry); },
+    refresh(source?: SourceReference, input?: Json) {
+      if (!source) { for (const entry of entries.values()) if (!['view', 'display'].includes(entry.source.kind)) void refresh(entry); return; }
+      const entry = entries.get(sourceKey([source.kind, source.name, input ?? {}]));
+      if (entry && !['view', 'display'].includes(entry.source.kind)) void refresh(entry);
+    },
     close() { for (const entry of entries.values()) dispose(entry); entries.clear(); },
   };
 }

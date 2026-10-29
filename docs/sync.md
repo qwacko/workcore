@@ -79,7 +79,7 @@ Workspace revisions advance for background bookkeeping too. Matching views are r
 
 ## Wire contract
 
-Manifest protocol version 2 includes the actor, permitted operations, annotated input/output schemas and projected admin pages/actions. The client validates this version before using it. The existing live transport uses JSON snapshots. HTTP responses for query/mutation/enqueue are `{ data, revision }`; failures are `{ error: { code, message } }` with an HTTP error status.
+Manifest protocol version 3 includes the actor, permitted operations, annotated input/output schemas and projected displays/actions. `displayProtocol: 3` versions the recursive display document contract independently from the manifest and workspace revision. The client validates both versions before using a manifest. The existing live transport uses JSON snapshots. HTTP responses for query/mutation/enqueue are `{ data, revision }`; failures are `{ error: { code, message } }` with an HTTP error status. Earlier display protocol versions are intentionally unsupported by this in-repository breaking migration; no compatibility layer is provided.
 
 WebSocket client messages:
 

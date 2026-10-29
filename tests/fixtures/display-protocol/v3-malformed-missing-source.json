@@ -1,0 +1,10 @@
+{
+  "blocks": [
+    {
+      "id": "broken-list",
+      "kind": "collection",
+      "title": "Tasks",
+      "columns": [{ "path": "title" }]
+    }
+  ]
+}

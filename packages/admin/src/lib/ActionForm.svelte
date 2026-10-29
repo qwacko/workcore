@@ -2,35 +2,37 @@
   import { getContext } from 'svelte';
   import type { Json, ManifestAction } from '@workcore/core';
   import SchemaForm from './SchemaForm.svelte';
-  import { actionValues, operationFor } from './data.js';
+import { actionValues, operationFor } from './data.js';
   import { sessionKey, type SessionStore } from './session.js';
+  import { useRendererHost } from './host-context.svelte.js';
+import { useDisplayContext } from './display-context.svelte.js';
+  import { runSuccessEffects } from './success-effects.js';
   let { action, row, ondone = () => {} }: { action: ManifestAction; row?: unknown; ondone?: (result: { data: Json; revision: number }) => void } = $props();
   const session = getContext<SessionStore>(sessionKey);
+  const host = useRendererHost();
+  const displayContext = useDisplayContext();
   let success = $state('');
   let result = $state<Json | undefined>();
-  let requestKey = '';
-  let requestId = '';
+  let resetEpoch = $state(0);
+  const scope = $props.id();
   const operation = $derived($session ? operationFor($session.manifest, action) : undefined);
 </script>
 
 {#if $session && operation}
   {#if action.description}<p class="muted">{action.description}</p>{/if}
-  <SchemaForm schema={operation.input} initial={actionValues(action, row, operation.input)} locked={[...Object.keys(action.bind ?? {}), ...Object.keys(action.values ?? {})]} submitLabel={action.label} onsubmit={async input => {
+  {#key resetEpoch}<SchemaForm schema={operation.input} initial={actionValues(action, row, operation.input)} locked={[...Object.keys(action.bind ?? {}), ...Object.keys(action.values ?? {})]} submitLabel={action.label} onsubmit={async input => {
     if (!$session || action.confirm && !confirm(action.confirm)) return;
     success = '';
-    const key = JSON.stringify(input);
-    if (!requestId || requestKey !== key) { requestKey = key; requestId = crypto.randomUUID(); }
-    const response = action.operation.kind === 'mutation'
-      ? await $session.client.mutate(action.operation.name, input, requestId)
-      : await $session.client.enqueue(action.operation.name, input, requestId);
-    requestId = '';
+    const response = await $session.actions.execute(`form:${scope}`, action.operation, input);
     result = response.data;
     success = `Accepted · revision ${response.revision}`;
-    $session.sources.refresh();
+    await runSuccessEffects(action, response.data, {
+      displayContext, host, refreshSources: () => $session?.sources.refresh(), resetForm: () => resetEpoch++,
+    });
     ondone(response);
-  }} />
+  }} />{/key}
   {#if success}<p class="success" role="status">{success}</p>{/if}
-  {#if action.operation.kind === 'job' && typeof result === 'string'}
-    <a class="button" href={`/admin/${$session.workspace}/runs/${result}`}>Inspect execution →</a>
+  {#if action.operation.kind === 'job' && typeof result === 'string' && host.runHref}
+    <a class="button" href={host.runHref(result)}>Inspect execution →</a>
   {/if}
 {:else}<p class="muted">This action is not available with your current permissions.</p>{/if}

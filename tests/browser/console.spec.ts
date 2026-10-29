@@ -4,8 +4,11 @@ test('run inspection explains structured tool completion without a fabricated an
   await page.goto('/');
   await page.getByRole('button', { name: 'Open as Alice' }).click();
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
-  await page.route('**/api/workspaces/demo/inspect', route => {
-    if (route.request().postDataJSON()?.resource !== 'run:terminal-ui-test') return route.continue();
+  await page.route('**/api/workspaces/demo/system', route => {
+    const request = route.request().postDataJSON();
+    if (request?.input?.runId !== 'terminal-ui-test') return route.continue();
+    if (request.name === 'runs.trace') return route.fulfill({ json: { rows: [], nextCursor: null } });
+    if (request.name !== 'runs.inspect') return route.continue();
     return route.fulfill({ json: {
       id: 'terminal-ui-test', job: 'assistant', kind: 'agent', status: 'completed', actor: { id: 'alice' }, input: {}, attempt: 1,
       createdAt: 1000, updatedAt: 2000,
@@ -13,11 +16,7 @@ test('run inspection explains structured tool completion without a fabricated an
       progress: { phase: 'completed', turn: 1, completionMode: 'tool-required', completion: { kind: 'tool', tool: 'submitReport' } },
     } });
   });
-  await page.route('**/api/workspaces/demo/trace', route => {
-    if (route.request().postDataJSON()?.runId !== 'terminal-ui-test') return route.continue();
-    return route.fulfill({ json: { rows: [], nextCursor: null } });
-  });
-  await page.goto('/admin/demo/runs/terminal-ui-test');
+  await page.goto('/admin/demo/displays/systemRunDetail?runId=terminal-ui-test');
   await expect(page.getByLabel('Agent progress')).toContainText(/completed\s+via submitReport/);
   await expect(page.getByLabel('Agent progress')).toContainText('Terminating tool required');
   await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'Result', exact: true }) })).toContainText('report-1');
@@ -137,7 +136,7 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
   await expect(page.getByRole('log', { name: 'Conversation' })).toContainText('Demo assistant');
   await expect(page.getByLabel('Agent progress')).toContainText('Offline demo');
   await page.getByRole('link', { name: 'Inspect run', exact: false }).click();
-  await expect(page).toHaveURL(new RegExp('/runs/' + runId));
+   await expect(page).toHaveURL(new RegExp('/displays/systemRunDetail\\?runId=' + runId));
   await expect(page.getByRole('heading', { name: 'Execution timeline' })).toBeVisible();
   await expect(page.getByLabel('Agent progress')).toContainText('Turn 1');
   await expect(page.getByText('Summarise the first page of my tasks', { exact: true })).toBeVisible();
@@ -148,6 +147,8 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
   const title = `Scheduled task ${Date.now()}`;
   await page.getByLabel('Task title', { exact: false }).fill(title);
   await page.getByRole('button', { name: 'Create task', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Task details' })).toBeVisible();
+  await page.getByRole('link', { name: '← Back to results' }).click();
   await page.getByRole('row').filter({ hasText: title }).getByRole('button', { name: 'Schedule', exact: true }).click();
   await page.getByRole('dialog').getByLabel('Delay in seconds', { exact: false }).fill('1');
   const scheduled = page.waitForResponse(response => response.url().endsWith('/mutate') && response.request().postDataJSON()?.name === 'scheduleCompletion');
@@ -164,13 +165,25 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
   expect(errors).toEqual([]);
 });
 
+test('assistant renders a live display reference inside a chat message', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.getByRole('link', { name: 'Assistant', exact: false }).click();
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Show my tasks as a dashboard.');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  const conversation = page.getByRole('log', { name: 'Conversation' });
+  await expect(conversation).toContainText('Live display', { timeout: 15_000 });
+  await expect(conversation.getByRole('heading', { name: 'Project tasks' })).toBeVisible();
+  await expect(conversation.getByText('Open this workspace in two browser windows')).toBeVisible();
+});
+
 test('operation explorer, validation, JSON fallback and unavailable deep links', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
   await page.getByRole('button', { name: 'Open as Alice' }).click();
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
-  await page.goto('/admin/demo/operations/mutation/createTask');
+  await page.goto('/admin/demo/displays/systemOperation?kind=mutation&name=createTask');
   await expect(page.getByRole('heading', { name: 'Create task', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Create task', exact: true }).click();
   await expect(page.getByRole('alert').filter({ hasText: 'Please check the form' })).toBeVisible();
@@ -183,10 +196,198 @@ test('operation explorer, validation, JSON fallback and unavailable deep links',
   await page.getByRole('link').filter({ hasText: 'Tasks' }).filter({ hasText: 'Browse records' }).click();
   await expect(page.getByRole('table')).toContainText(title);
   await page.getByRole('link', { name: 'History', exact: true }).click();
+  await expect(page).toHaveURL(/systemHistory/);
   await expect(page.getByRole('table')).toContainText('mutation:createTask');
-  await page.goto('/admin/demo/pages/toString');
-  await expect(page.getByRole('heading', { name: 'Page unavailable' })).toBeVisible();
-  await page.goto('/admin/demo/operations/mutation/constructor');
-  await expect(page.getByRole('heading', { name: 'Operation unavailable' })).toBeVisible();
+  await page.goto('/admin/demo/displays/toString');
+  await expect(page.getByRole('heading', { name: 'Display unavailable' })).toBeVisible();
+  await page.goto('/admin/demo/displays/systemOperation?kind=mutation&name=constructor');
+  await expect(page.getByText('Operation unavailable')).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test('a parameterized display resolves only its declared route inputs', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.goto('/admin/demo/displays/project?projectId=inbox&privateToken=not-forwarded');
+  await expect(page.getByRole('heading', { name: 'Project detail' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Project summary' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Project tasks' })).toBeVisible();
+});
+
+test('embedded displays receive declared properties and keep sibling filters isolated', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.goto('/admin/demo/displays/embedDemo');
+  const embeds = page.locator('.display-embed');
+  await expect(embeds).toHaveCount(2);
+  const first = embeds.nth(0);
+  const second = embeds.nth(1);
+  await expect(first.getByRole('heading', { name: 'Project tasks' })).toBeVisible();
+  await expect(second.getByRole('heading', { name: 'Project tasks' })).toBeVisible();
+  await expect(first.getByRole('row').filter({ hasText: 'Open this workspace in two browser windows' })).toBeVisible();
+  await first.getByRole('searchbox', { name: 'Search Project tasks' }).fill('no such task');
+  await expect(first.getByText('No matches', { exact: false })).toBeVisible();
+  await expect(second.getByRole('row').filter({ hasText: 'Open this workspace in two browser windows' })).toBeVisible();
+});
+
+test('typed display state drives multiple sources and persists only when declared', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.goto('/admin/demo/displays/statefulProject?projectId=%22inbox%22');
+  const status = page.getByLabel('Shared task status');
+  await expect(status).toHaveValue('"open"');
+  const summary = page.locator('.panel').filter({ has: page.getByRole('heading', { name: 'Matching tasks' }) });
+  await expect(summary).toContainText('Count');
+  await status.selectOption('"done"');
+  await expect(page).toHaveURL(/__state\.statefulProject\.status=%22done%22/);
+  await expect(page.getByRole('heading', { name: 'Tasks in selected state' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel('Shared task status')).toHaveValue('"done"');
+  await page.getByRole('button', { name: 'Apply all-task filter', exact: true }).click();
+  await expect(page.getByLabel('Shared task status')).toHaveValue('"all"');
+  await expect(page).toHaveURL(/__state\.statefulProject\.status=%22all%22/);
+
+  const commandRow = page.getByRole('row').filter({ hasText: 'Alice’s private task — Bob cannot sync this row' });
+  await commandRow.getByRole('button', { name: 'Complete, filter done and open', exact: true }).click();
+  await expect(page).toHaveURL(/\/displays\/taskDetail\?taskId=/);
+  const back = new URL(page.url()).searchParams.get('__back');
+  expect(back).toContain('__state.statefulProject.status=%22done%22');
+});
+
+test('an identical live document snapshot preserves an open edit dialog and its unsaved draft', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.goto('/admin/demo/displays/editReconciliationDemo?projectId=%22inbox%22');
+  const editableRow = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'Edit task', exact: true }) }).first();
+  await editableRow.getByRole('button', { name: 'Edit task', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  const draft = `Unsubmitted ${Date.now()}`;
+  await dialog.getByLabel('Task title', { exact: false }).fill(draft);
+
+  const other = await page.context().newPage();
+  await other.goto('/admin/demo/displays/tasks');
+  const create = other.locator('section').filter({ has: other.getByRole('heading', { name: 'Create task', exact: true }) });
+  await create.getByLabel('Task title', { exact: false }).fill(`Refresh trigger ${Date.now()}`);
+  await create.getByRole('button', { name: 'Create task', exact: true }).click();
+
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel('Task title', { exact: false })).toHaveValue(draft);
+  expect(errors).toEqual([]);
+  await other.close();
+});
+
+test('embed budget rejects the 21st active instance and releases reservations on teardown', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.goto('/admin/demo/displays/embedBudgetDemo');
+  await page.getByRole('button', { name: 'Open 21 embedded displays' }).click();
+  const modal = page.getByRole('dialog', { name: 'Open 21 embedded displays' });
+  const embeds = modal.locator('.display-embed');
+  await expect(embeds).toHaveCount(21);
+  await expect(embeds.nth(0).getByRole('heading', { name: 'Project tasks' })).toBeVisible({ timeout: 10_000 });
+  await expect(embeds.nth(20)).toContainText('The embedded display resource budget has been reached.');
+  await modal.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(modal).toHaveCount(0);
+  await page.getByRole('button', { name: 'Open 21 embedded displays' }).click();
+  const reopened = page.getByRole('dialog', { name: 'Open 21 embedded displays' });
+  await expect(reopened.locator('.display-embed').nth(0).getByRole('heading', { name: 'Project tasks' })).toBeVisible({ timeout: 10_000 });
+  await expect(reopened.locator('.display-embed').nth(20)).toContainText('The embedded display resource budget has been reached.');
+});
+
+test('recursive layouts render columns and dialogs and submit a declared action button', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.goto('/admin/demo/displays/layouts');
+  await expect(page.getByRole('heading', { name: 'Layout example' })).toBeVisible();
+  await expect(page.locator('.display-columns > .display-column')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Open layout dialog' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Helpful details' });
+  await expect(dialog.getByRole('heading', { name: 'Dialog content' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+
+  await page.getByRole('button', { name: 'Create task from layout' }).click();
+  const actionDialog = page.getByRole('dialog', { name: 'Create task from layout' });
+  const title = `Layout action ${Date.now()}`;
+  await actionDialog.getByLabel('Task title', { exact: false }).fill(title);
+  const response = page.waitForResponse(result => result.url().endsWith('/mutate') && result.request().postDataJSON()?.name === 'createTask');
+  await actionDialog.getByRole('button', { name: 'Create task from layout', exact: true }).click();
+  expect((await response).ok()).toBe(true);
+  await expect(actionDialog).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('a collection selection drives a separately loaded and authorized record source', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.goto('/admin/demo/displays/selection');
+  await expect(page.getByText('Select a row in the related collection to load this result.')).toBeVisible();
+  const row = page.getByRole('row').nth(1);
+  const selectedTitle = await row.locator('td').first().innerText();
+  await row.getByRole('button', { name: 'Select', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Selected task', exact: true })).toBeVisible();
+  await expect(page.locator('.panel').filter({ has: page.getByRole('heading', { name: 'Selected task', exact: true }) })).toContainText(selectedTitle);
+  await row.getByRole('button', { name: 'Selected', exact: true }).click();
+  await expect(page.getByText('Select a row in the related collection to load this result.')).toBeVisible();
+});
+
+test('relationship lookups, property-bound detail displays and back navigation preserve collection state', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.goto('/admin/demo/displays/tasks');
+  await expect(page.getByRole('combobox', { name: 'Project', exact: true })).toContainText('Roadmap');
+  await page.getByRole('combobox', { name: 'Project', exact: true }).selectOption('"roadmap"');
+  await page.getByRole('textbox', { name: 'Task title' }).fill('Relationship detail fixture');
+  await page.getByRole('button', { name: 'Create task', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Task details' })).toBeVisible();
+  await expect(page.getByText('Relationship detail fixture', { exact: true })).toBeVisible();
+  await page.getByRole('link', { name: '← Back to results' }).click();
+
+  await page.goto('/admin/demo/displays/project?projectId=%22roadmap%22');
+  await expect(page.getByRole('heading', { name: 'Project tasks' })).toBeVisible();
+  await expect(page.locator('.source-status').filter({ hasText: 'Connecting…' })).toHaveCount(0, { timeout: 10_000 });
+  const row = page.getByRole('row').filter({ hasText: 'Relationship detail fixture' });
+  await expect(row).toBeVisible();
+  await page.getByRole('searchbox', { name: 'Search Project tasks' }).fill('Relationship detail fixture');
+  await row.getByRole('link', { name: 'Details' }).click();
+  await expect(page.getByRole('heading', { name: 'Task details' })).toBeVisible();
+  await expect(page.getByText('Relationship detail fixture', { exact: true })).toBeVisible();
+  await page.getByRole('link', { name: '← Back to results' }).click();
+  await expect(page).toHaveURL(/filter\.project-tasks\.search=/);
+  await expect(page.getByRole('searchbox', { name: 'Search Project tasks' })).toHaveValue('Relationship detail fixture');
+  await expect(page.getByRole('row').filter({ hasText: 'Relationship detail fixture' })).toBeVisible();
+});
+
+test('agent-composable saved documents are policy-checked, private, navigable and dynamically resolved', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.getByRole('link', { name: 'Saved displays', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Title', exact: false }).fill('My inbox dashboard');
+  await page.getByRole('button', { name: 'Create dashboard draft', exact: true }).click();
+  await expect(page).toHaveURL(/\/displays\/savedDisplay\?savedDisplayId=/);
+  await expect(page.getByRole('heading', { name: 'Saved display' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Project summary' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Project tasks' })).toBeVisible();
+  await expect(page.getByText('Open this workspace in two browser windows')).toBeVisible();
+  const savedDisplayId = new URL(page.url()).searchParams.get('savedDisplayId');
+  expect(savedDisplayId).toBeTruthy();
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Bob' }).click();
+  await page.goto(`/admin/demo/displays/savedDisplay?savedDisplayId=${encodeURIComponent(savedDisplayId!)}`);
+  await expect(page.getByRole('alert')).toContainText('not found');
+  await expect(page.getByRole('heading', { name: 'Project tasks' })).toHaveCount(0);
+});
+
+test('a registered custom task-board renderer loads its authorized live source', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await page.goto('/admin/demo/displays/board');
+  await expect(page.getByRole('heading', { name: 'Component demo' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Tasks grouped by status' })).toBeVisible();
+  await expect(page.locator('.task-lane').filter({ hasText: 'Live task' })).toContainText('Open');
+  await expect(page.locator('.task-lane').filter({ hasText: 'Open this workspace in two browser windows' })).toContainText('Open this workspace in two browser windows');
 });

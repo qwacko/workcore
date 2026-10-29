@@ -1,6 +1,7 @@
 import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import { defineSchema, idColumn, timestampColumns, versionColumn } from '@workcore/core';
 import { fileTable } from '@workcore/files';
+import { savedDisplayTable } from '@workcore/saved-displays';
 export { fileTable };
 export { workcoreHistory, workcoreKv, workcoreMeta, workcoreRequests, workcoreRuns, workcoreSchedules, workcoreSteps } from '@workcore/core/schema';
 
@@ -14,7 +15,8 @@ export const tasks = sqliteTable('tasks', {
 }, table => [index('tasks_project').on(table.projectId, table.id), index('tasks_owner').on(table.ownerId, table.id)]);
 export const messages = sqliteTable('messages', {
   ...idColumn(), ownerId: text('owner_id').notNull(), role: text('role', { enum: ['user', 'assistant'] }).notNull(),
-  content: text('content').notNull(), at: integer('at').notNull(),
+  content: text('content').notNull(), parts: text('parts').notNull().default('[]'), at: integer('at').notNull(),
 }, table => [index('messages_owner_at').on(table.ownerId, table.at, table.id)]);
+export const savedDisplays = savedDisplayTable;
 
-export const schema = defineSchema({ members, tasks, messages, files: fileTable });
+export const schema = defineSchema({ members, tasks, messages, savedDisplays, files: fileTable });

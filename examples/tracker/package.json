@@ -15,6 +15,7 @@
     "@workcore/client": "workspace:*",
     "@workcore/core": "workspace:*",
     "@workcore/files": "workspace:*",
+    "@workcore/saved-displays": "workspace:*",
     "drizzle-orm": "^0.45.4",
     "zod": "^4.6.7"
   },

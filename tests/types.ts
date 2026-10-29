@@ -13,6 +13,9 @@ function checkTypes() {
     return wrong;
   });
   client.query('myTaskPage', { limit: 10 });
+  client.display('project', { projectId: 'inbox' });
+  // @ts-expect-error Dynamic display input is inferred from its schema.
+  client.display('project', { projectId: 10 });
   client.subscribe('tasks', {}, state => { const done: boolean | undefined = state.data?.[0]?.done; return done; });
   // @ts-expect-error Unknown mutation name.
   client.mutate('missing', {});
@@ -43,24 +46,43 @@ triggered.mutation({
 });
 const list = definitions.view({ input: z.object({}), output: z.array(z.object({ id: z.string(), revision: z.number() })), dependsOn: [], handler: () => [] });
 const edit = definitions.mutation({ input: z.object({ id: z.string(), revision: z.number() }), output: z.null(), handler: () => null });
+const details = definitions.view({ input: z.object({ taskId: z.string() }), output: z.object({ id: z.string() }), dependsOn: [], handler: () => ({ id: 'one' }) });
+const numberDetails = definitions.view({ input: z.object({ taskId: z.number() }), output: z.object({ id: z.string() }), dependsOn: [], handler: () => ({ id: 'one' }) });
 function checkUI() {
   field(z.string(), { label: 'Name', control: 'textarea' });
   // @ts-expect-error Unknown control types are rejected.
   field(z.string(), { control: 'magic' });
   // @ts-expect-error A checkbox is not a numeric control.
   field(z.number(), { control: 'checkbox' });
-  ui.collection(list, ({ form }) => ({ actions: [form(edit, { label: 'Edit', bind: { id: 'id', revision: 'revision' } })] }));
-  ui.collection(list, ({ form }) => ({ actions: [form(edit, { label: 'Edit', bind: {
+  ui.collection(list, ({ form }) => ({ id: 'valid-rows', actions: [form(edit, { label: 'Edit', bind: { id: 'id', revision: 'revision' } })] }));
+  ui.collection(list, ({ form }) => ({ id: 'invalid-path-rows', actions: [form(edit, { label: 'Edit', bind: {
     // @ts-expect-error Source path does not exist.
     id: 'missing',
   } })] }));
-  ui.collection(list, ({ form }) => ({ actions: [form(edit, { label: 'Edit', bind: {
+  ui.collection(list, ({ form }) => ({ id: 'incompatible-rows', actions: [form(edit, { label: 'Edit', bind: {
     // @ts-expect-error A string source cannot bind to a numeric destination.
     revision: 'id',
   } })] }));
-  ui.collection(list, () => ({ columns: [
+  ui.collection(list, () => ({ id: 'invalid-column-rows', columns: [
     // @ts-expect-error Invalid column path.
     { path: 'missing' },
   ] }));
+  ui.combined.masterDetail(list, details, { id: 'tasks', title: 'Tasks', key: 'id', detailInput: 'taskId' });
+  ui.combined.masterDetail(list, numberDetails, { id: 'bad-tasks', title: 'Bad tasks',
+    // @ts-expect-error Selected string row IDs cannot bind to a numeric source input.
+    key: 'id', detailInput: 'taskId',
+  });
+  const dynamicDisplay = definitions.display({
+    input: z.object({ slug: z.string() }), metadata: { title: 'Detail' },
+    handler: (_context, input) => {
+      const slug: string = input.slug;
+      // @ts-expect-error Display input is inferred and checked from its Zod schema.
+      const wrong: number = input.slug;
+      void wrong;
+      void slug;
+      return ui.document({ blocks: [] });
+    },
+  });
+  void dynamicDisplay;
 }
 void checkUI;

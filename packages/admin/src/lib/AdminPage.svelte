@@ -1,18 +1,39 @@
 <script lang="ts">
   import { getContext } from 'svelte';
-  import type { Manifest } from '@workcore/core';
+  import { page } from '$app/state';
+  import type { Json, Manifest, ManifestDocument } from '@workcore/core';
+  import type { RendererRegistry } from './renderer-context.js';
   import { sessionKey, type SessionStore } from './session.js';
-  import ActionForm from './ActionForm.svelte';
-  import SourcePanel from './SourcePanel.svelte';
-  let { definition }: { definition: Manifest['ui']['pages'][string] } = $props();
+  import DisplayDocumentRenderer from './DisplayDocumentRenderer.svelte';
+  let { definition, name = 'overview', registry = {} }: { definition: Manifest['ui']['displays'][string]; name?: string; registry?: RendererRegistry } = $props();
   const session = getContext<SessionStore>(sessionKey);
+  let document = $state<ManifestDocument | undefined>(undefined);
+  let error = $state('');
+  const input = $derived.by(() => {
+    const params = definition.metadata.route?.path.match(/:([a-zA-Z][a-zA-Z0-9_]*)/g)?.map(value => value.slice(1)) ?? [];
+    return Object.fromEntries(params.flatMap(key => {
+      const value = page.url.searchParams.get(key);
+      if (value === null) return [];
+      try { return [[key, JSON.parse(value)]]; } catch { return [[key, value]]; }
+    })) as Json;
+  });
+  const backHref = $derived.by(() => {
+    const candidate = page.url.searchParams.get('__back');
+    const prefix = $session ? `/admin/${encodeURIComponent($session.workspace)}/` : '';
+    return candidate && prefix && candidate.startsWith(prefix) && !candidate.startsWith('//') ? candidate : undefined;
+  });
+  $effect(() => {
+    if (definition.document) { document = definition.document; error = ''; return; }
+    if (!$session) return;
+    const currentInput = input;
+    document = undefined; error = '';
+    const subscription = ($session.client.subscribeDisplay as (display: string, properties: Json, listener: (state: { status: string; data?: ManifestDocument; error?: { message: string } }) => void) => { unsubscribe(): void })(name, currentInput, state => {
+      if (state.status === 'live' && state.data) { document = state.data; error = ''; }
+      else if (state.status === 'error') { error = state.error?.message ?? 'Display unavailable'; document = undefined; }
+    });
+    return () => subscription.unsubscribe();
+  });
 </script>
-<div class="page-heading"><div><div class="eyebrow">Workspace application</div><h1>{definition.title}</h1>{#if definition.description}<p>{definition.description}</p>{/if}</div><span class="badge">Manifest-driven</span></div>
-<div class="page-grid">
-  {#each definition.blocks as block (block.id)}
-    <section class="panel" class:wide={block.kind === 'collection' || block.kind === 'chat'}>
-      <div class="panel-heading"><div><h2>{block.title ?? (block.source ? $session?.manifest[block.source.kind][block.source.name]?.ui?.label ?? block.source.name : block.action?.label)}</h2>{#if block.description}<p>{block.description}</p>{/if}</div></div>
-      {#if block.kind === 'form' && block.action}<ActionForm action={block.action} />{:else}<SourcePanel {block} />{/if}
-    </section>
-  {/each}
-</div>
+{#if backHref}<a class="text-button" href={backHref}>← Back to results</a>{/if}
+<div class="page-heading"><div><div class="eyebrow">{definition.metadata.classification === 'admin' ? 'Administration' : 'Workspace application'}</div><h1>{definition.metadata.title}</h1>{#if definition.metadata.description}<p>{definition.metadata.description}</p>{/if}</div><span class="badge">Display protocol</span></div>
+{#if error}<section class="panel notice error" role="alert">{error}</section>{:else if !document}<div class="skeleton" aria-label="Loading display"></div>{:else}{#key name}<DisplayDocumentRenderer {document} {input} {registry} displayName={name} />{/key}{/if}

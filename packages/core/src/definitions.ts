@@ -1,7 +1,7 @@
 import type { DrizzleSqliteDODatabase } from 'drizzle-orm/durable-sqlite';
 import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import type { z } from 'zod';
-import type { AdminDefinition, OperationUI } from './ui.js';
+import type { DisplayDefinition, DisplaysDefinition, OperationUI } from './ui.js';
 import { workcoreSchema } from './schema.js';
 import { getTableName } from 'drizzle-orm';
 import { builtinTriggers } from './triggers.js';
@@ -58,7 +58,7 @@ export type MutationContext<S extends Tables, T extends string = string> = {
   schedule<I extends z.ZodType>(job: Job<I>, input: z.input<I>, options: { at: number; everyMs?: number }): string;
   cancelSchedule(id: string): void;
 };
-export type Definition<S extends Tables = any, V extends Record<string, View> = Record<string, View>, Q extends Record<string, Operation> = Record<string, Operation>, M extends Record<string, Mutation> = Record<string, Mutation>, J extends Record<string, Job> = Record<string, Job>, T extends string = string> = {
+export type Definition<S extends Tables = any, V extends Record<string, View> = Record<string, View>, Q extends Record<string, Operation> = Record<string, Operation>, M extends Record<string, Mutation> = Record<string, Mutation>, J extends Record<string, Job> = Record<string, Job>, T extends string = string, D extends Record<string, DisplayDefinition<any, ReadContext<S>>> = Record<string, DisplayDefinition<any, ReadContext<S>>>> = {
   tables: S;
   migrations: MigrationBundle;
   tableDisplay: Partial<Record<keyof S & string, TableDisplay>>;
@@ -66,7 +66,7 @@ export type Definition<S extends Tables = any, V extends Record<string, View> = 
   views: V; queries: Q; mutations: M; jobs: J;
   authorize: (ctx: ReadContext<S>, action: string) => boolean;
   initialize?: (db: Database<S>) => void;
-  admin?: AdminDefinition;
+  displays?: DisplaysDefinition<ReadContext<S>, D>;
   files?: { table: string; bucket: (env: unknown) => FileBucket; maxSize: number };
 };
 
@@ -93,11 +93,12 @@ export function workspace<S extends Tables, E = unknown, const K extends readonl
   return {
     view<I extends z.ZodType, O extends z.ZodType>(definition: View<I, O, ReadContext<S>, AppTrigger>) { return definition; },
     query<I extends z.ZodType, O extends z.ZodType>(definition: Operation<I, O, ReadContext<S>>) { return definition; },
+    display<I extends z.ZodType>(definition: DisplayDefinition<I, ReadContext<S>>) { return definition; },
     mutation<I extends z.ZodType, O extends z.ZodType>(definition: Mutation<I, O, MutationContext<S, AppTrigger>, AppTrigger>) { return definition; },
     task<I extends z.ZodType, O extends z.ZodType>(definition: Omit<Job<I, O, RunContext<S, E>>, 'kind' | 'tools'>) { return { ...definition, kind: 'task' as const }; },
     agent<I extends z.ZodType, O extends z.ZodType>(definition: Omit<Job<I, O, RunContext<S, E>>, 'kind' | 'maxAttempts' | 'retryDelayMs'> & { tools: Operation[] }) { return { ...definition, kind: 'agent' as const, maxAttempts: 1 }; },
-    define<V extends Record<string, View>, Q extends Record<string, Operation>, M extends Record<string, Mutation>, J extends Record<string, Job>>(
-      definition: Omit<Definition<S, V, Q, M, J, AppTrigger>, 'tables' | 'migrations' | 'tableDisplay' | 'triggerKeys'>,
-    ): Definition<S, V, Q, M, J, AppTrigger> { return { tables, migrations, tableDisplay: options.tableDisplay ?? {}, triggerKeys: options.triggerKeys ?? [] as unknown as readonly K[number][], ...definition }; },
+    define<V extends Record<string, View>, Q extends Record<string, Operation>, M extends Record<string, Mutation>, J extends Record<string, Job>, D extends Record<string, DisplayDefinition<any, ReadContext<S>>>>(
+      definition: Omit<Definition<S, V, Q, M, J, AppTrigger, D>, 'tables' | 'migrations' | 'tableDisplay' | 'triggerKeys'>,
+    ): Definition<S, V, Q, M, J, AppTrigger, D> { return { tables, migrations, tableDisplay: options.tableDisplay ?? {}, triggerKeys: options.triggerKeys ?? [] as unknown as readonly K[number][], ...definition }; },
   };
 }

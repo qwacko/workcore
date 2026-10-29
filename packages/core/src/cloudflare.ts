@@ -6,9 +6,10 @@ import { encode, WorkcoreError } from './json.js';
 import { shouldRefreshView } from './triggers.js';
 
 export type Session = { actor: Actor; expiresAt: number };
-type Subscription = { id: string; name: string; input: unknown };
+type Subscription = { id: string; kind: 'view' | 'display' | 'manifest'; name: string; input: unknown };
 type Attachment = { session: Session; subscriptions: Subscription[] };
 const MAX_MESSAGE_BYTES = 65_536;
+const MUTATING_SYSTEM_OPERATIONS = new Set(['runs.cancel', 'runs.retry', 'schedules.enable', 'schedules.disable']);
 
 function errorData(error: unknown): { code: string; message: string } {
   if (error instanceof WorkcoreError) return { code: error.code, message: error.message };
@@ -20,7 +21,7 @@ function errorResponse(error: unknown): Response {
   return Response.json({ error: errorData(error) }, { status: error instanceof WorkcoreError ? error.status : error instanceof z.ZodError ? 400 : 500, headers: { 'cache-control': 'no-store' } });
 }
 const message = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('subscribe'), id: z.string().min(1).max(100), name: z.string().min(1).max(64), input: z.unknown() }),
+  z.object({ type: z.literal('subscribe'), id: z.string().min(1).max(100), kind: z.enum(['view', 'display', 'manifest']).default('view'), name: z.string().max(64), input: z.unknown() }),
   z.object({ type: z.literal('unsubscribe'), id: z.string() }),
   z.object({ type: z.literal('refresh') }),
 ]);
@@ -65,23 +66,44 @@ export class Workspace<E = unknown> extends DurableObject<E> {
   private valid(session: Session): void {
     if (!session.actor.id || session.expiresAt <= Date.now()) throw new WorkcoreError('UNAUTHENTICATED', 'Session expired', 401);
   }
-  private refresh(socket: WebSocket, attachment: Attachment, changed?: Set<string>): void {
+  private send(socket: WebSocket, message: unknown, maxBytes = 600_000): void {
+    if (socket.readyState === WebSocket.OPEN) socket.send(encode(message, maxBytes));
+  }
+  private refresh(socket: WebSocket, attachment: Attachment, changed?: Set<string>, onlyId?: string): void {
     try { this.valid(attachment.session); } catch { socket.close(1008, 'Session expired'); return; }
     const retained: Subscription[] = [];
-    for (const subscription of attachment.subscriptions) {
+      for (const subscription of attachment.subscriptions) {
       try {
+        if (onlyId && subscription.id !== onlyId) { retained.push(subscription); continue; }
+        if (subscription.kind === 'manifest') {
+          this.send(socket, { type: 'snapshot', id: subscription.id, data: this.engine.manifest(attachment.session.actor), revision: this.engine.revision });
+          retained.push(subscription);
+          continue;
+        }
+        if (subscription.kind === 'display') {
+          const display = this.engine.definition.displays?.displays[subscription.name];
+          if (!display || !this.engine.can(attachment.session.actor, `display:${subscription.name}`)) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
+          // Display handlers may read application tables not declared as view dependencies.
+          // Re-resolve on commits rather than caching a potentially stale or private document.
+          if (!changed || changed.size) {
+            const result = this.engine.resolveDisplay(attachment.session.actor, subscription.name, subscription.input);
+             this.send(socket, { type: 'snapshot', id: subscription.id, data: result, revision: this.engine.revision });
+          }
+          retained.push(subscription);
+          continue;
+        }
         if (!this.engine.can(attachment.session.actor, `view:${subscription.name}`)) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
         const view = this.engine.definition.views[subscription.name];
         if (!changed || shouldRefreshView(view?.dependsOn, changed)) {
           const result = this.engine.query(attachment.session.actor, subscription.name, subscription.input, true);
-          socket.send(encode({ type: 'snapshot', id: subscription.id, ...result }, 600_000));
+           this.send(socket, { type: 'snapshot', id: subscription.id, ...result });
         } else {
           // Acknowledge revisions that do not affect this view as well.
-          socket.send(encode({ type: 'revision', id: subscription.id, revision: this.engine.revision }));
+           this.send(socket, { type: 'revision', id: subscription.id, revision: this.engine.revision });
         }
         retained.push(subscription);
       } catch (error) {
-        socket.send(encode({ type: 'error', id: subscription.id, error: errorData(error) }));
+         this.send(socket, { type: 'error', id: subscription.id, error: errorData(error) });
       }
     }
     attachment.subscriptions = retained;
@@ -125,6 +147,9 @@ export class Workspace<E = unknown> extends DurableObject<E> {
       if (path === '/query') {
         const input = call.parse(body);
         result = this.engine.query(session.actor, input.name, input.input);
+      } else if (path === '/display') {
+        const input = z.object({ name: z.string(), input: z.json().default({}) }).parse(body);
+        result = this.engine.resolveDisplay(session.actor, input.name, input.input);
       } else if (path === '/mutate' || path === '/enqueue') {
         const input = call.parse(body);
         if (!input.requestId) throw new WorkcoreError('INVALID_REQUEST_ID', 'requestId is required');
@@ -141,6 +166,11 @@ export class Workspace<E = unknown> extends DurableObject<E> {
         await this.arm();
         this.engine.control(session.actor, input.resource, input.id, input.action);
         result = { revision: this.engine.revision };
+      } else if (path === '/system') {
+        const input = z.object({ name: z.string(), input: z.json().default({}) }).parse(body);
+        // Arm before writes so queued or newly scheduled work survives on idle workspaces.
+        if (MUTATING_SYSTEM_OPERATIONS.has(input.name)) await this.arm();
+        result = this.engine.system(session.actor, input.name, input.input);
       } else throw new WorkcoreError('NOT_FOUND', 'Unknown endpoint', 404);
       return Response.json(result, { headers: { 'cache-control': 'no-store' } });
     } catch (error) { return errorResponse(error); }
@@ -212,17 +242,20 @@ export class Workspace<E = unknown> extends DurableObject<E> {
       if (input.type === 'subscribe') {
         // One bounded input per attachment, at most 20 subscriptions and 8KiB of hibernated metadata.
         const subscriptions = attachment.subscriptions.filter(item => item.id !== input.id);
-        subscriptions.push({ id: input.id, name: input.name, input: input.input });
+        subscriptions.push({ id: input.id, kind: input.kind, name: input.name, input: input.input });
         if (subscriptions.length > 20) throw new WorkcoreError('SUBSCRIPTION_LIMIT', 'At most 20 subscriptions per connection');
         const next = { ...attachment, subscriptions };
         encode(next, 8000);
-        this.refresh(socket, next);
+        // A new source subscription gets its own initial snapshot. Refreshing every
+        // existing subscription here would resend dynamic display documents, remount
+        // their source nodes, and create an unbounded subscribe/refresh loop.
+        this.refresh(socket, next, undefined, input.id);
       } else if (input.type === 'unsubscribe') {
         attachment.subscriptions = attachment.subscriptions.filter(item => item.id !== input.id);
         socket.serializeAttachment(attachment);
       } else this.refresh(socket, attachment);
     } catch (error) {
-      socket.send(encode({ type: 'error', error: errorData(error) }));
+       this.send(socket, { type: 'error', error: errorData(error) }, MAX_MESSAGE_BYTES);
       if (error instanceof WorkcoreError && [401, 403].includes(error.status)) socket.close(1008, 'Access denied');
     }
   }

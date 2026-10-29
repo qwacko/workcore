@@ -1,24 +1,24 @@
 <script lang="ts">
   import { getContext, tick } from 'svelte';
   import type { Json, ManifestBlock } from '@workcore/core';
-  import type { LiveState } from '@workcore/client';
   import { date, readPath, text } from './data.js';
   import { sessionKey, type SessionStore } from './session.js';
   import Markdown from './Markdown.svelte';
   import AgentProgress from './AgentProgress.svelte';
-  let { block, data }: { block: ManifestBlock; data: Json } = $props();
+  import ChatDisplayPart from './ChatDisplayPart.svelte';
+  import { useSource } from './source.svelte.js';
+  import { useRendererHost } from './host-context.svelte.js';
+  let { block, data }: { block: Extract<ManifestBlock, { kind: 'chat' }>; data: Json } = $props();
   const session = getContext<SessionStore>(sessionKey);
+  const host = useRendererHost();
   let prompt = $state('');
   let busy = $state(false);
   let error = $state('');
-  let requestKey = '';
-  let requestId = '';
   let transcript: HTMLDivElement;
-  let run = $state<LiveState<Json>>({ status: 'loading', revision: 0 });
   const messages = $derived(readPath(data, block.messages ?? '') as unknown[] | undefined);
   const runId = $derived(block.runId ? readPath(data, block.runId) as string | null : null);
-  const running = $derived(!!runId && (run.status === 'loading' || !!run.data && typeof run.data === 'object' && !Array.isArray(run.data) && ['queued', 'running'].includes(String(run.data.status))));
-  $effect(() => { if ($session && runId) return $session.sources.watch({ kind: 'resource', name: `run:${runId}` }, {}, value => run = value); });
+  const runLoader = useSource(() => $session?.sources ?? null, () => runId && $session?.manifest.runs ? { kind: 'system', name: 'runs.inspect' } : null, () => ({ runId: runId ?? '' }));
+  const running = $derived(!!runId && (runLoader.state.status === 'loading' || !!runLoader.data && typeof runLoader.data === 'object' && !Array.isArray(runLoader.data) && ['queued', 'running'].includes(String(runLoader.data.status))));
   $effect(() => {
     const count = messages?.length;
     if (count) void tick().then(() => { if (transcript) transcript.scrollTop = transcript.scrollHeight; });
@@ -29,11 +29,7 @@
     busy = true; error = '';
     try {
       const input = { ...block.send.values, [block.promptField]: prompt.trim() };
-      const key = JSON.stringify(input);
-      if (!requestId || requestKey !== key) { requestKey = key; requestId = crypto.randomUUID(); }
-      if (block.send.operation.kind === 'mutation') await $session.client.mutate(block.send.operation.name, input, requestId);
-      else await $session.client.enqueue(block.send.operation.name, input, requestId);
-      requestId = '';
+      await $session.actions.execute(`chat:${block.id}`, block.send.operation, input);
       prompt = ''; $session.sources.refresh();
     } catch (failure) { error = failure instanceof Error ? failure.message : 'Message failed'; }
     finally { busy = false; }
@@ -44,14 +40,22 @@
   {#each messages ?? [] as message (String(readPath(message, block.message?.id ?? 'id')))}
     <article class="chat-message" data-role={readPath(message, block.message?.role ?? 'role')}>
       <div class="message-meta"><strong>{readPath(message, block.message?.role ?? 'role') === 'user' ? 'You' : 'Assistant'}</strong>{#if block.message?.at}<time>{date(readPath(message, block.message.at))}</time>{/if}</div>
-      <Markdown content={readPath(message, block.message?.content ?? 'content')} />
+      {#if block.message?.parts && Array.isArray(readPath(message, block.message.parts))}
+        {#each readPath(message, block.message.parts) as part, index (index)}
+          {#if part && typeof part === 'object' && !Array.isArray(part) && part.type === 'text'}<Markdown content={text(part.text)} />
+          {:else if part && typeof part === 'object' && !Array.isArray(part) && part.type === 'display' && (part.mode === 'live' || part.mode === 'snapshot') && typeof part.display === 'string'}<ChatDisplayPart {part} instanceId={`chat-${String(readPath(message, block.message?.id ?? 'id'))}-${index}`} />
+          {:else}<p class="notice warning">Unsupported chat content part.</p>{/if}
+        {/each}
+      {:else if block.message?.content}<Markdown content={text(readPath(message, block.message.content))} />{/if}
     </article>
   {/each}
 </div>
-{#if runId && $session}
-  {#if run.data && typeof run.data === 'object' && !Array.isArray(run.data) && run.data.progress}<AgentProgress value={run.data.progress} status={run.data.status} />{/if}
-  <div class="chat-execution" role="status"><span class:working={running}>{run.data && typeof run.data === 'object' && !Array.isArray(run.data) ? text(run.data.status) : 'Checking execution…'}</span><a href={`/admin/${$session.workspace}/runs/${runId}`}>Inspect run →</a></div>
-  {#if run.data && typeof run.data === 'object' && !Array.isArray(run.data) && run.data.error}<p class="error">{text(run.data.error)}</p>{/if}
+{#if runId && $session && $session.manifest.runs}
+  {#if runLoader.data && typeof runLoader.data === 'object' && !Array.isArray(runLoader.data) && runLoader.data.progress}<AgentProgress value={runLoader.data.progress} status={runLoader.data.status} />{/if}
+  <div class="chat-execution" role="status"><span class:working={running}>{runLoader.data && typeof runLoader.data === 'object' && !Array.isArray(runLoader.data) ? text(runLoader.data.status) : 'Checking execution…'}</span>{#if host.runHref}<a href={host.runHref(runId)}>Inspect run →</a>{/if}</div>
+  {#if runLoader.data && typeof runLoader.data === 'object' && !Array.isArray(runLoader.data) && runLoader.data.error}<p class="error">{text(runLoader.data.error)}</p>{/if}
+{:else if runId && $session}
+  <div class="chat-execution" role="status">Execution status is unavailable for your current actor.</div>
 {/if}
 {#if block.send}
   <form class="chat-composer" onsubmit={send}>

@@ -1,0 +1,28 @@
+{
+  "blocks": [
+    {
+      "id": "open-tasks",
+      "kind": "collection",
+      "title": "Open tasks",
+      "source": { "kind": "view", "name": "tasks" },
+      "input": { "projectId": "inbox" },
+      "presentation": "table",
+      "columns": [
+        { "path": "title", "label": "Task" },
+        { "path": "done", "format": "badge" }
+      ],
+      "detail": {
+        "display": "taskDetail",
+        "label": "Details",
+        "bind": { "taskId": "id" }
+      }
+    },
+    {
+      "id": "welcome",
+      "kind": "markdown",
+      "title": "About this view",
+      "source": { "kind": "query", "name": "guide" },
+      "path": "content"
+    }
+  ]
+}

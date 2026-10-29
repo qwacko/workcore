@@ -102,6 +102,22 @@ tbody tr:hover { background: #1d2430; }
 .row-actions button, .row-actions .button { white-space: nowrap; }
 .field { display: grid; gap: 7px; margin-bottom: 16px; font-size: .9rem; }
 .field > label { color: #d2dbeb; font-size: .85rem; }
+.field-label { color: #d2dbeb; font-size: .85rem; }
+.repeatable-fields { display: grid; gap: 8px; }
+.repeatable-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+.layout-section { min-width: 0; }
+.section-children { display: grid; gap: 16px; }
+.display-columns { display: grid; grid-template-columns: repeat(var(--display-column-count), minmax(0, 1fr)); align-items: start; }
+.display-columns.gap-compact { gap: 10px; }
+.display-columns.gap-normal { gap: 18px; }
+.display-columns.gap-spacious { gap: 28px; }
+.display-column, .dialog-children { display: grid; gap: 16px; min-width: 0; }
+.display-column > .panel { margin: 0; }
+.dialog-children > .panel { max-height: min(70vh, 720px); overflow: auto; }
+button.primary { background: var(--accent); color: #17120d; }
+button.secondary { background: transparent; color: inherit; border-color: var(--border); }
+button.danger { background: #5b2424; color: #fff; border-color: #874444; }
+@media (max-width: 760px) { .display-columns { grid-template-columns: 1fr; } }
 .form-fields { max-width: 700px; }
 .form-footer { margin-top: 18px; display: flex; justify-content: flex-start; }
 .check { display: flex; align-items: center; gap: 8px; padding-top: 5px; color: var(--muted); }

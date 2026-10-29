@@ -1,0 +1,46 @@
+{
+  "blocks": [
+    {
+      "id": "workspace-card",
+      "kind": "section",
+      "title": "Workspace summary",
+      "appearance": "card",
+      "children": [
+        {
+          "id": "summary-columns",
+          "kind": "columns",
+          "gap": "normal",
+          "columns": [
+            {
+              "id": "left",
+              "children": [
+                { "id": "summary-record", "kind": "record", "source": { "kind": "view", "name": "summary" } }
+              ]
+            },
+            {
+              "id": "right",
+              "children": [
+                {
+                  "id": "quick-create-dialog",
+                  "kind": "dialog",
+                  "triggerLabel": "Quick create",
+                  "children": [
+                    {
+                      "id": "create-task",
+                      "kind": "form",
+                      "action": {
+                        "kind": "form",
+                        "operation": { "kind": "mutation", "name": "createTask" },
+                        "label": "Create task"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -2,11 +2,25 @@
   import { setContext } from 'svelte';
   import { writable } from 'svelte/store';
   import { page } from '$app/state';
+  import { goto } from '$app/navigation';
   import { connect, sessionKey, type Session } from '../../lib/session.js';
-  import { label } from '../../lib/data.js';
+  import { rendererHostKey, type RendererHost } from '../../lib/host-context.svelte.js';
   let { children } = $props();
   const session = writable<Session | null>(null);
   setContext(sessionKey, session);
+  const host: RendererHost = {
+    location: () => new URL(page.url.href),
+    navigate: (href, options) => goto(href, options),
+    displayHref: (name, input = {}) => {
+      const query = new URLSearchParams(Object.entries(input).map(([key, value]) => [key, JSON.stringify(value)]));
+      const back = `${page.url.pathname}${page.url.search}`;
+      const workspaceRoot = `/admin/${encodeURIComponent(page.params.workspace ?? '')}`;
+      if (back.startsWith(`${workspaceRoot}/`)) query.set('__back', back);
+      return `/admin/${encodeURIComponent(page.params.workspace ?? '')}/displays/${encodeURIComponent(name)}${query.size ? `?${query}` : ''}`;
+    },
+    runHref: runId => `/admin/${encodeURIComponent(page.params.workspace ?? '')}/displays/systemRunDetail?runId=${encodeURIComponent(runId)}`,
+  };
+  setContext(rendererHostKey, host);
   let error = $state('');
   let menuOpen = $state(false);
   const workspaceId = $derived(page.params.workspace);
@@ -16,7 +30,7 @@
     let active = true;
     let current: Session | null = null;
     session.set(null); error = '';
-    if (workspace) void connect(workspace).then(value => {
+    if (workspace) void connect(workspace, manifest => session.update(current => current?.workspace === workspace ? { ...current, manifest } : current)).then(value => {
       if (!active) { value.close(); return; }
       current = value; session.set(value);
     }).catch(failure => { if (active) error = failure instanceof Error ? failure.message : 'Unable to connect'; });
@@ -31,32 +45,15 @@
     <a class="brand" href={root}><span class="brand-mark">w</span><span>workcore<span class="brand-subtitle">WORKSPACE CONSOLE</span></span></a>
     <div class="workspace-card"><span class="workspace-icon">▦</span><div><strong>{$session?.manifest.ui.title ?? page.params.workspace}</strong><span class="help">{page.params.workspace} / Cloudflare</span></div></div>
     <nav aria-label="Workspace navigation">
-      <div class="nav-label">Application</div>
-      <a aria-label="Overview" href={root} class:active={page.url.pathname === root || page.url.pathname === root + '/'}><span aria-hidden="true">◈</span> <span>Overview</span></a>
-      {#each Object.entries($session?.manifest.ui.pages ?? {}).filter(([name]) => name !== 'overview') as [name, definition]}
-        <a aria-label={definition.title} href={`${root}/pages/${name}`} class:active={page.url.pathname === `${root}/pages/${name}`}><span aria-hidden="true">◇</span> <span>{definition.title}</span></a>
-      {/each}
-      {#if $session?.manifest.runs}
-        <div class="nav-label">Execution</div>
-        <a aria-label="Runs" href={`${root}/resources/runs`} class:active={page.url.pathname.includes('/runs')}><span aria-hidden="true">↗</span> <span>Runs</span></a>
-      {/if}
-      {#if $session?.manifest.admin}
-        <a aria-label="Schedules" href={`${root}/resources/schedules`} class:active={page.url.pathname.endsWith('/schedules')}><span aria-hidden="true">◷</span> <span>Schedules</span></a>
-        <div class="nav-label">Administration</div>
-        <a aria-label="Tables" href={`${root}/resources/tables`} class:active={page.url.pathname.endsWith('/tables')}><span aria-hidden="true">▤</span> <span>Tables</span></a>
-        <a aria-label="History" href={`${root}/resources/history`} class:active={page.url.pathname.endsWith('/history')}><span aria-hidden="true">≡</span> <span>History</span></a>
-      {/if}
-      {#if $session?.manifest.files.enabled && $session.manifest.files.list}
-        <div class="nav-label">Storage</div>
-        <a aria-label="Files" href={`${root}/resources/files`} class:active={page.url.pathname.endsWith('/files')}><span aria-hidden="true">▧</span> <span>Files</span></a>
-      {/if}
-      <div class="nav-label">Operation explorer</div>
-      {#each ['view', 'query', 'mutation', 'job'] as kind}
-        <details class="nav-group"><summary>{{ view: 'Live views', query: 'Queries', mutation: 'Mutations', job: 'Tasks & agents' }[kind]}</summary>
-          {#each Object.entries($session?.manifest[kind as 'view'] ?? {}) as [name, operation]}
-            <a href={`${root}/operations/${kind}/${name}`} class:active={page.url.pathname === `${root}/operations/${kind}/${name}`}>{operation.ui?.label ?? label(name)}</a>
-          {/each}
-        </details>
+      {#each [...new Set(Object.values($session?.manifest.ui.displays ?? {}).filter(definition => definition.metadata.route?.listed !== false).map(definition => definition.metadata.group ?? 'Displays'))] as group}
+        <div class="nav-label">{group}</div>
+        {#each Object.entries($session?.manifest.ui.displays ?? {}).filter(([, definition]) => definition.metadata.route?.listed !== false && (definition.metadata.group ?? 'Displays') === group).sort(([, a], [, b]) => (a.metadata.order ?? 0) - (b.metadata.order ?? 0)) as [name, definition]}
+          {#if definition.metadata.route?.path === '/'}
+            <a aria-label={definition.metadata.title} href={root} class:active={page.url.pathname === root || page.url.pathname === root + '/'}><span aria-hidden="true">◈</span> <span>{definition.metadata.title}</span></a>
+          {:else}
+            <a aria-label={definition.metadata.title} href={`${root}/displays/${name}`} class:active={page.url.pathname === `${root}/displays/${name}`}><span aria-hidden="true">◇</span> <span>{definition.metadata.title}</span></a>
+          {/if}
+        {/each}
       {/each}
     </nav>
     <div class="sidebar-footer"><span class="avatar">{$session?.manifest.actor.id.slice(0, 1).toUpperCase() ?? '?'}</span><div><strong>{$session?.manifest.actor.id ?? 'Connecting'}</strong><span class="help">{$session?.manifest.admin ? 'Administrator' : 'Workspace member'}</span></div><a href="/" aria-label="Switch demo identity" title="Switch identity">↪</a></div>

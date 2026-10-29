@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "exports": { "./server": "./src/server.ts" },
+  "exports": { "./server": "./src/server.ts", "./renderer": "./src/lib/renderer.ts" },
   "scripts": {
     "build": "vite build --logLevel warn",
     "dev": "vite dev",

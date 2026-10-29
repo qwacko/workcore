@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { getTableName } from 'drizzle-orm';
 import { and, eq, gt, lt, or } from 'drizzle-orm';
 import { workcoreSchema } from './schema.js';
-import { compileAdmin, manifestSchema } from './ui.js';
+import { compileDisplays, compileWireDisplayDocument, displayDocumentSchema, manifestSchema } from './ui.js';
+import type { JsonSchema, ManifestDisplay } from './ui.js';
 import type { Actor, Definition, Job, Json, MutationContext, Operation, ReadContext, RunContext } from './definitions.js';
 import { assertSync, checkName, encode, json, WorkcoreError } from './json.js';
 import { applyMigrations, getJson, saveRun, saveSchedule, Store } from './store.js';
@@ -11,6 +12,20 @@ import { builtinTriggers, shouldRefreshView } from './triggers.js';
 
 export type Result = { data: Json; revision: number };
 export type Commit = { revision: number; changed: Set<string> };
+const systemOperationDefinitions = {
+  'runs.list': { permission: '$runs', input: z.object({ after: z.string().optional() }), label: 'List execution runs' },
+  'runs.inspect': { permission: '$runs', input: z.object({ runId: z.string() }), label: 'Inspect an execution run' },
+  'runs.trace': { permission: '$runs', input: z.object({ runId: z.string(), after: z.number().int().min(0).default(0) }), label: 'Read run trace' },
+  'runs.cancel': { permission: '$admin', input: z.object({ runId: z.string() }), label: 'Cancel a run' },
+  'runs.retry': { permission: '$admin', input: z.object({ runId: z.string() }), label: 'Retry a run' },
+  'schedules.list': { permission: '$admin', input: z.object({ after: z.string().optional() }), label: 'List schedules' },
+  'schedules.inspect': { permission: '$admin', input: z.object({ scheduleId: z.string() }), label: 'Inspect a schedule' },
+  'schedules.enable': { permission: '$admin', input: z.object({ scheduleId: z.string() }), label: 'Enable a schedule' },
+  'schedules.disable': { permission: '$admin', input: z.object({ scheduleId: z.string() }), label: 'Disable a schedule' },
+  'tables.list': { permission: '$admin', input: z.object({}), label: 'List application tables' },
+  'tables.read': { permission: '$admin', input: z.object({ table: z.string(), after: z.string().optional() }), label: 'Browse application table records' },
+  'history.list': { permission: '$admin', input: z.object({ after: z.string().optional() }), label: 'List audit history' },
+} as const;
 
 export class Engine {
   private readonly controllers = new Map<string, AbortController>();
@@ -39,7 +54,7 @@ export class Engine {
       }
     }
     // Resolve references at startup, even if no actor will be allowed to see them.
-    compileAdmin(definition, () => true);
+    compileDisplays(definition, () => true);
     applyMigrations(storage, definition.migrations);
     storage.transactionSync(() => {
       if (!this.meta('initialized')) {
@@ -216,6 +231,31 @@ export class Engine {
       return { data, revision: db.revision };
     });
   }
+  resolveDisplay(actor: Actor, name: string, input: unknown): Json {
+    return this.read(db => {
+      const display = this.definition.displays?.displays[name];
+      if (!display) throw new WorkcoreError('NOT_FOUND', 'Unknown display', 404);
+      this.authorize(db, actor, `display:${name}`);
+      const parsedInput = (display.input ?? z.object({})).parse(input);
+      if (display.wireHandler) {
+        const wire = display.wireHandler({ db: db.db, kv: db.kv, actor, now: Date.now() }, parsedInput);
+        assertSync(wire);
+        return json(compileWireDisplayDocument(this.definition, name, wire, (kind, operation) => this.allowed(db, actor, `${kind}:${operation}`)));
+      }
+      const document = display.handler
+        ? display.handler({ db: db.db, kv: db.kv, actor, now: Date.now() }, parsedInput)
+        : display.document;
+      assertSync(document);
+      const resolvedDisplays = {
+        ...this.definition.displays?.displays,
+        [name]: { metadata: display.metadata, ...(display.input ? { input: display.input } : {}), document: document! },
+      };
+      const definition = { ...this.definition, displays: { ...this.definition.displays, displays: resolvedDisplays } };
+      const resolved = compileDisplays(definition, (kind, operation) => this.allowed(db, actor, `${kind}:${operation}`)).displays[name];
+      if (!resolved?.document) throw new WorkcoreError('FORBIDDEN', 'Display is unavailable', 403);
+      return json(displayDocumentSchema.parse(resolved.document));
+    });
+  }
   private nameOf(map: Record<string, unknown>, operation: unknown): string {
     const entry = Object.entries(map).find(([, value]) => value === operation);
     if (!entry) throw new WorkcoreError('UNREGISTERED_OPERATION', 'Operation must be registered in this workspace');
@@ -308,7 +348,7 @@ export class Engine {
   }
   manifest(actor: Actor): Json {
     return this.read(db => {
-      const manifest: Record<string, Json> = { protocol: 2, actor: { id: actor.id }, admin: this.allowed(db, actor, '$admin'), runs: this.allowed(db, actor, '$runs'), files: {
+      const manifest: Record<string, Json> = { protocol: 3, displayProtocol: 3, actor: { id: actor.id }, admin: this.allowed(db, actor, '$admin'), runs: this.allowed(db, actor, '$runs'), system: {}, files: {
         enabled: !!this.definition.files,
         upload: !!this.definition.files && this.allowed(db, actor, 'file:upload'),
         list: !!this.definition.files && this.allowed(db, actor, 'file:list'),
@@ -323,7 +363,33 @@ export class Engine {
           ...(operation.ui ? { ui: json(operation.ui) } : {}),
         }]));
       }
-      manifest.ui = json(compileAdmin(this.definition, (kind, name) => this.allowed(db, actor, `${kind}:${name}`)));
+      manifest.system = Object.fromEntries(Object.entries(systemOperationDefinitions).filter(([, operation]) => this.allowed(db, actor, operation.permission)).map(([name, operation]) => [name, {
+        input: JSON.parse(JSON.stringify(z.toJSONSchema(operation.input, { io: 'input' }))) as Json,
+        output: { type: 'object', title: operation.label }, ui: { label: operation.label },
+      }]));
+      const ui = compileDisplays(this.definition, (kind, name) => this.allowed(db, actor, `${kind}:${name}`));
+      const systemDisplay = (title: string, path: string, node: Record<string, Json>, input?: JsonSchema): ManifestDisplay => ({
+        metadata: { title, classification: 'admin' as const, group: path.includes('/operations') ? 'Developer tools' : 'Administration', route: { path, listed: !path.split('/').some(part => part.startsWith(':')) } },
+        ...(input ? { input } : {}), document: { blocks: [{ id: 'content', kind: 'system', ...node }] },
+      } as ManifestDisplay);
+      if (this.allowed(db, actor, '$runs')) {
+        ui.displays.systemRuns = systemDisplay('Runs', '/runs', { system: 'resource', resource: 'runs' });
+        ui.displays.systemRunDetail = systemDisplay('Execution detail', '/runs/:runId', { system: 'run-detail' }, { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] });
+      }
+      if (this.allowed(db, actor, '$admin')) {
+        ui.displays.systemSchedules = systemDisplay('Schedules', '/schedules', { system: 'resource', resource: 'schedules' });
+        ui.displays.systemTables = systemDisplay('Tables', '/tables', { system: 'resource', resource: 'tables' });
+        ui.displays.systemHistory = systemDisplay('History', '/history', { system: 'resource', resource: 'history' });
+      }
+      if (this.definition.files && this.allowed(db, actor, 'file:list')) ui.displays.systemFiles = systemDisplay('Files', '/files', { system: 'resource', resource: 'files' });
+      const operationKinds = ['view', 'query', 'mutation', 'job'] as const;
+      if (operationKinds.some(kind => Object.keys(manifest[kind] as Record<string, Json>).length)) {
+        ui.displays.systemOperationIndex = systemDisplay('Operation explorer', '/operations', { system: 'operation-index' });
+        ui.displays.systemOperation = systemDisplay('Operation', '/operations/:kind/:name', { system: 'operation' }, {
+          type: 'object', properties: { kind: { type: 'string', enum: [...operationKinds] }, name: { type: 'string' } }, required: ['kind', 'name'],
+        });
+      }
+      manifest.ui = json(ui);
       return json(manifestSchema.parse(manifest));
     });
   }
@@ -382,6 +448,26 @@ export class Engine {
       const visible = rows.slice(0, 100).map(row => JSON.parse(row.data) as Record<string, Json>);
       return json({ rows: visible, nextCursor: rows.length > 100 ? rows[99]!.id : null });
     });
+  }
+  system(actor: Actor, name: string, input: unknown): Json {
+    const operation = Object.hasOwn(systemOperationDefinitions, name) ? systemOperationDefinitions[name as keyof typeof systemOperationDefinitions] : undefined;
+    if (!operation) throw new WorkcoreError('NOT_FOUND', 'Unknown system operation', 404);
+    const parsed = operation.input.parse(input) as Record<string, Json>;
+    switch (name) {
+      case 'runs.list': return this.inspect(actor, 'runs', String(parsed.after ?? ''));
+      case 'runs.inspect': return this.inspect(actor, `run:${parsed.runId}`);
+      case 'runs.trace': return this.trace(actor, String(parsed.runId), Number(parsed.after ?? 0));
+      case 'runs.cancel': this.control(actor, 'run', String(parsed.runId), 'cancel'); return json({ revision: this.revision });
+      case 'runs.retry': this.control(actor, 'run', String(parsed.runId), 'retry'); return json({ revision: this.revision });
+      case 'schedules.list': return this.inspect(actor, 'schedules', String(parsed.after ?? ''));
+      case 'schedules.inspect': return this.inspect(actor, `schedule:${parsed.scheduleId}`);
+      case 'schedules.enable': this.control(actor, 'schedule', String(parsed.scheduleId), 'enable'); return json({ revision: this.revision });
+      case 'schedules.disable': this.control(actor, 'schedule', String(parsed.scheduleId), 'disable'); return json({ revision: this.revision });
+      case 'tables.list': return this.inspect(actor, 'tables');
+      case 'tables.read': return this.inspect(actor, `table:${parsed.table}`, String(parsed.after ?? ''));
+      case 'history.list': return this.inspect(actor, 'history', String(parsed.after ?? ''));
+      default: throw new WorkcoreError('NOT_FOUND', 'Unknown system operation', 404);
+    }
   }
   trace(actor: Actor, runId: string, after = 0): Json {
     return this.read(db => {
