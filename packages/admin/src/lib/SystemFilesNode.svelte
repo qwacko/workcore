@@ -2,10 +2,11 @@
   import { getContext } from 'svelte';
   import type { Json } from '@workcore/core';
   import { sessionKey, type SessionStore } from './session.js';
+  import { useSource } from './source.svelte.js';
   import DisplayCard from './DisplayCard.svelte';
   import LoadBoundary from './LoadBoundary.svelte';
   import SystemFilesView from './SystemFilesView.svelte';
-  import { useAsyncResource, useTask } from './resource.svelte.js';
+  import { useTask } from './resource.svelte.js';
   import { useRendererHost } from './host-context.svelte.js';
 
   type FilePage = { rows: { id: string; ownerId: string; filename: string; contentType: string; size: number; status: string; createdAt: number; uploadedAt: number | null }[]; nextCursor: string | null };
@@ -14,10 +15,8 @@
   const host = useRendererHost();
   const params = $derived(input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, Json> : {});
   const after = $derived(String(host.location().searchParams.get('after') ?? params.after ?? ''));
-  const files = useAsyncResource<FilePage, { session: NonNullable<typeof $session>; after: string }>(
-    () => $session?.manifest.files.list ? { session: $session, after } : null,
-    ({ session: currentSession, after: cursor }) => currentSession.client.files.list(cursor || undefined),
-  );
+  const files = useSource(() => $session?.sources ?? null, () => $session?.manifest.files.list ? ({ kind: 'system', name: 'files.list' }) : null, () => ({ after }));
+  const filePage = $derived(files.data && typeof files.data === 'object' && !Array.isArray(files.data) ? files.data as unknown as FilePage : undefined);
   const uploadTask = useTask(async (file: File) => { if (!$session) throw new Error('Session is unavailable'); await $session.client.files.upload(file); files.refresh(); });
   const removeTask = useTask(async (id: string) => { if (!$session) throw new Error('Session is unavailable'); await $session.client.files.remove(id); files.refresh(); });
   const downloadTask = useTask(async (id: string, filename: string) => {
@@ -50,9 +49,9 @@
 {:else}<DisplayCard wide>
   {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
   <LoadBoundary state={files.state}>
-    {#snippet children(files: FilePage)}
-      <SystemFilesView files={files} canUpload={$session?.manifest.files.upload ?? false} canDownload={$session?.manifest.files.download ?? false} canDelete={$session?.manifest.files.delete ?? false} {busy} error="" onupload={upload} ondownload={download} onremove={remove} />
-      {#if files.nextCursor}<div class="pagination"><button onclick={() => next(files.nextCursor!)}>Next page →</button></div>{/if}
+    {#snippet children(_data: Json)}
+      <SystemFilesView files={filePage ?? { rows: [], nextCursor: null }} canUpload={$session?.manifest.files.upload ?? false} canDownload={$session?.manifest.files.download ?? false} canDelete={$session?.manifest.files.delete ?? false} {busy} error="" onupload={upload} ondownload={download} onremove={remove} />
+      {#if filePage?.nextCursor}<div class="pagination"><button onclick={() => next(filePage.nextCursor!)}>Next page →</button></div>{/if}
     {/snippet}
   </LoadBoundary>
 </DisplayCard>{/if}

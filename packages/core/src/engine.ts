@@ -25,6 +25,7 @@ const systemOperationDefinitions = {
   'tables.list': { permission: '$admin', input: z.object({}), label: 'List application tables' },
   'tables.read': { permission: '$admin', input: z.object({ table: z.string(), after: z.string().optional() }), label: 'Browse application table records' },
   'history.list': { permission: '$admin', input: z.object({ after: z.string().optional() }), label: 'List audit history' },
+  'files.list': { permission: 'file:list', input: z.object({ after: z.string().optional() }), label: 'List uploaded files' },
 } as const;
 
 export class Engine {
@@ -466,7 +467,21 @@ export class Engine {
       case 'tables.list': return this.inspect(actor, 'tables');
       case 'tables.read': return this.inspect(actor, `table:${parsed.table}`, String(parsed.after ?? ''));
       case 'history.list': return this.inspect(actor, 'history', String(parsed.after ?? ''));
+      case 'files.list': return json(this.listFiles(actor, String(parsed.after ?? '')));
       default: throw new WorkcoreError('NOT_FOUND', 'Unknown system operation', 404);
+    }
+  }
+  /** Trigger dependencies for the read-only system operations that support live subscriptions. */
+  systemDependencies(name: string): readonly string[] | null {
+    switch (name) {
+      case 'runs.list': case 'runs.inspect': case 'runs.trace': return [builtinTriggers.runs];
+      case 'schedules.list': case 'schedules.inspect': return [builtinTriggers.schedules];
+      case 'history.list': return [builtinTriggers.history];
+      case 'files.list': return [builtinTriggers.files];
+      // Table reads may depend on any application table, whose trigger keys are app-defined.
+      case 'tables.read': return ['*'];
+      case 'tables.list': return [];
+      default: return null;
     }
   }
   trace(actor: Actor, runId: string, after = 0): Json {

@@ -6,7 +6,7 @@ import { encode, WorkcoreError } from './json.js';
 import { shouldRefreshView } from './triggers.js';
 
 export type Session = { actor: Actor; expiresAt: number };
-type Subscription = { id: string; kind: 'view' | 'display' | 'manifest'; name: string; input: unknown };
+type Subscription = { id: string; kind: 'view' | 'display' | 'manifest' | 'system'; name: string; input: unknown };
 type Attachment = { session: Session; subscriptions: Subscription[] };
 const MAX_MESSAGE_BYTES = 65_536;
 const MUTATING_SYSTEM_OPERATIONS = new Set(['runs.cancel', 'runs.retry', 'schedules.enable', 'schedules.disable']);
@@ -21,7 +21,7 @@ function errorResponse(error: unknown): Response {
   return Response.json({ error: errorData(error) }, { status: error instanceof WorkcoreError ? error.status : error instanceof z.ZodError ? 400 : 500, headers: { 'cache-control': 'no-store' } });
 }
 const message = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('subscribe'), id: z.string().min(1).max(100), kind: z.enum(['view', 'display', 'manifest']).default('view'), name: z.string().max(64), input: z.unknown() }),
+  z.object({ type: z.literal('subscribe'), id: z.string().min(1).max(100), kind: z.enum(['view', 'display', 'manifest', 'system']).default('view'), name: z.string().max(64), input: z.unknown() }),
   z.object({ type: z.literal('unsubscribe'), id: z.string() }),
   z.object({ type: z.literal('refresh') }),
 ]);
@@ -88,6 +88,18 @@ export class Workspace<E = unknown> extends DurableObject<E> {
           if (!changed || changed.size) {
             const result = this.engine.resolveDisplay(attachment.session.actor, subscription.name, subscription.input);
              this.send(socket, { type: 'snapshot', id: subscription.id, data: result, revision: this.engine.revision });
+          }
+          retained.push(subscription);
+          continue;
+        }
+        if (subscription.kind === 'system') {
+          const dependencies = this.engine.systemDependencies(subscription.name);
+          if (dependencies === null) throw new WorkcoreError('NOT_SUBSCRIBABLE', 'This system operation does not support live subscriptions');
+          if (!changed || shouldRefreshView(dependencies, changed)) {
+            const data = this.engine.system(attachment.session.actor, subscription.name, subscription.input);
+            this.send(socket, { type: 'snapshot', id: subscription.id, data, revision: this.engine.revision });
+          } else {
+            this.send(socket, { type: 'revision', id: subscription.id, revision: this.engine.revision });
           }
           retained.push(subscription);
           continue;
@@ -290,6 +302,8 @@ export class Workspace<E = unknown> extends DurableObject<E> {
 /** Authenticate in the public Worker; never trust actor/session headers supplied by the browser. */
 export async function routeWorkspace(request: Request, options: {
   namespace: DurableObjectNamespace;
+  /** Select a namespace from the public workspace key when an application uses multiple DO definitions. */
+  namespaceFor?: (workspaceId: string, request: Request) => DurableObjectNamespace;
   authenticate: (request: Request) => Promise<Session | null> | Session | null;
   prefix?: string;
 }): Promise<Response> {
@@ -309,6 +323,7 @@ export async function routeWorkspace(request: Request, options: {
     const target = new URL(request.url);
     target.pathname = `/${endpoint}${tail.length ? `/${tail[0]}` : ''}`;
     const forwarded = new Request(target, { method: request.method, headers, body: request.body, redirect: 'manual' });
-    return await options.namespace.get(options.namespace.idFromName(workspaceId)).fetch(forwarded);
+    const namespace = options.namespaceFor?.(workspaceId, request) ?? options.namespace;
+    return await namespace.get(namespace.idFromName(workspaceId)).fetch(forwarded);
   } catch (error) { return errorResponse(error); }
 }

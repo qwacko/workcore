@@ -19,4 +19,11 @@ export const messages = sqliteTable('messages', {
 }, table => [index('messages_owner_at').on(table.ownerId, table.at, table.id)]);
 export const savedDisplays = savedDisplayTable;
 
+/** Notes live in their own Workcore definition and Durable Object namespace. */
+export const notes = sqliteTable('notes', {
+  ...idColumn(), ...versionColumn(), ...timestampColumns(),
+  title: text('title').notNull(), body: text('body').notNull(), ownerId: text('owner_id').notNull(),
+  starred: integer('starred', { mode: 'boolean' }).notNull().default(false), archived: integer('archived', { mode: 'boolean' }).notNull().default(false),
+}, table => [index('notes_owner_updated').on(table.ownerId, table.updatedAt, table.id)]);
+
 export const schema = defineSchema({ members, tasks, messages, savedDisplays, files: fileTable });

@@ -1,5 +1,5 @@
 import type { Json } from '@workcore/core';
-import type { LiveState, RuntimeClient, Subscription } from './index.js';
+import type { LiveState, LiveSystemOperation, RuntimeClient, Subscription } from './index.js';
 
 /** Stable JSON keys for deduplicating equivalent inputs, independent of object key order. */
 export function sourceKey(value: unknown): string {
@@ -59,17 +59,23 @@ export function createSources(client: RuntimeClient) {
       if (active.listeners.size === 1) {
         if (source.kind === 'view') active.subscription = client.subscribe(source.name, input, state => { active.state = state; emit(active); });
         else if (source.kind === 'display') active.subscription = client.subscribeDisplay(source.name, input, state => { active.state = state as unknown as LiveState<Json>; emit(active); });
+        else if (source.kind === 'system') active.subscription = client.subscribeSystem(source.name as LiveSystemOperation, input, state => { active.state = state; emit(active); });
         else {
           void refresh(active);
-          if (source.kind === 'resource' || source.kind === 'system') active.timer = setInterval(() => { void refresh(active); }, 3000);
+          if (source.kind === 'resource') active.timer = setInterval(() => { void refresh(active); }, 3000);
         }
       }
       return () => { active.listeners.delete(listener); if (!active.listeners.size) { dispose(active); entries.delete(key); } };
     },
     refresh(source?: SourceReference, input?: Json) {
-      if (!source) { for (const entry of entries.values()) if (!['view', 'display'].includes(entry.source.kind)) void refresh(entry); return; }
+      if (!source) {
+        client.refreshSubscriptions();
+        for (const entry of entries.values()) if (!['view', 'display', 'system'].includes(entry.source.kind)) void refresh(entry);
+        return;
+      }
       const entry = entries.get(sourceKey([source.kind, source.name, input ?? {}]));
-      if (entry && !['view', 'display'].includes(entry.source.kind)) void refresh(entry);
+      if (entry?.source.kind === 'system') client.refreshSubscriptions();
+      else if (entry && !['view', 'display'].includes(entry.source.kind)) void refresh(entry);
     },
     close() { for (const entry of entries.values()) dispose(entry); entries.clear(); },
   };

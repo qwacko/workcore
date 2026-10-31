@@ -15,13 +15,14 @@ export type Subscription<T> = {
   unsubscribe(): void;
   whenRevision(revision: number, timeoutMs?: number): Promise<void>;
 };
+export type LiveSystemOperation = 'runs.list' | 'runs.inspect' | 'runs.trace' | 'schedules.list' | 'schedules.inspect' | 'tables.list' | 'tables.read' | 'history.list' | 'files.list';
 type DisplayMap<A extends Definition> = NonNullable<A['displays']>['displays'];
 type DisplayInput<D> = D extends { input?: infer I } ? I extends z.ZodType ? z.input<I> : Record<string, never> : Record<string, never>;
 export class ClientError extends Error {
   constructor(public code: string, message: string, public status = 0) { super(message); }
 }
 type Entry = {
-  kind: 'view' | 'display' | 'manifest';
+  kind: 'view' | 'display' | 'manifest' | 'system';
   name: string;
   input: unknown;
   state: LiveState<unknown>;
@@ -167,6 +168,12 @@ export function createClient<A extends Definition>(options: { baseUrl: string; f
     },
     subscribeManifest(listener: (state: LiveState<Manifest>) => void): Subscription<Manifest> {
       return subscribeResource('manifest', '', {}, listener);
+    },
+    subscribeSystem(name: LiveSystemOperation, input: Json, listener: (state: LiveState<Json>) => void): Subscription<Json> {
+      return subscribeResource('system', name, input, listener);
+    },
+    refreshSubscriptions(): void {
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'refresh' }));
     },
     query<K extends (keyof A['views'] | keyof A['queries']) & string>(name: K, input: z.input<(A['views'] & A['queries'])[K]['input']>): Promise<Result<z.output<(A['views'] & A['queries'])[K]['output']>>> {
       return post('query', { name, input });

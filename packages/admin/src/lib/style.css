@@ -190,3 +190,10 @@ dialog::backdrop { background: #030813b8; backdrop-filter: blur(3px); }
   .list-item, .chat-composer { flex-direction: column; } .chat-composer { align-items: stretch; } .chat-message { max-width: 96%; } .app-footer { padding: 18px 15px; } .app-footer span { display: none; }
 }
 @media(prefers-reduced-motion:reduce) { .skeleton { animation: none; } }
+
+/* Keep empty and populated operation groups on the same visual rhythm. */
+.system-operation-index { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; gap: 24px; }
+.system-operation-index > section { min-width: 0; }
+.system-operation-index h3 { margin: 0 0 12px; }
+.system-operation-index .empty { min-height: 76px; display: grid; place-items: center; padding: 18px; }
+.system-operation-index { grid-column: 1 / -1; }

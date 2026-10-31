@@ -9,7 +9,9 @@ import { tasks as taskTable, messages as messageTable, members as memberTable, s
 import migrations from './migrations.js';
 
 export type Env = {
-  WORKSPACES: DurableObjectNamespace; ASSETS: Fetcher; FILES_BUCKET: R2Bucket; DEMO_MODE: string; DEMO_ALLOWED_HOSTS?: string;
+  WORKSPACES: DurableObjectNamespace; ASSETS: Fetcher; FILES_BUCKET: R2Bucket; DEMO_MODE: string;
+  AUTH_DB: D1Database; BETTER_AUTH_SECRET?: string; BETTER_AUTH_URL?: string;
+  NOTES: DurableObjectNamespace;
   WORKCORE_AGENT_MODEL?: string; WORKCORE_AGENT_FALLBACK_MODEL?: string; WORKCORE_AI_MODE?: string;
   OPENROUTER_API_KEY?: string; OPENAI_API_KEY?: string; ANTHROPIC_API_KEY?: string; OPENCODE_API_KEY?: string;
 };
@@ -390,7 +392,8 @@ export const tracker = app.define({
   },
   authorize: ({ db, actor }, action) => {
     const member = db.select().from(memberTable).where(eq(memberTable.id, actor.id)).get();
-    if (!member) return false;
+    // Authenticated identities created outside the seeded demo users receive member access.
+    if (!member) return action !== '$admin';
     if (action === '$admin') return member.role === 'admin';
     return true;
   },

@@ -17,20 +17,39 @@
   let traceRows = $state<Record<string, Json>[]>([]);
   let traceCursor = $state<number | null>(null);
   let traceError = $state('');
-  let traceGeneration = 0;
+  let tracePages = $state<{ after: number; rows: Record<string, Json>[]; nextCursor: number | null }[]>([]);
+  const traceSubscriptions = new Map<number, () => void>();
 
-  async function loadTrace(append: boolean) {
-    if (!$session || !runId) return;
-    const generation = ++traceGeneration;
-    try {
-      const result = await $session.client.system('runs.trace', { runId, after: append ? traceCursor ?? 0 : 0 }) as unknown as { rows: Record<string, Json>[]; nextCursor: number | null };
-      if (generation !== traceGeneration) return;
-      traceRows = append ? [...traceRows, ...result.rows] : result.rows;
-      traceCursor = result.nextCursor;
+  function watchTrace(after: number) {
+    const currentSession = $session;
+    const currentRunId = runId;
+    if (!currentSession || !currentRunId || traceSubscriptions.has(after)) return;
+    // Only the visible tail page needs live updates; earlier trace pages are immutable and can be released.
+    for (const stop of traceSubscriptions.values()) stop();
+    traceSubscriptions.clear();
+    const subscription = currentSession.client.subscribeSystem('runs.trace', { runId: currentRunId, after }, state => {
+      if (currentRunId !== runId) return;
+      if (state.status === 'error') { traceError = state.error?.message ?? 'Could not load execution trace'; return; }
+      if (!state.data || typeof state.data !== 'object' || Array.isArray(state.data)) return;
+      const result = state.data as Record<string, Json>;
+      const rows = Array.isArray(result.rows) ? result.rows.filter((row): row is Record<string, Json> => !!row && typeof row === 'object' && !Array.isArray(row)) : [];
+      const nextCursor = typeof result.nextCursor === 'number' ? result.nextCursor : null;
+      const page = { after, rows, nextCursor };
+      const index = tracePages.findIndex(existing => existing.after === after);
+      tracePages = index < 0 ? [...tracePages, page].sort((a, b) => a.after - b.after) : tracePages.map(existing => existing.after === after ? page : existing);
+      traceRows = tracePages.flatMap(existing => existing.rows).sort((a, b) => Number(a.sequence) - Number(b.sequence));
+      traceCursor = tracePages.at(-1)?.nextCursor ?? null;
       traceError = '';
-    } catch (error) { if (generation === traceGeneration) traceError = error instanceof Error ? error.message : 'Could not load execution trace'; }
+    });
+    traceSubscriptions.set(after, () => subscription.unsubscribe());
   }
-  $effect(() => { const updated = run?.updatedAt; if (updated && runId) void loadTrace(false); });
+  $effect(() => {
+    const currentRunId = runId;
+    const currentSession = $session;
+    traceRows = []; tracePages = []; traceCursor = null; traceError = '';
+    if (currentSession && currentRunId && currentSession.manifest.runs) watchTrace(0);
+    return () => { for (const stop of traceSubscriptions.values()) stop(); traceSubscriptions.clear(); };
+  });
   async function control(action: 'retry' | 'cancel') {
     if (!$session || !runId) return;
     if (action === 'retry' && !confirm('Create a new run? Previous external effects may already have happened.')) return;
@@ -39,4 +58,4 @@
   }
 </script>
 
-{#if authorized}<RunDetailPanel state={loader.state} {run} {traceRows} {traceCursor} error={traceError} onrefresh={() => { loader.refresh(); void loadTrace(false); }} onmore={() => loadTrace(true)} oncontrol={control} />{:else}<div class="notice error">Execution details are not available to your current actor.</div>{/if}
+{#if authorized}<RunDetailPanel state={loader.state} {run} {traceRows} {traceCursor} error={traceError} onrefresh={() => { loader.refresh(); }} onmore={() => { if (traceCursor !== null) watchTrace(traceCursor); }} oncontrol={control} />{:else}<div class="notice error">Execution details are not available to your current actor.</div>{/if}

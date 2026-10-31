@@ -13,10 +13,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "dependencies": {
-    "drizzle-orm": "^0.45.4",
-    "zod": "^4.6.7"
-  },
+  "dependencies": { "zod": "^4.6.7" },
+  "peerDependencies": { "drizzle-orm": "^0.45.4" },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261024.1"
   }

@@ -5,17 +5,19 @@
   "compatibility_date": "2026-10-01",
   "assets": { "directory": "../../packages/admin/build", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "single-page-application" },
   "r2_buckets": [{ "binding": "FILES_BUCKET", "bucket_name": "workcore-files" }],
+  "d1_databases": [{ "binding": "AUTH_DB", "database_name": "workcore-auth", "database_id": "00000000-0000-0000-0000-000000000000" }],
   "durable_objects": {
-    "bindings": [{ "name": "WORKSPACES", "class_name": "TrackerWorkspace" }]
+    "bindings": [{ "name": "WORKSPACES", "class_name": "TrackerWorkspace" }, { "name": "NOTES", "class_name": "NotesWorkspace" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TrackerWorkspace"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TrackerWorkspace", "NotesWorkspace"] }],
   "vars": { "DEMO_MODE": "false" },
   "env": {
     "local": {
       "vars": { "DEMO_MODE": "true" },
       "r2_buckets": [{ "binding": "FILES_BUCKET", "bucket_name": "workcore-files-local" }],
+      "d1_databases": [{ "binding": "AUTH_DB", "database_name": "workcore-auth-local", "database_id": "00000000-0000-0000-0000-000000000001" }],
       "durable_objects": {
-        "bindings": [{ "name": "WORKSPACES", "class_name": "TrackerWorkspace" }]
+        "bindings": [{ "name": "WORKSPACES", "class_name": "TrackerWorkspace" }, { "name": "NOTES", "class_name": "NotesWorkspace" }]
       }
     }
   }
