@@ -1,0 +1,11 @@
+{
+  "name": "workcore-browser-tests",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "../../examples/workcore-demo/build", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "single-page-application" },
+  "vars": { "DEMO_MODE": "true", "WORKCORE_AI_MODE": "demo", "BETTER_AUTH_URL": "http://localhost:8788" },
+  "r2_buckets": [{ "binding": "FILES_BUCKET", "bucket_name": "workcore-browser-test-files" }],
+  "d1_databases": [{ "binding": "AUTH_DB", "database_name": "workcore-browser-test-auth", "database_id": "00000000-0000-0000-0000-000000000003" }],
+  "durable_objects": { "bindings": [{ "name": "WORKSPACES", "class_name": "TrackerWorkspace" }, { "name": "NOTES", "class_name": "NotesWorkspace" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TrackerWorkspace", "NotesWorkspace"] }]
+}

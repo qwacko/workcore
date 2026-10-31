@@ -11,6 +11,7 @@ import migrations from './migrations.js';
 export type Env = {
   WORKSPACES: DurableObjectNamespace; ASSETS: Fetcher; FILES_BUCKET: R2Bucket; DEMO_MODE: string;
   AUTH_DB: D1Database; BETTER_AUTH_SECRET?: string; BETTER_AUTH_URL?: string;
+  WORKCORE_ADMIN_IDS?: string;
   NOTES: DurableObjectNamespace;
   WORKCORE_AGENT_MODEL?: string; WORKCORE_AGENT_FALLBACK_MODEL?: string; WORKCORE_AI_MODE?: string;
   OPENROUTER_API_KEY?: string; OPENAI_API_KEY?: string; ANTHROPIC_API_KEY?: string; OPENCODE_API_KEY?: string;
@@ -165,6 +166,16 @@ const completeTask = app.mutation({
   ui: { label: 'Complete task', submitLabel: 'Complete task' },
   handler: ({ db, actor }, input) => {
     const result = db.update(taskTable).set({ done: true, version: input.expectedRevision + 1 })
+      .where(and(eq(taskTable.id, input.id), eq(taskTable.ownerId, actor.id), eq(taskTable.version, input.expectedRevision))).returning().get();
+    if (!result) throw new WorkcoreError('CONFLICT', 'Task has changed or is not yours', 409);
+    return result;
+  },
+});
+const reopenTask = app.mutation({
+  input: z.object({ id: z.string(), expectedRevision: z.number().int() }), output: taskRow,
+  triggers: ['tasks'], ui: { label: 'Reopen task' },
+  handler: ({ db, actor, now }, input) => {
+    const result = db.update(taskTable).set({ done: false, version: input.expectedRevision + 1, updatedAt: now })
       .where(and(eq(taskTable.id, input.id), eq(taskTable.ownerId, actor.id), eq(taskTable.version, input.expectedRevision))).returning().get();
     if (!result) throw new WorkcoreError('CONFLICT', 'Task has changed or is not yours', 409);
     return result;
@@ -343,7 +354,7 @@ export const tracker = app.define({
   files: fileStorage<Env>({ bucket: env => env.FILES_BUCKET, maxSize: 25 * 1024 * 1024 }),
   views: { tasks, summary, stateScopedTasks, stateScopedSummary, assistantSummary, conversation, mySavedDisplays, projectOptions, taskDetails },
   queries: { myTaskPage, guide },
-  mutations: { createTask, editTask, completeTask, saveSummary, saveReply, createSavedDisplayDraft, updateSavedDisplayDraft, publishSavedDisplay, unpublishSavedDisplay, deleteSavedDisplay, scheduleCompletion, sendMessage },
+  mutations: { createTask, editTask, completeTask, reopenTask, saveSummary, saveReply, createSavedDisplayDraft, updateSavedDisplayDraft, publishSavedDisplay, unpublishSavedDisplay, deleteSavedDisplay, scheduleCompletion, sendMessage },
   jobs: { completeLater, assistant },
   displays: {
     title: 'Tracker', description: 'Live tasks, private conversations and durable background work.',
@@ -393,8 +404,7 @@ export const tracker = app.define({
   authorize: ({ db, actor }, action) => {
     const member = db.select().from(memberTable).where(eq(memberTable.id, actor.id)).get();
     // Authenticated identities created outside the seeded demo users receive member access.
-    if (!member) return action !== '$admin';
-    if (action === '$admin') return member.role === 'admin';
+    if (action === '$admin') return member?.role === 'admin';
     return true;
   },
   initialize: db => {

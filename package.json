@@ -9,10 +9,10 @@
   "scripts": {
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck && tsc -p tsconfig.tests.json",
-    "test": "pnpm --filter @workcore/admin build && node --test scripts/*.test.mjs && vitest run",
-    "test:e2e": "pnpm --filter @workcore/admin build && playwright test",
-    "dev": "pnpm --filter @workcore/example dev",
-    "deploy": "pnpm --filter @workcore/example deploy",
+    "test": "pnpm --filter workcore-demo build:ui && node --test scripts/*.test.mjs && vitest run",
+    "test:e2e": "pnpm --filter workcore-demo build:ui && playwright test",
+    "dev": "pnpm --filter workcore-demo dev",
+    "deploy": "pnpm --filter workcore-demo deploy",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs"
   },

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { defineSchema, idColumn, timestampColumns, versionColumn } from '@workcore/core';
 import { notes } from './schema.js';
 import baseMigrations from './migrations.js';
+import type { Env } from './app.js';
 
 const schema = defineSchema({ notes });
 const migrations = {
@@ -16,7 +17,7 @@ const migrations = {
     { idx: baseMigrations.journal.entries.length + 1, when: Math.max(...baseMigrations.journal.entries.map(entry => entry.when)) + 2, tag: 'notes_features', breakpoints: true },
   ] },
 };
-const app = workspace<typeof schema, unknown, readonly ['notes']>(schema, migrations, { triggerKeys: ['notes'] });
+const app = workspace<typeof schema, Env, readonly ['notes']>(schema, migrations, { triggerKeys: ['notes'] });
 const note = z.object({ id: z.string(), version: z.number(), title: z.string(), body: z.string(), ownerId: z.string(), createdAt: z.number(), updatedAt: z.number(), starred: z.boolean(), archived: z.boolean() });
 const list = app.view({ input: z.object({}), output: z.array(note), dependsOn: ['notes'], maxRows: 200,
   handler: ({ db, actor }) => db.select().from(notes).where(and(eq(notes.ownerId, actor.id), eq(notes.archived, false))).orderBy(desc(notes.starred), desc(notes.updatedAt), desc(notes.id)).limit(200).all(),
@@ -42,4 +43,4 @@ const update = app.mutation({ input: z.object({ id: z.string(), expectedRevision
 const remove = app.mutation({ input: z.object({ id: z.string(), expectedRevision: z.number().int() }), output: z.null(), triggers: ['notes'], ui: { label: 'Delete note' },
   handler: ({ db, actor }, input) => { const row = db.delete(notes).where(and(eq(notes.id, input.id), eq(notes.ownerId, actor.id), eq(notes.version, input.expectedRevision))).returning().get(); if (!row) throw new WorkcoreError('NOT_FOUND', 'Note changed or not found', 404); return null; },
 });
-export const notesApp = app.define({ views: { list, archived }, queries: {}, mutations: { create, update, remove }, jobs: {}, authorize: () => true });
+export const notesApp = app.define({ views: { list, archived }, queries: {}, mutations: { create, update, remove }, jobs: {}, authorize: (_ctx, action) => action !== '$admin' });

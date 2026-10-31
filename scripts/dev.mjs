@@ -7,12 +7,12 @@ import { devArgs, readEnvironment } from './dev-config.mjs';
 import { createWorkerEnvFile } from './worker-env.mjs';
 
 const require = createRequire(import.meta.url);
-const example = new URL('../examples/tracker/', import.meta.url);
+const example = new URL('../examples/workcore-demo/', import.meta.url);
 const environment = readEnvironment([new URL('../.env', import.meta.url), new URL('.env', example)]);
 const wrangler = resolve(dirname(require.resolve('wrangler/package.json')), require('wrangler/package.json').bin.wrangler);
 const args = devArgs(environment);
 const root = fileURLToPath(new URL('../', import.meta.url));
-const built = spawnSync('pnpm', ['--filter', '@workcore/admin', 'build'], { cwd: root, env: environment, stdio: 'inherit' });
+const built = spawnSync('pnpm', ['--filter', 'workcore-demo', 'build:ui'], { cwd: root, env: environment, stdio: 'inherit' });
 if (built.status !== 0) process.exit(built.status ?? 1);
 const workerEnv = createWorkerEnvFile(environment, fileURLToPath(example));
 process.once('exit', () => workerEnv.dispose());
@@ -34,7 +34,7 @@ const backend = spawn(process.execPath, [wrangler, ...args, '--env-file', worker
   env: { ...environment, CLOUDFLARE_INCLUDE_PROCESS_ENV: 'false', CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: 'true' },
   stdio: 'inherit',
 });
-const frontend = spawn('pnpm', ['--filter', '@workcore/admin', 'dev'], {
+const frontend = spawn('pnpm', ['--filter', 'workcore-demo', 'dev:ui'], {
   cwd: root, env: { ...environment, HOST: host, PORT: port, WORKCORE_API_ORIGIN: `http://127.0.0.1:${backendPort}` }, stdio: 'inherit',
 });
 console.log(`Workcore: http://${host}:${port} (SvelteKit HMR + local Cloudflare runtime)`);

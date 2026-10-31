@@ -201,13 +201,13 @@ OPENAI_API_KEY=...
 
 The format is `provider/model`; OpenRouter IDs retain their own slash. With no `WORKCORE_AGENT_MODEL`, or `WORKCORE_AI_MODE=demo`, the example returns an explicitly labelled offline demo. A configured model failure is **not** converted into a demo answer. Tests force demo mode and mock SDK models; they never need paid provider calls.
 
-Put these settings in root `.env` or `examples/tracker/.env`, or export them in the shell before `pnpm dev`. Precedence is shell > example > root. The launcher explicitly forwards the selected bindings to Wrangler through a private temporary file; it does not assume that ordinary shell variables automatically become `ctx.env` bindings, and does not forward unrelated shell secrets. Restart `pnpm dev` after changing settings. Never prefix provider keys with `VITE_`.
+Put these settings in root `.env` or `examples/workcore-demo/.env`, or export them in the shell before `pnpm dev`. Precedence is shell > example > root. The launcher explicitly forwards the selected bindings to Wrangler through a private temporary file; it does not assume that ordinary shell variables automatically become `ctx.env` bindings, and does not forward unrelated shell secrets. Restart `pnpm dev` after changing settings. Never prefix provider keys with `VITE_`.
 
 `WORKCORE_AI_MODE=model` requires a primary model rather than falling into demo mode when it is missing. Unknown modes, malformed/unknown providers and a backup configured without a primary fail explicitly. Each selected candidate's provider key must be available; a backup can still succeed if only its key is configured. Existing model values without the `openrouter/` prefix need updating if they are intended for OpenRouter.
 
 The example exposes checked list/create/edit/complete tools. Its `submitReply` is a terminating **checked mutation tool**, not an application-specific loop: the mutation atomically saves the reply and latest summary and returns display text. There is no second reply or follow-up inference. Direct enqueueing uses the same agent; chat additionally stores the user message and anchors the agent's history to it. Invalid/foreign chat anchors fail before inference. It retains bounded per-user history and no automatic restart policy.
 
-For production, put non-secret selections in Worker vars and upload only the provider keys you use with `pnpm --filter @workcore/example exec wrangler secret put OPENROUTER_API_KEY --env=''` (and similarly for a backup provider). This does not make the example production-ready: its demo authentication must be replaced before public deployment.
+For production, put non-secret selections in Worker vars and upload only the provider keys you use with `pnpm --filter workcore-demo exec wrangler secret put OPENROUTER_API_KEY --env=''` (and similarly for a backup provider). This does not make the example production-ready: its demo authentication must be replaced before public deployment.
 
 ## Useful next improvements
 

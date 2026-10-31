@@ -2,14 +2,16 @@
   "name": "workcore-tests",
   "main": "worker.ts",
   "compatibility_date": "2026-10-01",
-  "assets": { "directory": "../packages/admin/build", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "single-page-application" },
-  "vars": { "DEMO_MODE": "true", "WORKCORE_AI_MODE": "demo" },
+  "assets": { "directory": "../examples/workcore-demo/build", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "single-page-application" },
+  "vars": { "DEMO_MODE": "true", "WORKCORE_AI_MODE": "demo", "BETTER_AUTH_URL": "http://localhost", "WORKCORE_ADMIN_IDS": "configured-test-admin" },
+  "d1_databases": [{ "binding": "AUTH_DB", "database_name": "workcore-test-auth", "database_id": "00000000-0000-0000-0000-000000000002" }],
   "r2_buckets": [{ "binding": "FILES_BUCKET", "bucket_name": "workcore-test-files" }],
   "durable_objects": {
     "bindings": [
       { "name": "WORKSPACES", "class_name": "TrackerWorkspace" },
+      { "name": "NOTES", "class_name": "NotesWorkspace" },
       { "name": "TEST", "class_name": "TestWorkspace" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TrackerWorkspace", "TestWorkspace"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TrackerWorkspace", "NotesWorkspace", "TestWorkspace"] }]
 }

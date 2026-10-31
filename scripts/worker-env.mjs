@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'no
 import { join, resolve } from 'node:path';
 
 export const workerBindingNames = [
+  'BETTER_AUTH_SECRET', 'BETTER_AUTH_URL', 'WORKCORE_ADMIN_IDS',
   'WORKCORE_AI_MODE', 'WORKCORE_AGENT_MODEL', 'WORKCORE_AGENT_FALLBACK_MODEL',
   'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENCODE_API_KEY',
 ];

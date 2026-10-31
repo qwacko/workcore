@@ -17,37 +17,13 @@ pnpm install
 pnpm dev
 ```
 
-Open the local URL printed by Wrangler (normally <http://localhost:8787>). Choose Alice or Bob. Alice is an admin; Bob is a member. Use separate browser profiles to compare their private views.
+Copy `examples/workcore-demo/.env.example` to `examples/workcore-demo/.env` and set `BETTER_AUTH_URL` to the exact browser origin (the example uses `http://127.0.0.1:8787`). Restart `pnpm dev`, open that origin, and create an account. The local demo uses Better Auth and a local D1 database for identities; Workcore data lives in SQLite Durable Objects.
 
-1. Follow **Start here** on the workspace overview and create a task using the generated form.
-2. Open another window and watch its live task list update.
-3. Use **Edit task**, **Complete**, or **Schedule** directly on your own task rows—no copying IDs.
-4. Use **Assistant** to send a private message, then follow **Inspect run** to its execution timeline.
-5. Browse **Schedules**, **History**, **Tables**, or the schema-backed operation explorer.
+The SvelteKit SPA starts with your tasks. Switch to **Everyone** to see shared tasks, or use the board and list views. Private tasks are filtered on the server. Notes are private and support editing, starring and archiving. Open another tab to see live updates. The **Admin** link opens the default Workcore console for the current workspace, including generated displays, operations and the assistant.
 
-The overview, tasks, assistant and data pages are declared by the backend, not hardcoded into the frontend. Table/list/JSON modes, local filters and server scope are explicit and URL-backed. See [Admin authoring](docs/admin.md).
+The launcher builds the admin and SPA assets, then runs the SPA with hot module replacement and proxies API, admin and WebSocket requests to a local Wrangler Worker. Production serves both static builds from the Worker. See [the demo README](examples/workcore-demo/README.md) for deployment and configuration.
 
-The example uses a deterministic assistant when no model is selected. Set `WORKCORE_AGENT_MODEL=openrouter/anthropic/claude-sonnet-4.5` and `OPENROUTER_API_KEY` to use AI SDK; optionally set `WORKCORE_AGENT_FALLBACK_MODEL` to a backup from any supported provider. `WORKCORE_AI_MODE=demo` forces offline responses. No paid model call is needed for tests. See [AI SDK agents](docs/ai.md).
-
-Put model settings and keys in root `.env` or `examples/tracker/.env` (example settings override root settings; exported shell variables win), then restart `pnpm dev`. Use `WORKCORE_AI_MODE=model` to fail explicitly when a primary model is missing. OpenRouter selections must start with `openrouter/` **before** the upstream model ID, for example `openrouter/anthropic/claude-sonnet-4.5`, not just `anthropic/claude-sonnet-4.5`. A configured model/key failure is shown as a failed run, never a demo answer.
-
-**Demo authentication requires the explicit local Wrangler environment and an allowed hostname. Default deployments return 503 until real authentication is installed.**
-
-### Local reverse proxy
-
-`pnpm dev` reads the root `.env`, then `examples/tracker/.env`; exported shell variables take precedence. For example:
-
-```dotenv
-HOST=127.100.0.10
-PORT=8787
-DEMO_ALLOWED_HOSTS=workcore.dev.jmcdowall.com
-```
-
-The listener address is also allowed for direct access. Additional demo hostnames are comma-separated exact names, without schemes or ports. The proxy must preserve the browser-facing host and scheme and forward WebSocket upgrades. Do not expose the demo without proxy access controls: anyone reaching it can select the admin identity.
-
-`pnpm dev` builds the deployable console once, then runs SvelteKit with hot module replacement on this public address and proxies API, login and WebSocket requests to Wrangler on an internal loopback port. Production uses only Worker static assets; no SvelteKit server is deployed. `/workspace` redirects to `/admin/demo`, and admin deep links survive refresh.
-
-The launcher forwards only the example's selected agent settings/keys to Wrangler using an owner-only temporary bindings file, cleaned up on exit. Credentials are not passed as command-line variables and unrelated shell secrets are not copied into Worker bindings. Restart the launcher after editing environment settings. For deployment, configure non-secret model settings in Wrangler and use `wrangler secret put` for provider keys; the example still requires real authentication before public deployment.
+The optional assistant uses a deterministic response when no model is selected. Configure `WORKCORE_AGENT_MODEL` and the relevant provider key in root `.env` or `examples/workcore-demo/.env`; shell variables take precedence. See [AI SDK agents](docs/ai.md). Secrets are forwarded to Wrangler via a private temporary file, never browser variables.
 
 ## The model
 
@@ -64,7 +40,7 @@ The server determines what a user may receive. The browser can filter, group and
 
 See the [authoring guide](docs/authoring.md) for Drizzle schema definition, migration generation/ingestion, and operation examples.
 
-Extend `Workspace` from `@workcore/core/cloudflare` with this definition and route authenticated requests through `routeWorkspace`. See the [complete tracker](examples/tracker/src/app.ts), its [Cloudflare host](examples/tracker/src/worker.ts), and [authoring guide](docs/authoring.md).
+Extend `Workspace` from `@workcore/core/cloudflare` with this definition and route authenticated requests through `routeWorkspace`. See the [complete tracker](examples/workcore-demo/src/app.ts), its [Cloudflare host](examples/workcore-demo/src/worker.ts), and [authoring guide](docs/authoring.md).
 
 ```ts
 import { createClient } from '@workcore/client';
@@ -90,7 +66,7 @@ await tasks.whenRevision(result.revision);
 | `packages/client` | Browser-safe inferred API, WebSocket subscriptions, reconnect and revision tracking |
 | `packages/admin` | SvelteKit SPA, generated forms, semantic pages and operational inspection; compiled to Worker static assets |
 | `packages/ai` | Optional AI SDK integration, model profiles, safe fallback and checked agent tools |
-| `examples/tracker` | Executable Cloudflare application, private/shared data, scheduling and an optional AI agent |
+| `examples/workcore-demo` | Executable Cloudflare application, private/shared data, scheduling and an optional AI agent |
 | `tests` | Real Workers/SQLite integration tests and compile-time API checks |
 
 ## Deliberate boundaries

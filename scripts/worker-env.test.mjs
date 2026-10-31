@@ -9,6 +9,7 @@ test('the Worker receives only explicit agent bindings with literal dollar signs
   const result = workerEnvContents({ OPENROUTER_API_KEY: 'test-$TOKEN', WORKCORE_AGENT_MODEL: 'openrouter/test/model', UNRELATED_SECRET: 'do-not-forward' });
   assert.equal(result, "WORKCORE_AGENT_MODEL='openrouter/test/model'\nOPENROUTER_API_KEY='test-\\$TOKEN'\n");
   assert.equal(result.includes('UNRELATED_SECRET'), false);
+  assert.equal(workerEnvContents({ WORKCORE_ADMIN_IDS: 'user-one,user-two' }), "WORKCORE_ADMIN_IDS='user-one,user-two'\n");
   assert.throws(() => workerEnvContents({ OPENAI_API_KEY: 'bad\nvalue' }), /OPENAI_API_KEY must be a single-line value/);
   assert.equal(workerEnvContents({ OPENAI_API_KEY: "test'quoted" }), "OPENAI_API_KEY=`test'quoted`\n");
 });

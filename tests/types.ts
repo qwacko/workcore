@@ -1,5 +1,5 @@
 import { createClient } from '../packages/client/src/index.js';
-import type { tracker } from '../examples/tracker/src/app.js';
+import type { tracker } from '../examples/workcore-demo/src/app.js';
 import { defineSchema, field, ui, workspace } from '../packages/core/src/index.js';
 import { z } from 'zod';
 

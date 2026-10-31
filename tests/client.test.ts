@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createActionDispatcher, createClient } from '../packages/client/src/index.js';
-import type { tracker } from '../examples/tracker/src/app.js';
+import type { tracker } from '../examples/workcore-demo/src/app.js';
 
 class FakeSocket extends EventTarget {
   static OPEN = 1;

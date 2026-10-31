@@ -7,12 +7,20 @@ export type AuthEnv = { AUTH_DB: D1Database; BETTER_AUTH_SECRET?: string; BETTER
 export function createAuth(env: AuthEnv) {
   const secret = env.BETTER_AUTH_SECRET ?? (env.DEMO_MODE === 'true' ? 'workcore-local-demo-only-secret-change-before-deploy-32' : undefined);
   if (!secret || secret.length < 32) throw new Error('Set BETTER_AUTH_SECRET to a random value of at least 32 characters');
+  const baseURL = env.BETTER_AUTH_URL?.trim();
+  const trustedOrigins = baseURL ? [baseURL] : [];
+  // Local reverse proxies can forward the public HTTPS request as HTTP. Keep
+  // this compatibility origin confined to the local demo environment.
+  if (baseURL && env.DEMO_MODE === 'true') {
+    const canonicalOrigin = new URL(baseURL);
+    trustedOrigins.push(`${canonicalOrigin.protocol === 'https:' ? 'http:' : 'https:'}//${canonicalOrigin.host}`);
+  }
   return betterAuth({
     database: env.AUTH_DB,
     secret,
-    baseURL: env.BETTER_AUTH_URL,
+    baseURL,
     emailAndPassword: { enabled: true, requireEmailVerification: false },
-    trustedOrigins: env.BETTER_AUTH_URL ? [env.BETTER_AUTH_URL] : [],
+    trustedOrigins,
   });
 }
 

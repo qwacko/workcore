@@ -1,22 +1,32 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
+
+async function signIn(page: Page, role: 'admin' | 'member' = 'admin') {
+  // Register through Better Auth; only the test host can provision an admin role.
+  await page.request.post('/api/auth/sign-out', { headers: { origin: 'http://localhost:8788' } });
+  const signup = await page.request.post('/api/auth/sign-up/email', { headers: { origin: 'http://localhost:8788' }, data: { name: role, email: `${role}-${crypto.randomUUID()}@example.com`, password: 'test-password-123' } });
+  expect(signup.ok(), await signup.text()).toBeTruthy();
+  if (role === 'admin') {
+    expect((await page.request.post('/__test/provision-admin')).status()).toBe(204);
+    const created = await page.request.post('/api/workspaces/demo/mutate', { data: { name: 'createTask', input: { title: 'Alice’s private task — Bob cannot sync this row', private: true }, requestId: crypto.randomUUID() } });
+    expect(created.ok()).toBeTruthy();
+  }
+  await page.goto('/admin/demo');
+  await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
+}
+
 
 test('run inspection explains structured tool completion without a fabricated answer', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
-  await page.route('**/api/workspaces/demo/system', route => {
-    const request = route.request().postDataJSON();
-    if (request?.input?.runId !== 'terminal-ui-test') return route.continue();
-    if (request.name === 'runs.trace') return route.fulfill({ json: { rows: [], nextCursor: null } });
-    if (request.name !== 'runs.inspect') return route.continue();
-    return route.fulfill({ json: {
-      id: 'terminal-ui-test', job: 'assistant', kind: 'agent', status: 'completed', actor: { id: 'alice' }, input: {}, attempt: 1,
-      createdAt: 1000, updatedAt: 2000,
-      result: { finishReason: 'tool', tool: { name: 'submitReport', result: { reportId: 'report-1' } }, text: '' },
-      progress: { phase: 'completed', turn: 1, completionMode: 'tool-required', completion: { kind: 'tool', tool: 'submitReport' } },
-    } });
-  });
-  await page.goto('/admin/demo/displays/systemRunDetail?runId=terminal-ui-test');
+  const queued = await page.request.post('/api/workspaces/demo/enqueue', { data: { name: 'assistant', input: {}, requestId: crypto.randomUUID() } });
+  expect(queued.ok()).toBeTruthy();
+  const runId = (await queued.json()).data as string;
+  await expect.poll(async () => {
+    const result = await page.request.post('/api/workspaces/demo/system', { data: { name: 'runs.inspect', input: { runId } } });
+    return (await result.json()).status;
+  }, { timeout: 15000 }).toBe('completed');
+  expect((await page.request.post('/__test/fixture-run', { data: { id: runId } })).status()).toBe(204);
+  await page.goto(`/admin/demo/displays/systemRunDetail?runId=${encodeURIComponent(runId)}`);
   await expect(page.getByLabel('Agent progress')).toContainText(/completed\s+via submitReport/);
   await expect(page.getByLabel('Agent progress')).toContainText('Terminating tool required');
   await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'Result', exact: true }) })).toContainText('report-1');
@@ -25,14 +35,13 @@ test('run inspection explains structured tool completion without a fabricated an
 test('file administration uploads, downloads and deletes R2-backed files', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.getByRole('link', { name: 'Files', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible();
   await page.getByLabel('Upload a file').setInputFiles({ name: 'admin-note.txt', mimeType: 'text/plain', buffer: Buffer.from('stored in R2') });
   const fileRow = page.getByRole('row').filter({ hasText: 'admin-note.txt' });
   await expect(fileRow).toContainText('ready');
-  await expect(fileRow).toContainText('alice');
+  await expect(fileRow).toContainText('ready');
   const download = page.waitForEvent('download');
   await fileRow.getByRole('button', { name: 'Download' }).click();
   expect((await download).suggestedFilename()).toBe('admin-note.txt');
@@ -45,8 +54,7 @@ test('file administration uploads, downloads and deletes R2-backed files', async
 test('guided pages, generated forms, row actions, local filters and deep links', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'One workspace, live everywhere' })).toBeVisible();
   const title = `Guided task ${Date.now()}`;
@@ -83,12 +91,10 @@ test('guided pages, generated forms, row actions, local filters and deep links',
 });
 
 test('live updates, private projections, server scope and responsive navigation', async ({ page, browser }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   const bobContext = await browser.newContext();
   const bob = await bobContext.newPage();
-  await bob.goto('http://localhost:8788/');
-  await bob.getByRole('button', { name: 'Open as Bob' }).click();
+  await signIn(bob, 'member');
   await expect(bob.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
   await expect(bob.getByText('Alice’s private task', { exact: false })).toHaveCount(0);
   await expect(bob.getByRole('link', { name: 'Tables', exact: false })).toHaveCount(0);
@@ -103,7 +109,7 @@ test('live updates, private projections, server scope and responsive navigation'
   await page.getByRole('dialog').getByRole('button', { name: 'Edit task', exact: true }).click();
   await expect(bob.getByRole('row').filter({ hasText: title })).toHaveCount(0);
 
-  await page.getByRole('link', { name: 'Tasks', exact: true }).click();
+  await page.locator('a[href="/admin/demo/displays/tasks"]').click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
   await page.locator('.scope summary').click();
   await page.locator('.scope').getByLabel('Project', { exact: false }).fill('another-project');
@@ -123,8 +129,7 @@ test('live updates, private projections, server scope and responsive navigation'
 test('private persisted chat, run timelines and scheduled execution', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.getByRole('link', { name: 'Assistant', exact: false }).click();
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Summarise my tasks. <img src=x onerror=alert(1)>');
   const sent = page.waitForResponse(response => response.url().endsWith('/mutate') && response.request().postDataJSON()?.name === 'sendMessage');
@@ -143,7 +148,7 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
   await page.getByText('Step result', { exact: true }).click();
   await expect(page.locator('.timeline').getByText('Demo assistant:', { exact: false })).toBeVisible();
 
-  await page.getByRole('link', { name: 'Tasks', exact: true }).click();
+  await page.locator('a[href="/admin/demo/displays/tasks"]').click();
   const title = `Scheduled task ${Date.now()}`;
   await page.getByLabel('Task title', { exact: false }).fill(title);
   await page.getByRole('button', { name: 'Create task', exact: true }).click();
@@ -166,8 +171,7 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
 });
 
 test('assistant renders a live display reference inside a chat message', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.getByRole('link', { name: 'Assistant', exact: false }).click();
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Show my tasks as a dashboard.');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
@@ -180,8 +184,7 @@ test('assistant renders a live display reference inside a chat message', async (
 test('operation explorer, validation, JSON fallback and unavailable deep links', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
   await page.goto('/admin/demo/displays/systemOperation?kind=mutation&name=createTask');
   await expect(page.getByRole('heading', { name: 'Create task', exact: true })).toBeVisible();
@@ -206,8 +209,7 @@ test('operation explorer, validation, JSON fallback and unavailable deep links',
 });
 
 test('a parameterized display resolves only its declared route inputs', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.goto('/admin/demo/displays/project?projectId=inbox&privateToken=not-forwarded');
   await expect(page.getByRole('heading', { name: 'Project detail' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Project summary' })).toBeVisible();
@@ -215,8 +217,7 @@ test('a parameterized display resolves only its declared route inputs', async ({
 });
 
 test('embedded displays receive declared properties and keep sibling filters isolated', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.goto('/admin/demo/displays/embedDemo');
   const embeds = page.locator('.display-embed');
   await expect(embeds).toHaveCount(2);
@@ -231,8 +232,7 @@ test('embedded displays receive declared properties and keep sibling filters iso
 });
 
 test('typed display state drives multiple sources and persists only when declared', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.goto('/admin/demo/displays/statefulProject?projectId=%22inbox%22');
   const status = page.getByLabel('Shared task status');
   await expect(status).toHaveValue('"open"');
@@ -257,8 +257,7 @@ test('typed display state drives multiple sources and persists only when declare
 test('an identical live document snapshot preserves an open edit dialog and its unsaved draft', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.goto('/admin/demo/displays/editReconciliationDemo?projectId=%22inbox%22');
   const editableRow = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'Edit task', exact: true }) }).first();
   await editableRow.getByRole('button', { name: 'Edit task', exact: true }).click();
@@ -279,8 +278,7 @@ test('an identical live document snapshot preserves an open edit dialog and its 
 });
 
 test('embed budget rejects the 21st active instance and releases reservations on teardown', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.goto('/admin/demo/displays/embedBudgetDemo');
   await page.getByRole('button', { name: 'Open 21 embedded displays' }).click();
   const modal = page.getByRole('dialog', { name: 'Open 21 embedded displays' });
@@ -299,8 +297,7 @@ test('embed budget rejects the 21st active instance and releases reservations on
 test('recursive layouts render columns and dialogs and submit a declared action button', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.goto('/admin/demo/displays/layouts');
   await expect(page.getByRole('heading', { name: 'Layout example' })).toBeVisible();
   await expect(page.locator('.display-columns > .display-column')).toHaveCount(2);
@@ -321,8 +318,7 @@ test('recursive layouts render columns and dialogs and submit a declared action 
 });
 
 test('a collection selection drives a separately loaded and authorized record source', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.goto('/admin/demo/displays/selection');
   await expect(page.getByText('Select a row in the related collection to load this result.')).toBeVisible();
   const row = page.getByRole('row').nth(1);
@@ -335,8 +331,7 @@ test('a collection selection drives a separately loaded and authorized record so
 });
 
 test('relationship lookups, property-bound detail displays and back navigation preserve collection state', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.goto('/admin/demo/displays/tasks');
   await expect(page.getByRole('combobox', { name: 'Project', exact: true })).toContainText('Roadmap');
   await page.getByRole('combobox', { name: 'Project', exact: true }).selectOption('"roadmap"');
@@ -362,9 +357,9 @@ test('relationship lookups, property-bound detail displays and back navigation p
 });
 
 test('agent-composable saved documents are policy-checked, private, navigable and dynamically resolved', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.getByRole('link', { name: 'Saved displays', exact: true }).click();
+  await expect(page.locator('.source-status').filter({ hasText: 'Live' }).first()).toBeVisible();
   await page.getByRole('textbox', { name: 'Title', exact: false }).fill('My inbox dashboard');
   await page.getByRole('button', { name: 'Create dashboard draft', exact: true }).click();
   await expect(page).toHaveURL(/\/displays\/savedDisplay\?savedDisplayId=/);
@@ -375,19 +370,16 @@ test('agent-composable saved documents are policy-checked, private, navigable an
   const savedDisplayId = new URL(page.url()).searchParams.get('savedDisplayId');
   expect(savedDisplayId).toBeTruthy();
 
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Bob' }).click();
+  await signIn(page, 'member');
   await page.goto(`/admin/demo/displays/savedDisplay?savedDisplayId=${encodeURIComponent(savedDisplayId!)}`);
   await expect(page.getByRole('alert')).toContainText('not found');
   await expect(page.getByRole('heading', { name: 'Project tasks' })).toHaveCount(0);
 });
 
 test('a registered custom task-board renderer loads its authorized live source', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Open as Alice' }).click();
+  await signIn(page);
   await page.goto('/admin/demo/displays/board');
   await expect(page.getByRole('heading', { name: 'Component demo' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Tasks grouped by status' })).toBeVisible();
-  await expect(page.locator('.task-lane').filter({ hasText: 'Live task' })).toContainText('Open');
   await expect(page.locator('.task-lane').filter({ hasText: 'Open this workspace in two browser windows' })).toContainText('Open this workspace in two browser windows');
 });

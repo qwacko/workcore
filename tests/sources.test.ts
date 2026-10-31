@@ -18,10 +18,12 @@ describe('shared reactive sources', () => {
     let resolve: (value: unknown) => void = () => {};
     const pending = new Promise(complete => resolve = complete);
     const query = vi.fn().mockReturnValueOnce(pending).mockResolvedValue({ data: ['new'], revision: 3 });
-    const sources = createSources({ query } as unknown as RuntimeClient);
+    const refreshSubscriptions = vi.fn();
+    const sources = createSources({ query, refreshSubscriptions } as unknown as RuntimeClient);
     const listener = vi.fn();
     const stop = sources.watch({ kind: 'query', name: 'tasks' }, {}, listener);
     sources.refresh();
+    expect(refreshSubscriptions).toHaveBeenCalledOnce();
     resolve({ data: ['old'], revision: 2 });
     await vi.waitFor(() => expect(query).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(listener).toHaveBeenLastCalledWith({ status: 'live', data: ['new'], revision: 3 }));

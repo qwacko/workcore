@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import { Engine } from '../packages/core/src/engine.js';
-import { tracker } from '../examples/tracker/src/app.js';
+import { tracker } from '../examples/workcore-demo/src/app.js';
 
 const alice = { id: 'alice' };
 const bob = { id: 'bob' };

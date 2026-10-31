@@ -37,7 +37,7 @@ export default defineConfig({ dialect: 'sqlite', schema: './src/schema.ts', out:
 Export the framework tables alongside application tables from `src/schema.ts` so Drizzle Kit snapshots the complete database. Generate and ingest SQL into a TypeScript bundle that can be included in the Worker:
 
 ```sh
-pnpm --filter @workcore/example db:generate
+pnpm --filter workcore-demo db:generate
 ```
 
 The command runs `drizzle-kit generate` and `scripts/ingest-migrations.mjs`. Commit the generated SQL, snapshots, journal, and `src/migrations.ts`. At workspace startup Workcore applies every unapplied bundled migration synchronously in SQLite transactions, before accepting requests. Missing bundle entries or failed SQL stop startup. There is no data-retention compatibility migration from the earlier JSON-record implementation.

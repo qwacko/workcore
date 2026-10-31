@@ -15,7 +15,7 @@ import { runSuccessEffects } from '../packages/admin/src/lib/success-effects.js'
 import type { RendererHost } from '../packages/admin/src/lib/host-context.svelte.js';
 import { createEmbedBudget } from '../packages/admin/src/lib/embed-context.svelte.js';
 
-const app = workspace((await import('../examples/tracker/src/schema.js')).schema, (await import('../examples/tracker/src/migrations.js')).default);
+const app = workspace((await import('../examples/workcore-demo/src/schema.js')).schema, (await import('../examples/workcore-demo/src/migrations.js')).default);
 const rows = app.view({ input: z.object({}), output: z.array(z.object({ id: z.string(), revision: z.number(), title: z.string() })), dependsOn: [], handler: () => [] });
 const edit = app.mutation({ input: z.object({ id: z.string(), revision: z.number(), title: z.string().min(1) }), output: z.null(), handler: () => null });
 const definition = app.define({
