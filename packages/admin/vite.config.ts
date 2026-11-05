@@ -1,9 +1,13 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import adapter from '@sveltejs/adapter-static';
 import { defineConfig } from 'vite';
+import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  plugins: [sveltekit({ adapter: adapter({ pages: 'build', assets: 'build', fallback: 'index.html' }), paths: { base: '/admin' } })],
+  define: {
+    __ADMIN_BUILD_ID__: JSON.stringify(process.env.ADMIN_BUILD_ID ?? new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC')),
+  },
+  plugins: [tailwindcss(), sveltekit({ alias: { '$lib': 'src/lib' }, adapter: adapter({ pages: 'build', assets: 'build', fallback: 'index.html' }), paths: { base: '/admin' } })],
   server: {
     host: process.env.HOST ?? '127.0.0.1',
     port: Number(process.env.PORT ?? 5173),

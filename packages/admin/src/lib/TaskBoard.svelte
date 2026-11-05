@@ -3,6 +3,10 @@
   import { useSource } from './source.svelte.js';
   import { useRendererSources } from './renderer-context.js';
   import { readPath, text } from './data.js';
+  import EmptyState from './EmptyState.svelte';
+  import { Badge } from './components/ui/badge/index.js';
+  import * as Card from './components/ui/card/index.js';
+  import Alert from './Alert.svelte';
 
   let { props, input = {} }: { props: Json; input?: Json } = $props();
   const config = $derived(props && typeof props === 'object' && !Array.isArray(props) ? props as Record<string, Json> : {});
@@ -21,18 +25,9 @@
   });
 </script>
 
-<section class="task-board" aria-label={`Tasks grouped by ${groupBy}`}>
+<section class="task-board grid grid-cols-[repeat(auto-fit,minmax(13rem,1fr))] items-start gap-4" aria-label={`Tasks grouped by ${groupBy}`}>
   {#if loader.state.status === 'loading' && !rows.length}<div class="skeleton" aria-label="Loading task board"></div>
-  {:else if loader.state.status === 'error'}<p class="notice error" role="alert">{loader.state.error?.message ?? 'Task board unavailable'}</p>
-  {:else if !groups.length}<div class="empty">No tasks in this project.</div>
-  {:else}{#each groups as [group, items]}<section class="task-lane"><h3>{group}<span class="badge">{items.length}</span></h3><ul>{#each items as row}<li><strong>{text(row.title)}</strong><small>{text(row.ownerId)}</small></li>{/each}</ul></section>{/each}{/if}
+  {:else if loader.state.status === 'error'}<Alert variant="destructive"><p>{loader.state.error?.message ?? 'Task board unavailable'}</p></Alert>
+  {:else if !groups.length}<EmptyState description="No tasks in this project." />
+  {:else}{#each groups as [group, items]}<Card.Root class="min-w-0"><Card.Header class="flex flex-row items-center justify-between gap-2"><Card.Title>{group}</Card.Title><Badge variant="secondary" aria-label={`${items.length} tasks`}>{items.length}</Badge></Card.Header><Card.Content><ul class="grid list-none gap-2 p-0">{#each items as row}{@const ownerId = text(row.ownerId)}<li><Card.Root size="sm" class="transition-colors hover:border-primary/50"><Card.Content class="gap-1.5"><strong class="leading-snug">{text(row.title)}</strong><small class="truncate font-mono text-xs text-muted-foreground" title={ownerId}>{ownerId ? `Owner · ${ownerId.slice(0, 8)}${ownerId.length > 8 ? '…' : ''}` : 'Unassigned'}</small></Card.Content></Card.Root></li>{/each}</ul></Card.Content></Card.Root>{/each}{/if}
 </section>
-
-<style>
-  .task-board { display:grid; grid-template-columns:repeat(auto-fit,minmax(13rem,1fr)); gap:1rem; align-items:start }
-  .task-lane { background:var(--surface-2, #f4f5f7); border-radius:.75rem; padding:1rem; min-width:0 }
-  .task-lane h3 { display:flex; justify-content:space-between; align-items:center; margin:0 0 .75rem }
-  .task-lane ul { display:grid; gap:.5rem; list-style:none; margin:0; padding:0 }
-  .task-lane li { background:var(--surface-1, white); border-radius:.5rem; padding:.75rem; display:grid; gap:.35rem }
-  .task-lane small { color:var(--muted-foreground, #666); overflow-wrap:anywhere }
-</style>

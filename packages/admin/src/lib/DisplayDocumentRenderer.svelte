@@ -31,7 +31,7 @@
   });
 </script>
 
-<div class="page-grid">
+<div class="grid grid-cols-1 items-start gap-5">
   {#each document.blocks as block (block.id)}
     <BlockRenderer {block} {input} {registry} />
   {/each}

@@ -10,6 +10,11 @@
   import SystemResourceTable from './SystemResourceTable.svelte';
   import Modal from './Modal.svelte';
   import { useRendererHost } from './host-context.svelte.js';
+  import { Button } from './components/ui/button/index.js';
+  import EmptyState from './EmptyState.svelte';
+  import Alert from './Alert.svelte';
+  import * as Card from './components/ui/card/index.js';
+  import { Database } from '@lucide/svelte';
 
   let { block }: { block: Extract<ManifestBlock, { kind: 'system' }> & { system: 'resource' } } = $props();
   const session = getContext<SessionStore>(sessionKey);
@@ -55,19 +60,19 @@
   onDestroy(closeDetail);
 </script>
 
-{#if !allowed}<div class="notice error">This system display is not available to your current actor.</div>
+{#if !allowed}<Alert variant="destructive">This system display is not available to your current actor.</Alert>
 {:else}<DisplayCard title={label(resource)} wide>
   {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
   {#if resource === 'runs'}<p class="help">Run status and trace updates arrive live. Inspect a run for full input, result, and timeline details.</p>{:else if resource === 'schedules'}<p class="help">Schedule changes arrive live.</p>{/if}
-  {#if resource === 'tables' && table}<a class="text-button" href="?">← All tables</a>{/if}
+  {#if resource === 'tables' && table}<Button variant="ghost" size="sm" href="?">← All tables</Button>{/if}
   <LoadBoundary state={loader.state}>
     {#snippet children(data: Json)}
       {#if resource === 'tables' && !table && data && typeof data === 'object' && !Array.isArray(data)}
-        <div class="table-cards">{#each Object.entries(data) as [name, metadata]}<a class="table-card" href={`?table=${encodeURIComponent(name)}`}><span>▤</span><strong>{metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? text(metadata.label ?? label(name)) : label(name)}</strong><small>{metadata && typeof metadata === 'object' && !Array.isArray(metadata) && Array.isArray(metadata.columns) ? metadata.columns.length : 0} columns</small><span>Browse records →</span></a>{/each}</div>
+        <div class="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">{#each Object.entries(data) as [name, metadata]}<a class="table-card-link" href={`?table=${encodeURIComponent(name)}`}><Card.Root class="h-full transition-colors hover:border-primary/50"><Card.Content><Database class="size-5 text-primary" /><strong>{metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? text(metadata.label ?? label(name)) : label(name)}</strong><small>{metadata && typeof metadata === 'object' && !Array.isArray(metadata) && Array.isArray(metadata.columns) ? metadata.columns.length : 0} columns</small><span class="text-primary">Browse records →</span></Card.Content></Card.Root></a>{/each}</div>
       {:else if rows.length}<SystemResourceTable {resource} {rows} {columns} runHref={host.runHref} oncontrol={control} oninspect={inspect} />
-      {:else}<div class="empty">No {resource} found.</div>{/if}
+      {:else}<EmptyState description={`No ${resource} found.`} />{/if}
     {/snippet}
   </LoadBoundary>
-  {#if nextCursor}<div class="pagination"><button onclick={() => navigate(nextCursor!)}>Next page →</button></div>{/if}
+  {#if nextCursor}<div class="mt-5 flex gap-2.5"><Button variant="outline" onclick={() => navigate(nextCursor!)}>Next page →</Button></div>{/if}
 </DisplayCard>{/if}
 {#if detail}<Modal title="Schedule details" onclose={closeDetail}><pre>{JSON.stringify(detail, null, 2)}</pre></Modal>{/if}

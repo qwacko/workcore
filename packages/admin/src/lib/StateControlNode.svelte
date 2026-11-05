@@ -9,14 +9,12 @@
   const value = $derived(context.get(address));
   const embed = getContext<EmbedContext | undefined>(embedContextKey);
   const controlId = $derived(`state-${embed?.instanceId ?? 'display'}-${block.id}`);
+  import Select from './components/ui/select/select.svelte';
 </script>
 
-<label class="field state-control" for={controlId}>
+<div class="mb-4 grid gap-2 text-sm">
   <span>{block.label}</span>
-  <select id={controlId} value={value === undefined ? '' : JSON.stringify(value)} onchange={event => {
-    const selected = event.currentTarget.value;
+  <Select id={controlId} value={value === undefined ? '' : JSON.stringify(value)} options={block.options.map(option => ({ value: JSON.stringify(option.value), label: option.label }))} onchange={selected => {
     if (selected) context.set(address, JSON.parse(selected) as Json);
-  }}>
-    {#each block.options as option}<option value={JSON.stringify(option.value)}>{option.label}</option>{/each}
-  </select>
-</label>
+  }} />
+</div>

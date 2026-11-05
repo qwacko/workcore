@@ -3,6 +3,9 @@
   import type { Json, RelationshipLookup } from '@workcore/core';
   import { defaults, readPath, text } from './data.js';
   import { sessionKey, type SessionStore } from './session.js';
+  import { Input } from './components/ui/input/index.js';
+  import { Button } from './components/ui/button/index.js';
+  import Select from './components/ui/select/select.svelte';
 
   let { config, title, fieldId, value, onchange, disabled = false, error }: {
     config: RelationshipLookup;
@@ -61,12 +64,9 @@
   });
 </script>
 
-<input type="search" aria-label={`Search ${title}`} value={search} {disabled} placeholder="Search options…" oninput={event => { search = event.currentTarget.value; cursor = null; options = []; nextCursor = null; }} />
-<select id={fieldId} disabled={disabled} value={JSON.stringify(value ?? '')} onchange={event => onchange(event.currentTarget.value === '' ? undefined : JSON.parse(event.currentTarget.value) as Json)} aria-invalid={!!error}>
-  <option value="">Choose {title.toLowerCase()}…</option>
-  {#each options as option}<option value={JSON.stringify(option.value)}>{option.label}</option>{/each}
-</select>
-{#if nextCursor}<button type="button" class="text-button small" disabled={disabled || loading} onclick={() => cursor = nextCursor}>Load more options</button>{/if}
+<Input type="search" aria-label={`Search ${title}`} value={search} {disabled} placeholder="Search options…" oninput={event => { search = event.currentTarget.value; cursor = null; options = []; nextCursor = null; }} />
+<Select id={fieldId} disabled={disabled} value={JSON.stringify(value ?? '')} placeholder={`Choose ${title.toLowerCase()}…`} options={[{ value: '', label: `Choose ${title.toLowerCase()}…` }, ...options.map(option => ({ value: JSON.stringify(option.value), label: option.label }))]} onchange={selected => onchange(selected === '' ? undefined : JSON.parse(selected) as Json)} />
+{#if nextCursor}<Button type="button" variant="ghost" size="sm" disabled={disabled || loading} onclick={() => cursor = nextCursor}>Load more options</Button>{/if}
 {#if loading}<span class="help" role="status">Loading authorised options…</span>{/if}
 {#if failure}<span class="error" role="status">{failure}</span>{/if}
 {#if error}<span class="error" role="alert">{error}</span>{/if}

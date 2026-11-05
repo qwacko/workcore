@@ -5,6 +5,7 @@
   import SystemResourceNode from './SystemResourceNode.svelte';
   import SystemFilesNode from './SystemFilesNode.svelte';
   import SystemRunDetailNode from './SystemRunDetailNode.svelte';
+  import Alert from './Alert.svelte';
   let { block, input = {} }: { block: Extract<ManifestBlock, { kind: 'system' }>; input?: Json } = $props();
 </script>
 
@@ -13,4 +14,4 @@
 {:else if block.system === 'run-detail'}<SystemRunDetailNode {input} />
 {:else if block.system === 'resource' && block.resource === 'files'}<SystemFilesNode {input} />
 {:else if block.system === 'resource' && block.resource}<SystemResourceNode block={block as Extract<ManifestBlock, { kind: 'system' }> & { system: 'resource' }} />
-{:else}<div class="notice error">This system display is incomplete.</div>{/if}
+{:else}<Alert variant="destructive">This system display is incomplete.</Alert>{/if}

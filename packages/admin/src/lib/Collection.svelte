@@ -13,6 +13,7 @@ import { rendererRegistryKey, type RendererRegistryContext } from './renderer-co
   import { embedContextKey, type EmbedContext } from './embed-context.svelte.js';
   import { useRendererHost } from './host-context.svelte.js';
   import { runSuccessEffects } from './success-effects.js';
+  import { Button } from './components/ui/button/index.js';
 
   let { block, data, schema, input = {}, scope = () => {} }: { block: Extract<ManifestBlock, { kind: 'collection' }>; data: Json; schema: JsonSchema; input?: Json; scope?: (input: Json) => void } = $props();
   const session = getContext<SessionStore>(sessionKey);
@@ -99,5 +100,5 @@ import { rendererRegistryKey, type RendererRegistryContext } from './renderer-co
 {#if feedback}<p class="success" role="status">{feedback}</p>{/if}
 {#if failure}<p class="error" role="alert">{failure}</p>{/if}
 <CollectionRows {block} rows={visible} total={rows.length} {columns} {itemSchema} {mode} {sorting} {selectedKey} {input} registry={renderers} actorId={$session?.manifest.actor.id ?? ''} {pending} onselect={selectRow} onaction={activate} onsort={path => setFilter('sort', sorting === path ? `-${path}` : path)} {detailHref} />
-{#if nextCursor && cursorInput}<div class="pagination"><button onclick={() => scope({ ...(input as Record<string, Json>), [cursorInput!]: nextCursor })}>Next page →</button></div>{/if}
+{#if nextCursor && cursorInput}<div class="mt-5 flex gap-2.5"><Button variant="outline" onclick={() => scope({ ...(input as Record<string, Json>), [cursorInput!]: nextCursor })}>Next page →</Button></div>{/if}
 {#if selected}<Modal title={selected.action.label} onclose={() => selected = null}><ActionForm action={selected.action} row={selected.row} ondone={() => selected = null} /></Modal>{/if}

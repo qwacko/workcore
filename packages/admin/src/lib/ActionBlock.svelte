@@ -2,6 +2,7 @@
   import type { ManifestAction, ManifestBlock } from "@workcore/core";
   import ActionForm from "./ActionForm.svelte";
   import Modal from "./Modal.svelte";
+  import { Button } from './components/ui/button/index.js';
   let {
     block,
     action = block?.action,
@@ -15,10 +16,10 @@
 </script>
 
 {#if action}
-  <button
-    class="button {variant}"
+  <Button
+    variant={variant === 'danger' ? 'destructive' : variant === 'secondary' ? 'outline' : 'default'}
     aria-haspopup="dialog"
-    onclick={() => (open = true)}>{label}</button
+    onclick={() => (open = true)}>{label}</Button
   >
   {#if open}<Modal title={action.label} onclose={() => (open = false)}
       ><ActionForm {action} ondone={() => (open = false)} /></Modal

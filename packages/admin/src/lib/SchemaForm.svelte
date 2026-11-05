@@ -3,6 +3,9 @@
   import type { Json, JsonSchema } from '@workcore/core';
   import Field from './Field.svelte';
   import { clone, defaults, setField, validation } from './data.js';
+  import { Button } from './components/ui/button/index.js';
+  import { Textarea } from './components/ui/textarea/index.js';
+  import { Label } from './components/ui/label/index.js';
   let { schema, initial, locked = [], submitLabel = 'Execute', onsubmit, busy = false }: {
     schema: JsonSchema; initial?: Json; locked?: string[]; submitLabel?: string;
     onsubmit: (value: Json) => Promise<void> | void; busy?: boolean;
@@ -33,7 +36,7 @@
 
 <form onsubmit={submit} novalidate>
   {#if object}
-    <div class="form-fields">
+    <div class="max-w-[700px]">
       {#if !advanced}
         {#each Object.entries(schema.properties ?? {}) as [name, child]}
           {#if !locked.includes(name)}
@@ -42,13 +45,13 @@
         {/each}
       {/if}
     </div>
-    <button type="button" class="text-button small" onclick={() => { advanced = !advanced; jsonText = JSON.stringify(value, null, 2); errors = {}; }}>{advanced ? 'Use form fields' : 'Advanced JSON'}</button>
+    <Button type="button" variant="ghost" size="sm" onclick={() => { advanced = !advanced; jsonText = JSON.stringify(value, null, 2); errors = {}; }}>{advanced ? 'Use form fields' : 'Advanced JSON'}</Button>
   {/if}
   {#if advanced || !object}
-    <label class="field">Operation input JSON<textarea class="code" bind:value={jsonText} disabled={busy || submitting}></textarea></label>
+    <div class="mb-4 grid gap-2 text-sm"><Label for={`${idPrefix}-json`}>Operation input JSON</Label><Textarea id={`${idPrefix}-json`} class="code" bind:value={jsonText} disabled={busy || submitting} /></div>
     {#each Object.entries(errors) as [path, message]}<p class="error">{path || 'Input'}: {message}</p>{/each}
   {/if}
   {#if failed}<p class="error" role="alert">{failed}</p>{/if}
   {#if !advanced && Object.keys(errors).length}<div class="error" role="alert"><strong>Please check the form.</strong><ul>{#each Object.entries(errors) as [path, message]}<li>{path || 'Input'}: {message}</li>{/each}</ul></div>{/if}
-  <div class="form-footer"><button class="primary" type="submit" disabled={busy || submitting}>{submitting ? 'Working…' : submitLabel}</button></div>
+  <div class="mt-5 flex justify-start"><Button variant="default" type="submit" disabled={busy || submitting}>{submitting ? 'Working…' : submitLabel}</Button></div>
 </form>

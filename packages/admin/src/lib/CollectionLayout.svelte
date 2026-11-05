@@ -7,12 +7,12 @@
 </script>
 
 {#if block.appearance === 'plain'}
-  <section class="layout-section">
-    {#if block.title || block.description}<header class="panel-heading"><div>{#if block.title}<h2>{block.title}</h2>{/if}{#if block.description}<p>{block.description}</p>{/if}</div></header>{/if}
-    <div class="section-children">{#each block.children as child (child.id)}<BlockRenderer block={child} {input} {registry} />{/each}</div>
+  <section class="min-w-0">
+    {#if block.title || block.description}<header class="mb-4 flex justify-between gap-4"><div>{#if block.title}<h2>{block.title}</h2>{/if}{#if block.description}<p>{block.description}</p>{/if}</div></header>{/if}
+    <div class="grid gap-4">{#each block.children as child (child.id)}<BlockRenderer block={child} {input} {registry} />{/each}</div>
   </section>
 {:else}
   <DisplayCard title={block.title} description={block.description}>
-    <div class="section-children">{#each block.children as child (child.id)}<BlockRenderer block={child} {input} {registry} />{/each}</div>
+    <div class="grid gap-4">{#each block.children as child (child.id)}<BlockRenderer block={child} {input} {registry} />{/each}</div>
   </DisplayCard>
 {/if}

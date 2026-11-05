@@ -5,6 +5,8 @@
   import type { Column, Json } from '@workcore/core';
   import DataTable from './DataTable.svelte';
   import { useRendererHost } from './host-context.svelte.js';
+  import { Button } from './components/ui/button/index.js';
+  import * as Card from './components/ui/card/index.js';
   const session = getContext<SessionStore>(sessionKey);
   const host = useRendererHost();
   function operationHref(kind: string, name: string) {
@@ -18,13 +20,16 @@
   const systemRows = $derived(Object.entries($session?.manifest.system ?? {}).map(([name, operation]) => ({ name, label: operation.ui?.label ?? label(name), description: 'Server-authorized administrative capability' })) as Json[]);
 </script>
 
-<div class="system-operation-index">
+<div class="col-span-full grid w-full min-w-0 grid-cols-1 gap-5">
   {#each ['view', 'query', 'mutation', 'job'] as kind}
-    <section><h3>{{ view: 'Live views', query: 'Queries', mutation: 'Mutations', job: 'Tasks and agents' }[kind]}</h3>
+    <Card.Root class="min-w-0">
+      <Card.Header class="border-b pb-4"><Card.Title class="text-lg">{{ view: 'Live views', query: 'Queries', mutation: 'Mutations', job: 'Tasks and agents' }[kind]}</Card.Title><Card.Description>Available operations in this workspace</Card.Description></Card.Header>
+      <Card.Content class="pt-4">
       <DataTable rows={operationRows(kind)} {columns} hasActions>
-        {#snippet rowActions(value: Json)}{@const row = value as Record<string, Json>}<a class="button small" href={operationHref(String(row.kind), String(row.name))}>Inspect</a>{/snippet}
+        {#snippet rowActions(value: Json)}{@const row = value as Record<string, Json>}<Button size="sm" variant="outline" href={operationHref(String(row.kind), String(row.name))}>Inspect</Button>{/snippet}
       </DataTable>
-    </section>
+      </Card.Content>
+    </Card.Root>
   {/each}
-  {#if systemRows.length}<section><h3>Built-in system operations</h3><DataTable rows={systemRows} {columns} /></section>{/if}
+  {#if systemRows.length}<Card.Root class="min-w-0"><Card.Header class="border-b pb-4"><Card.Title class="text-lg">Built-in system operations</Card.Title><Card.Description>Server-authorized administrative capabilities</Card.Description></Card.Header><Card.Content class="pt-4"><DataTable rows={systemRows} {columns} /></Card.Content></Card.Root>{/if}
 </div>

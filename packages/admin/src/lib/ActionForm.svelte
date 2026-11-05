@@ -7,6 +7,7 @@ import { actionValues, operationFor } from './data.js';
   import { useRendererHost } from './host-context.svelte.js';
 import { useDisplayContext } from './display-context.svelte.js';
   import { runSuccessEffects } from './success-effects.js';
+  import { Button } from './components/ui/button/index.js';
   let { action, row, ondone = () => {} }: { action: ManifestAction; row?: unknown; ondone?: (result: { data: Json; revision: number }) => void } = $props();
   const session = getContext<SessionStore>(sessionKey);
   const host = useRendererHost();
@@ -33,6 +34,6 @@ import { useDisplayContext } from './display-context.svelte.js';
   }} />{/key}
   {#if success}<p class="success" role="status">{success}</p>{/if}
   {#if action.operation.kind === 'job' && typeof result === 'string' && host.runHref}
-    <a class="button" href={host.runHref(result)}>Inspect execution →</a>
+    <Button variant="outline" href={host.runHref(result)}>Inspect execution →</Button>
   {/if}
 {:else}<p class="muted">This action is not available with your current permissions.</p>{/if}

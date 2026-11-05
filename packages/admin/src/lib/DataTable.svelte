@@ -3,6 +3,10 @@
   import type { Column, Json } from '@workcore/core';
   import type { RendererRegistry } from './renderer-context.js';
   import { date, label, readPath, text } from './data.js';
+  import * as Table from './components/ui/table/index.js';
+  import { Button } from './components/ui/button/index.js';
+  import { Badge } from './components/ui/badge/index.js';
+  import EmptyState from './EmptyState.svelte';
   let { rows, columns, sorting = '', onsort, rowActions, hasActions = false, registry = {}, input = {}, empty = 'No records found.' }: {
     rows: Json[];
     columns: Column[];
@@ -16,10 +20,10 @@
   } = $props();
 </script>
 
-{#if !rows.length}<div class="empty">{empty}</div>
-{:else}<div class="table-wrap"><table><thead><tr>
-  {#each columns as column}<th aria-sort={onsort ? sorting === column.path ? 'ascending' : sorting === `-${column.path}` ? 'descending' : 'none' : undefined}>{#if onsort}<button class="column-sort" onclick={() => onsort(column.path)}>{column.label ?? label(column.path)}{sorting === column.path ? ' ↑' : sorting === `-${column.path}` ? ' ↓' : ''}</button>{:else}{column.label ?? label(column.path)}{/if}</th>{/each}
-  {#if hasActions}<th>Actions</th>{/if}
-</tr></thead><tbody>
-  {#each rows as row}<tr>{#each columns as column}{@const Cell = column.renderer ? registry[column.renderer] : undefined}<td>{#if Cell}<Cell value={readPath(row, column.path) ?? null} {row} {column} {input} />{:else if column.renderer}<span class="help" role="status">Cell renderer “{column.renderer}” is not registered.</span>{:else if column.format === 'badge'}<span class="badge" data-tone={readPath(row, column.path) === true ? 'success' : 'neutral'}>{text(readPath(row, column.path))}</span>{:else if column.format === 'date'}{date(readPath(row, column.path))}{:else}{text(readPath(row, column.path))}{/if}</td>{/each}{#if hasActions}<td>{#if rowActions}<div class="row-actions">{@render rowActions(row)}</div>{/if}</td>{/if}</tr>{/each}
-</tbody></table></div>{/if}
+{#if !rows.length}<EmptyState description={empty} />
+{:else}<div class="max-w-full overflow-x-auto rounded-lg border"><Table.Root><Table.Header><Table.Row>
+  {#each columns as column}<Table.Head class={column.path === 'description' ? 'whitespace-normal' : ''} aria-sort={onsort ? sorting === column.path ? 'ascending' : sorting === `-${column.path}` ? 'descending' : 'none' : undefined}>{#if onsort}<Button variant="ghost" size="sm" onclick={() => onsort(column.path)}>{column.label ?? label(column.path)}{sorting === column.path ? ' ↑' : sorting === `-${column.path}` ? ' ↓' : ''}</Button>{:else}{column.label ?? label(column.path)}{/if}</Table.Head>{/each}
+  {#if hasActions}<Table.Head>Actions</Table.Head>{/if}
+</Table.Row></Table.Header><Table.Body>
+  {#each rows as row}<Table.Row>{#each columns as column}{@const Cell = column.renderer ? registry[column.renderer] : undefined}<Table.Cell class={column.path === 'description' ? 'max-w-[48rem] whitespace-normal' : ''}>{#if Cell}<Cell value={readPath(row, column.path) ?? null} {row} {column} {input} />{:else if column.renderer}<span class="help" role="status">Cell renderer “{column.renderer}” is not registered.</span>{:else if column.format === 'badge'}<Badge variant={readPath(row, column.path) === true ? 'default' : 'secondary'}>{text(readPath(row, column.path))}</Badge>{:else if column.format === 'date'}{date(readPath(row, column.path))}{:else}{text(readPath(row, column.path))}{/if}</Table.Cell>{/each}{#if hasActions}<Table.Cell>{#if rowActions}<div class="row-actions">{@render rowActions(row)}</div>{/if}</Table.Cell>{/if}</Table.Row>{/each}
+</Table.Body></Table.Root></div>{/if}

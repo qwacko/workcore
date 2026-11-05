@@ -10,6 +10,7 @@
   import { readPath } from './data.js';
   import DisplayDocumentRenderer from './DisplayDocumentRenderer.svelte';
   import LoadBoundary from './LoadBoundary.svelte';
+  import Alert from './Alert.svelte';
 
   let { block, input = {} }: { block: Extract<ManifestBlock, { kind: 'display' }>; input?: Json } = $props();
   const session = getContext<SessionStore>(sessionKey);
@@ -51,8 +52,8 @@
 </script>
 
 <div class="display-embed" data-display={block.display}>
-{#if cycle}<p class="notice error" role="alert">This display reference would create a cycle.</p>
-{:else if limited}<p class="notice error" role="alert">The embedded display resource budget has been reached.</p>
+{#if cycle}<Alert variant="destructive">This display reference would create a cycle.</Alert>
+{:else if limited}<Alert variant="destructive">The embedded display resource budget has been reached.</Alert>
 {:else if !resolved.ready}<p class="muted">Select a row to load this display.</p>
   {:else}<LoadBoundary state={loader.state} label="Loading embedded display">
   {#snippet children(value: Json)}{#key `${block.display}:${parent?.instanceId ?? 'display'}/${block.id}`}<DisplayDocumentRenderer document={document ?? displayDocumentSchema.parse(value)} input={resolved.input} {registry} displayName={block.display} instanceId={`${parent?.instanceId ?? 'display'}/${block.id}`} memoryOnly={parent?.memoryOnly ?? false} embedded />{/key}{/snippet}

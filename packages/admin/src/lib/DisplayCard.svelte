@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import * as Card from './components/ui/card/index.js';
   let { title, description, wide = false, children }: {
     title?: string;
     description?: string;
@@ -8,7 +9,7 @@
   } = $props();
 </script>
 
-<section class="panel" class:wide>
-  {#if title || description}<header class="panel-heading"><div>{#if title}<h2>{title}</h2>{/if}{#if description}<p>{description}</p>{/if}</div></header>{/if}
-  {@render children()}
-</section>
+<Card.Root class={`mb-5 ${wide ? 'wide' : ''}`}>
+  {#if title || description}<Card.Header><div>{#if title}<Card.Title>{title}</Card.Title>{/if}{#if description}<Card.Description>{description}</Card.Description>{/if}</div></Card.Header>{/if}
+  <Card.Content>{@render children()}</Card.Content>
+</Card.Root>

@@ -1,6 +1,7 @@
 <script lang="ts">
+  import StatusBadge from './StatusBadge.svelte';
   let { value }: { value: unknown } = $props();
   const complete = $derived(value === true);
 </script>
 
-<span class="badge" data-tone={complete ? 'success' : 'neutral'} aria-label={complete ? 'Complete' : 'Open'}>{complete ? 'Complete' : 'Open'}</span>
+<span aria-label={complete ? 'Complete' : 'Open'}><StatusBadge tone={complete ? 'success' : 'neutral'}>{complete ? 'Complete' : 'Open'}</StatusBadge></span>

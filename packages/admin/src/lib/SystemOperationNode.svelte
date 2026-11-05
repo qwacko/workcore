@@ -5,6 +5,7 @@
   import { sessionKey, type SessionStore } from './session.js';
   import ActionForm from './ActionForm.svelte';
   import OperationResultPanel from './OperationResultPanel.svelte';
+  import EmptyState from './EmptyState.svelte';
 
   let { input = {} }: { input?: Json } = $props();
   const session = getContext<SessionStore>(sessionKey);
@@ -20,5 +21,5 @@
   <h2>{operation.ui?.label ?? label(name)}</h2>
   {#if operation.ui?.description}<p>{operation.ui.description}</p>{/if}
   {#if kind === 'mutation' || kind === 'job'}<ActionForm {action} />{:else}<OperationResultPanel block={resultBlock} />{/if}
-  <details class="schema-details"><summary>Inspect schemas</summary><h3>Input</h3><pre>{JSON.stringify(operation.input, null, 2)}</pre><h3>Output</h3><pre>{JSON.stringify(operation.output, null, 2)}</pre></details>
-{:else}<div class="empty">Operation unavailable</div>{/if}
+  <details class="mt-7 border-t pt-4"><summary class="cursor-pointer text-muted-foreground">Inspect schemas</summary><h3 class="mt-5">Input</h3><pre>{JSON.stringify(operation.input, null, 2)}</pre><h3 class="mt-5">Output</h3><pre>{JSON.stringify(operation.output, null, 2)}</pre></details>
+{:else}<EmptyState description="Operation unavailable" />{/if}

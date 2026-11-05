@@ -1,6 +1,9 @@
 <script lang="ts">
   import type { ManifestBlock } from '@workcore/core';
   import { label } from './data.js';
+  import { Input } from './components/ui/input/index.js';
+  import { Button } from './components/ui/button/index.js';
+  import Select from './components/ui/select/select.svelte';
   let { block, search, mode, filterValues, onfilter }: {
     block: Extract<ManifestBlock, { kind: 'collection' }>;
     search: string;
@@ -10,12 +13,12 @@
   } = $props();
 </script>
 
-<div class="collection-toolbar">
-  <label class="search-field"><span class="sr-only">Search {block.title ?? 'results'}</span><input type="search" aria-label={`Search ${block.title ?? 'results'}`} value={search} placeholder="Filter this result…" oninput={event => onfilter('search', event.currentTarget.value)} /></label>
+<div class="flex flex-wrap items-end gap-3 max-[700px]:items-stretch">
+  <label class="min-w-[10rem] flex-1 max-[700px]:basis-full"><span class="sr-only">Search {block.title ?? 'results'}</span><Input type="search" aria-label={`Search ${block.title ?? 'results'}`} value={search} placeholder="Filter this result…" oninput={event => onfilter('search', event.currentTarget.value)} /></label>
   {#each block.filters ?? [] as filter}
-    <label class="filter-field"><span>{filter.label}</span><select aria-label={filter.label} value={filterValues[filter.path] ?? ''} onchange={event => onfilter(filter.path, event.currentTarget.value)}><option value="">All</option>{#each filter.options as option}<option value={JSON.stringify(option.value)}>{option.label}</option>{/each}</select></label>
+    <label class="grid min-w-[125px] flex-1 gap-1 text-xs text-muted-foreground"><span>{filter.label}</span><Select options={[{ value: '', label: 'All' }, ...filter.options.map(option => ({ value: JSON.stringify(option.value), label: option.label }))]} value={filterValues[filter.path] ?? ''} onchange={value => onfilter(filter.path, value)} /></label>
   {/each}
-  <div class="segments" aria-label="Result presentation">
-    {#each ['table', 'list', 'json'] as presentation}<button type="button" aria-pressed={mode === presentation} onclick={() => onfilter('mode', presentation)}>{label(presentation)}</button>{/each}
+  <div class="inline-flex items-center gap-1 rounded-lg border bg-muted/50 p-1" aria-label="Result presentation">
+    {#each ['table', 'list', 'json'] as presentation}<Button type="button" variant={mode === presentation ? 'secondary' : 'ghost'} size="sm" aria-pressed={mode === presentation} onclick={() => onfilter('mode', presentation)}>{label(presentation)}</Button>{/each}
   </div>
 </div>

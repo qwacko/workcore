@@ -5,6 +5,7 @@
   import { sessionKey, type SessionStore } from './session.js';
   import RunDetailPanel from './RunDetailPanel.svelte';
   import { useRendererHost } from './host-context.svelte.js';
+  import Alert from './Alert.svelte';
 
   let { input = {} }: { input?: Json } = $props();
   const session = getContext<SessionStore>(sessionKey);
@@ -58,4 +59,4 @@
   }
 </script>
 
-{#if authorized}<RunDetailPanel state={loader.state} {run} {traceRows} {traceCursor} error={traceError} onrefresh={() => { loader.refresh(); }} onmore={() => { if (traceCursor !== null) watchTrace(traceCursor); }} oncontrol={control} />{:else}<div class="notice error">Execution details are not available to your current actor.</div>{/if}
+{#if authorized}<RunDetailPanel state={loader.state} {run} {traceRows} {traceCursor} error={traceError} onrefresh={() => { loader.refresh(); }} onmore={() => { if (traceCursor !== null) watchTrace(traceCursor); }} oncontrol={control} />{:else}<Alert variant="destructive">Execution details are not available to your current actor.</Alert>{/if}

@@ -1,10 +1,13 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import * as Dialog from './components/ui/dialog/index.js';
+  import { Button } from './components/ui/button/index.js';
   let { title, children, onclose }: { title: string; children: Snippet; onclose: () => void } = $props();
-  let dialog: HTMLDialogElement;
-  $effect(() => { dialog.showModal(); return () => dialog.close(); });
 </script>
-<dialog bind:this={dialog} onclose={onclose} aria-label={title}>
-  <div class="dialog-header"><h2>{title}</h2><button class="icon-button" aria-label="Close dialog" onclick={() => dialog.close()}>✕</button></div>
-  {@render children()}
-</dialog>
+<Dialog.Root open onOpenChange={value => { if (!value) onclose(); }}>
+  <Dialog.Portal><Dialog.Overlay /><Dialog.Content>
+    <Dialog.Header><Dialog.Title>{title}</Dialog.Title></Dialog.Header>
+    {@render children()}
+    <Dialog.Footer><Button variant="outline" onclick={onclose}>Close</Button></Dialog.Footer>
+  </Dialog.Content></Dialog.Portal>
+</Dialog.Root>

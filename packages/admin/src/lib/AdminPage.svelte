@@ -5,6 +5,8 @@
   import type { RendererRegistry } from './renderer-context.js';
   import { sessionKey, type SessionStore } from './session.js';
   import DisplayDocumentRenderer from './DisplayDocumentRenderer.svelte';
+  import Alert from './Alert.svelte';
+  import { Button } from './components/ui/button/index.js';
   let { definition, name = 'overview', registry = {} }: { definition: Manifest['ui']['displays'][string]; name?: string; registry?: RendererRegistry } = $props();
   const session = getContext<SessionStore>(sessionKey);
   let document = $state<ManifestDocument | undefined>(undefined);
@@ -34,6 +36,6 @@
     return () => subscription.unsubscribe();
   });
 </script>
-{#if backHref}<a class="text-button" href={backHref}>← Back to results</a>{/if}
-<div class="page-heading"><div><div class="eyebrow">{definition.metadata.classification === 'admin' ? 'Administration' : 'Workspace application'}</div><h1>{definition.metadata.title}</h1>{#if definition.metadata.description}<p>{definition.metadata.description}</p>{/if}</div><span class="badge">Display protocol</span></div>
-{#if error}<section class="panel notice error" role="alert">{error}</section>{:else if !document}<div class="skeleton" aria-label="Loading display"></div>{:else}{#key name}<DisplayDocumentRenderer {document} {input} {registry} displayName={name} />{/key}{/if}
+{#if backHref}<Button class="mb-3" variant="ghost" size="sm" href={backHref}>← Back to results</Button>{/if}
+<div class="mb-7"><div class="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">{definition.metadata.classification === 'admin' ? 'Administration' : 'Workspace application'}</div><h1 class="text-3xl font-semibold tracking-tight">{definition.metadata.title}</h1>{#if definition.metadata.description}<p class="max-w-3xl">{definition.metadata.description}</p>{/if}</div>
+{#if error}<Alert variant="destructive">{error}</Alert>{:else if !document}<div class="skeleton" aria-label="Loading display"></div>{:else}{#key name}<DisplayDocumentRenderer {document} {input} {registry} displayName={name} />{/key}{/if}

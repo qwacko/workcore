@@ -8,6 +8,8 @@
   import SystemFilesView from './SystemFilesView.svelte';
   import { useTask } from './resource.svelte.js';
   import { useRendererHost } from './host-context.svelte.js';
+  import { Button } from './components/ui/button/index.js';
+  import Alert from './Alert.svelte';
 
   type FilePage = { rows: { id: string; ownerId: string; filename: string; contentType: string; size: number; status: string; createdAt: number; uploadedAt: number | null }[]; nextCursor: string | null };
   let { input = {} }: { input?: Json } = $props();
@@ -45,13 +47,13 @@
   function next(cursor: string) { const url = new URL(host.location().href); url.searchParams.set('after', cursor); void host.navigate(url.href); }
 </script>
 
-{#if !$session?.manifest.files.list}<div class="notice error">This system display is not available to your current actor.</div>
+{#if !$session?.manifest.files.list}<Alert variant="destructive">This system display is not available to your current actor.</Alert>
 {:else}<DisplayCard wide>
   {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
   <LoadBoundary state={files.state}>
     {#snippet children(_data: Json)}
       <SystemFilesView files={filePage ?? { rows: [], nextCursor: null }} canUpload={$session?.manifest.files.upload ?? false} canDownload={$session?.manifest.files.download ?? false} canDelete={$session?.manifest.files.delete ?? false} {busy} error="" onupload={upload} ondownload={download} onremove={remove} />
-      {#if filePage?.nextCursor}<div class="pagination"><button onclick={() => next(filePage.nextCursor!)}>Next page →</button></div>{/if}
+      {#if filePage?.nextCursor}<div class="mt-5 flex gap-2.5"><Button variant="outline" onclick={() => next(filePage.nextCursor!)}>Next page →</Button></div>{/if}
     {/snippet}
   </LoadBoundary>
 </DisplayCard>{/if}
