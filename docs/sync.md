@@ -71,6 +71,8 @@ subscription.unsubscribe();
 client.close();
 ```
 
+Equivalent resource names and canonical JSON inputs share one reference-counted subscription on a client. New observers synchronously receive the current snapshot. After the final observer leaves, the default one-second handoff window keeps the subscription alive; then up to 64 inactive snapshots are retained for 30 seconds and revalidated when observed again. These settings are configurable through `createClient({ subscriptions: { keepAliveMs, cacheTimeMs, maxCached } })`. Caches are client/session-local, cleared on close and never persisted. Concurrent one-shot queries are coalesced only while in flight, with sharing cleared across writes. See [Custom frontends and chat](./custom-frontends.md#shared-reads-and-retained-live-data).
+
 One client multiplexes subscriptions over one WebSocket. Reconnects use bounded exponential backoff and request fresh snapshots. Connected clients refresh every 30 seconds, recovering a broadcast missed after a successful database commit.
 
 After transient network loss, data may remain available with `reconnecting` status and must be treated as stale. Policy/session errors clear the result; an access-denied subscription is removed on the server. The client reconnects after the connection closes, but a denied individual view must be explicitly subscribed again once access changes.

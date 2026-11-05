@@ -1,6 +1,7 @@
 {
   "extends": "$app/tsconfig",
   "compilerOptions": {
+    "paths": { "$lib": ["./src/lib"], "$lib/*": ["./src/lib/*"] },
     "allowJs": true,
     "checkJs": true,
     "esModuleInterop": true,

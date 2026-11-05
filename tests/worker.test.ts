@@ -215,53 +215,6 @@ describe('Cloudflare Worker and live protocol', () => {
     expect((await response).data).toHaveLength(2);
     reconnected.close();
   });
-  it('subscribes to authorized dynamic display documents and re-resolves them after commits', async () => {
-    const workspace = crypto.randomUUID();
-    const document = {
-      state: { count: { schema: { type: 'integer', minimum: 0 }, default: 0, persistence: 'url' } },
-      blocks: [{ id: 'saved-tasks', kind: 'collection', title: 'Initial tasks', source: { kind: 'view', name: 'tasks' }, input: { projectId: 'inbox' }, columns: [{ path: 'title' }] }],
-    };
-    const saveResponse = await api(workspace, 'mutate', { name: 'createSavedDisplayDraft', input: { title: 'Initial', document }, requestId: 'save-initial' }, 'alice');
-    const saved = await saveResponse.json() as any;
-    expect(saveResponse.status, JSON.stringify(saved)).toBe(200);
-    const resolved = await (await api(workspace, 'display', { name: 'savedDisplay', input: { savedDisplayId: saved.data.id } }, 'alice')).json() as any;
-    expect(resolved.state).toEqual(document.state);
-    const connection = await socket(workspace, 'alice');
-    let response = next(connection);
-    connection.send(JSON.stringify({ type: 'subscribe', kind: 'display', id: 'saved', name: 'savedDisplay', input: { savedDisplayId: saved.data.id } }));
-    expect(await response).toMatchObject({ type: 'snapshot', id: 'saved', data: { blocks: expect.arrayContaining([expect.objectContaining({ id: 'saved-tasks', title: 'Initial tasks' })]) } });
-    response = next(connection);
-    const updatedDocument = {
-      ...document,
-      state: { count: { schema: { type: 'integer', minimum: 0 }, default: 1, persistence: 'url' } },
-      blocks: [{ ...document.blocks[0], title: 'Updated tasks' }],
-    };
-    await api(workspace, 'mutate', { name: 'updateSavedDisplayDraft', input: { id: saved.data.id, expectedVersion: 1, document: updatedDocument }, requestId: 'save-update' }, 'alice');
-    expect(await response).toMatchObject({ type: 'snapshot', id: 'saved', data: { blocks: expect.arrayContaining([expect.objectContaining({ id: 'saved-tasks', title: 'Updated tasks' })]) } });
-    const resolvedAfterUpdate = await (await api(workspace, 'display', { name: 'savedDisplay', input: { savedDisplayId: saved.data.id } }, 'alice')).json() as any;
-    expect(resolvedAfterUpdate.state).toEqual(updatedDocument.state);
-    connection.close();
-  });
-  it('keeps saved documents private, denies publishing, rejects unsafe sources, and uses optimistic concurrency', async () => {
-    const workspace = crypto.randomUUID();
-    const document = { blocks: [{ id: 'safe-tasks', kind: 'collection', source: { kind: 'view', name: 'tasks' }, input: { projectId: 'inbox' }, columns: [{ path: 'title' }] }] };
-    const saveResponse = await api(workspace, 'mutate', { name: 'createSavedDisplayDraft', input: { title: 'Private', document }, requestId: 'private-draft' });
-    const saved = await saveResponse.json() as any;
-    expect(saveResponse.status, JSON.stringify(saved)).toBe(200);
-    const forbiddenResolve = await api(workspace, 'display', { name: 'savedDisplay', input: { savedDisplayId: saved.data.id } }, 'bob');
-    expect(forbiddenResolve.status).toBe(404);
-
-    const publish = await api(workspace, 'mutate', { name: 'publishSavedDisplay', input: { id: saved.data.id, expectedVersion: 1 }, requestId: 'publish-denied' });
-    expect(publish.status).toBe(403);
-
-    const invalid = await api(workspace, 'mutate', { name: 'createSavedDisplayDraft', input: { title: 'Unsafe', document: { blocks: [{ id: 'unsafe', kind: 'collection', source: { kind: 'view', name: 'members' }, columns: [{ path: 'id' }] }] } }, requestId: 'unsafe-draft' });
-    expect(invalid.status).toBe(400);
-
-    const update = { name: 'updateSavedDisplayDraft', input: { id: saved.data.id, expectedVersion: 1, title: 'Updated', document: { blocks: [{ ...document.blocks[0], title: 'Updated tasks' }] } } };
-    expect((await api(workspace, 'mutate', { ...update, requestId: 'update-one' })).status).toBe(200);
-    const stale = await api(workspace, 'mutate', { ...update, requestId: 'update-stale' });
-    expect(stale.status).toBe(409);
-  });
   it('refreshes the connected manifest discovery subscription after commits', async () => {
     const workspace = crypto.randomUUID();
     const connection = await socket(workspace, 'alice');
@@ -298,7 +251,7 @@ describe('Cloudflare Worker and live protocol', () => {
     const stub = bindings.WORKSPACES.get(bindings.WORKSPACES.idFromName(workspace));
     await runDurableObjectAlarm(stub);
     const summary = await (await api(workspace, 'query', { name: 'assistantSummary', input: {} })).json() as any;
-    expect(summary.data).toContain('Demo assistant');
+    expect(summary.data).toContain('tasks');
     const trace = await (await api(workspace, 'trace', { runId: result.data })).json() as any;
     expect(trace.rows[0]).toMatchObject({ status: 'completed' });
     expect((await api(workspace, 'trace', { runId: result.data }, 'bob')).status).toBe(403);

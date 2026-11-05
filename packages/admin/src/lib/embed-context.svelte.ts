@@ -4,8 +4,13 @@ export type EmbedBudget = {
   release(token: symbol): void;
   subscribe(listener: () => void): () => void;
 };
-export type EmbedContext = { ancestry: string[]; budget: EmbedBudget; instanceId: string; memoryOnly: boolean; embedded: boolean };
+export type EmbedContext = { ancestry: string[]; workspace?: string; budget: EmbedBudget; instanceId: string; memoryOnly: boolean; embedded: boolean };
 export const embedContextKey = Symbol('workcore-embed-context');
+
+/** Names alone collide across workspaces and across different saved documents. */
+export function displayIdentity(workspace: string | undefined, display: string, input: Json = {}): string {
+  return sourceKey([workspace ?? '', display, input]);
+}
 
 export function createEmbedBudget(limit = 20): EmbedBudget {
   let activeCount = 0;
@@ -30,3 +35,5 @@ export function createEmbedBudget(limit = 20): EmbedBudget {
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
   };
 }
+import { sourceKey } from '@workcore/client';
+import type { Json } from '@workcore/core';

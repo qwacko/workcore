@@ -1,0 +1,10 @@
+import type { createClient } from '@workcore/client';
+import type { z } from 'zod';
+import type { tracker } from '../app.js';
+import type { notesApp } from '../notes.js';
+export type TaskClient = ReturnType<typeof createClient<typeof tracker>>;
+export type NotesClient = ReturnType<typeof createClient<typeof notesApp>>;
+export type Task = z.output<typeof tracker.views.tasks.output>[number];
+export type Note = z.output<typeof notesApp.views.list.output>[number];
+export type Conversation = z.output<typeof tracker.views.conversation.output>;
+export type Message = Conversation['messages'][number];

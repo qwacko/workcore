@@ -8,6 +8,8 @@ import { createWorkerEnvFile } from './worker-env.mjs';
 
 const require = createRequire(import.meta.url);
 const example = new URL('../examples/workcore-demo/', import.meta.url);
+const exampleRequire = createRequire(new URL('package.json', example));
+const vite = resolve(dirname(exampleRequire.resolve('vite/package.json')), 'bin/vite.js');
 const environment = readEnvironment([new URL('../.env', import.meta.url), new URL('.env', example)]);
 const wrangler = resolve(dirname(require.resolve('wrangler/package.json')), require('wrangler/package.json').bin.wrangler);
 const args = devArgs(environment);
@@ -34,8 +36,9 @@ const backend = spawn(process.execPath, [wrangler, ...args, '--env-file', worker
   env: { ...environment, CLOUDFLARE_INCLUDE_PROCESS_ENV: 'false', CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: 'true' },
   stdio: 'inherit',
 });
-const frontend = spawn('pnpm', ['--filter', 'workcore-demo', 'dev:ui'], {
-  cwd: root, env: { ...environment, HOST: host, PORT: port, WORKCORE_API_ORIGIN: `http://127.0.0.1:${backendPort}` }, stdio: 'inherit',
+// Own Vite directly so shutdown cannot leave a server behind a package-manager shell.
+const frontend = spawn(process.execPath, [vite, 'dev'], {
+  cwd: fileURLToPath(example), env: { ...environment, HOST: host, PORT: port, WORKCORE_API_ORIGIN: `http://127.0.0.1:${backendPort}` }, stdio: 'inherit',
 });
 console.log(`Workcore: http://${host}:${port} (SvelteKit HMR + local Cloudflare runtime)`);
 let stopping = false;

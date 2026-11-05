@@ -212,3 +212,9 @@ For production, put non-secret selections in Worker vars and upload only the pro
 ## Useful next improvements
 
 Before granting higher-impact capabilities, add application-specific approval gates, task-specific evaluations and adversarial prompt-injection tests. Monetary quotas, per-user rate limits, history compaction, structured outputs and provider capability validation are useful additions. They are not implied by using AI SDK or a Durable Object.
+
+## Optional inference streaming
+
+Pass `onTextDelta(delta, turn)` to `ai.run()` to use SDK streaming. Applications own how transient text is delivered. The callback runs inside the bounded inference turn; callback failures stop execution and do not trigger provider fallback. Tool execution, terminating replies, token budgets and cancellation retain their normal checks. Omitting the callback uses the existing non-streaming inference path.
+
+The demo throttles a small preview into durable run progress and subscribes to that progress through the ordinary client. It writes the final reply through its terminating tool. Intermediate inference text can differ from the final reply, so it is presented as working progress. Browser reconnects recover current progress and persisted messages; this does not resume interrupted inference or replay lost token deltas.

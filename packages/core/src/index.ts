@@ -1,10 +1,11 @@
 export { defineSchema, idColumn, timestampColumns, versionColumn, workspace } from './definitions.js';
 export type { Actor, Database, Definition, FileBucket, Json, Job, MigrationBundle, Mutation, MutationContext, Operation, ReadContext, RunContext, TableDisplay, Tables, View } from './definitions.js';
+export type { Run, Schedule } from './store.js';
 export { workcoreSchema } from './schema.js';
 export { builtinTriggers, shouldRefreshView } from './triggers.js';
 export type { BuiltinTriggerKey, Trigger, TriggerKey } from './triggers.js';
 export { WorkcoreError, encode as encodeJson } from './json.js';
 export { displayDocumentSchema, field, ui, manifestSchema } from './ui.js';
-export { compileDisplays, compileWireDisplayDocument } from './ui.js';
+export { compileDisplays } from './ui.js';
 export { MAX_DISPLAY_BYTES, MAX_DISPLAY_DEPTH, MAX_DISPLAY_NODES } from './ui.js';
 export type { BlockDefinition, ChatPart, Column, ComponentDefinition, ComponentDefinitions, DetailLink, DisplayDefinition, DisplayDocument, DisplayMetadata, DisplayStateBinding, DisplayStateDefinition, DisplaysDefinition, DisplaySelectionBinding, FieldMetadata, JsonSchema, Manifest, ManifestAction, ManifestBlock, ManifestSourceBlock, ManifestDisplay, ManifestDocument, ManifestOperation, OperationUI, RelationshipLookup, SuccessEffect } from './ui.js';

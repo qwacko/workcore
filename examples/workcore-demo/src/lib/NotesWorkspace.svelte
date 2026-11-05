@@ -1,23 +1,112 @@
 <script lang="ts">
-  import { createClient, type LiveState } from '@workcore/client';
-  import type { notesApp } from '../notes.js';
-  import type { z } from 'zod';
-  type Note = z.output<typeof notesApp.views.list.output>[number];
-  type Props = { client: ReturnType<typeof createClient<typeof notesApp>>; notes: LiveState<Note[]>; archive: LiveState<Note[]>; busy: boolean; onerror: (message: string) => void };
-  let { client, notes, archive, busy, onerror }: Props = $props();
-  let archived = $state(false), search = $state(''), title = $state(''), body = $state(''), editing = $state<Note | null>(null);
-  let saving = $state(false);
-  let current = $derived(archived ? archive : notes);
-  let visible = $derived((current.data ?? []).filter(n => `${n.title} ${n.body}`.toLowerCase().includes(search.toLowerCase())));
-  async function mutate(fn: () => Promise<unknown>) { saving = true; try { await fn(); } catch (e) { onerror(e instanceof Error ? e.message : 'Something went wrong'); } finally { saving = false; } }
-  function save() { const value = title.trim(); if (!value) return; void mutate(async () => { if (editing) await client.mutate('update', { id: editing.id, expectedRevision: editing.version, title: value, body, starred: editing.starred, archived: editing.archived }); else await client.mutate('create', { title: value, body }); cancel(); }); }
-  function cancel() { editing = null; title = ''; body = ''; }
-  function edit(note: Note) { editing = note; title = note.title; body = note.body; }
-  function update(note: Note, changes: Partial<Pick<Note, 'starred' | 'archived'>>) { void mutate(() => client.mutate('update', { id: note.id, expectedRevision: note.version, title: note.title, body: note.body, starred: note.starred, archived: note.archived, ...changes })); }
-  function remove(note: Note) { if (confirm('Permanently delete this note?')) void mutate(async () => { await client.mutate('remove', { id: note.id, expectedRevision: note.version }); if (editing?.id === note.id) cancel(); }); }
+  import type { LiveState } from '@workcore/client';
+  import type { Note, NotesClient } from './types';
+  import NoteCard from './NoteCard.svelte';
+  import NoteEditor from './NoteEditor.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import { Input } from '$lib/components/ui/input';
+  import * as Tabs from '$lib/components/ui/tabs';
+  import { Plus, Search, Star } from '@lucide/svelte';
+  let {
+    client,
+    notes,
+    archive,
+  }: {
+    client: NotesClient;
+    notes: LiveState<Note[]>;
+    archive: LiveState<Note[]>;
+  } = $props();
+  let searchOpen = $state(false);
+  let tab = $state('notes'),
+    search = $state(''),
+    starred = $state(false),
+    creating = $state(false);
+  const current = $derived(tab === 'archive' ? archive : notes);
+  const visible = $derived(
+    (current.data ?? []).filter(
+      (n) =>
+        (!starred || n.starred) &&
+        `${n.title} ${n.body}`.toLowerCase().includes(search.toLowerCase()),
+    ),
+  );
 </script>
 
-<div class="workspace"><aside><div class="panel"><span class="eyebrow">{editing ? 'EDIT NOTE' : 'QUICK CAPTURE'}</span><h2>{editing ? 'Make a change' : 'New note'}</h2><form onsubmit={(e) => { e.preventDefault(); save(); }}><label>Title<input bind:value={title} maxlength="160" required placeholder="Give it a title" /></label><label>Note<textarea bind:value={body} maxlength="20000" rows="8" placeholder="Start writing…"></textarea></label><button class="primary" disabled={busy || saving}>{editing ? 'Save changes' : 'Save note'} <span>↗</span></button>{#if editing}<button type="button" class="link" onclick={cancel}>Cancel editing</button>{/if}</form></div><div class="aside-note">✳ <strong>Just for you</strong><p>Notes are private, synced live and kept in their own workspace.</p></div></aside>
-<section class="content"><div class="toolbar"><div><h2>{archived ? 'Archive' : 'Your notes'}</h2><p>{visible.length} notes</p></div><div class="segmented"><button class:selected={!archived} onclick={() => archived = false}>Notes</button><button class:selected={archived} onclick={() => archived = true}>Archive</button></div></div><div class="filters"><input type="search" bind:value={search} placeholder="Search notes" aria-label="Search notes" /></div>
-{#if current.status === 'error'}<p class="empty">{current.error?.message}</p>{:else if !current.data}<p class="empty">Loading notes…</p>{:else if !visible.length}<p class="empty">No notes here yet. Capture a thought to get started.</p>{:else}<div class="notes-grid">{#each visible as note (note.id)}<article class="note"><div class="note-head"><h3>{note.title}</h3><button aria-label={note.starred ? 'Unstar note' : 'Star note'} disabled={busy || saving} onclick={() => update(note, { starred: !note.starred })}>{note.starred ? '★' : '☆'}</button></div><p>{note.body || 'No additional text'}</p><small>Updated {new Date(note.updatedAt).toLocaleDateString()}</small><div class="note-actions"><button onclick={() => edit(note)}>Edit</button><button disabled={busy || saving} onclick={() => update(note, { archived: !note.archived })}>{note.archived ? 'Restore' : 'Archive'}</button><button disabled={busy || saving} onclick={() => remove(note)}>Delete</button></div></article>{/each}</div>{/if}
-</section></div>
+<section class="flex min-h-0 flex-1 flex-col" aria-label="Notes workspace">
+  <h1 class="sr-only">Notes</h1>
+  <div class="flex h-12 shrink-0 items-center gap-2 border-b bg-card px-3">
+    <Tabs.Root bind:value={tab}>
+      <Tabs.List class="h-8">
+        <Tabs.Trigger value="notes" class="text-xs">Notes</Tabs.Trigger><Tabs.Trigger
+          value="archive"
+          class="text-xs"
+        >
+          Archive
+        </Tabs.Trigger>
+      </Tabs.List>
+    </Tabs.Root>
+    <span class="mr-auto text-xs tabular-nums text-muted-foreground">{visible.length}</span>
+    <div class="relative hidden min-w-0 sm:block sm:w-52">
+      <Search
+        class="pointer-events-none absolute top-2 left-2 size-3.5 text-muted-foreground"
+      /><Input
+        type="search"
+        class="h-8 pl-7 text-xs"
+        bind:value={search}
+        aria-label="Search notes"
+        placeholder="Search notes…"
+      />
+    </div>
+    <Button
+      variant={searchOpen ? 'secondary' : 'ghost'}
+      size="icon-sm"
+      class="size-8 sm:hidden"
+      aria-label="Search notes"
+      aria-pressed={searchOpen}
+      onclick={() => {
+        searchOpen = !searchOpen;
+        if (!searchOpen) search = '';
+      }}
+    >
+      <Search class="size-4" />
+    </Button>
+    <Button
+      size="icon-sm"
+      class="size-8"
+      variant={starred ? 'secondary' : 'ghost'}
+      aria-label="Starred notes only"
+      aria-pressed={starred}
+      onclick={() => (starred = !starred)}
+    >
+      <Star class="size-4" />
+    </Button>
+    <Button size="sm" class="h-8 px-2" aria-label="New note" onclick={() => (creating = true)}>
+      <Plus class="size-4" />
+      <span class="hidden sm:inline">New note</span>
+    </Button>
+  </div>
+  {#if searchOpen}<div class="shrink-0 border-b bg-card px-3 pb-2 sm:hidden">
+      <Input
+        type="search"
+        class="h-8 text-sm"
+        bind:value={search}
+        aria-label="Search notes"
+        placeholder="Search notes…"
+      />
+    </div>{/if}
+  <div class="min-h-0 flex-1 overflow-y-auto p-3 md:p-4">
+    {#if current.status === 'error'}<p role="alert" class="text-destructive">
+        {current.error?.message}
+      </p>{:else if !current.data}<p class="text-muted-foreground">
+        Loading notes…
+      </p>{:else if !visible.length}<div
+        class="rounded-lg border border-dashed p-10 text-center text-muted-foreground"
+      >
+        No notes here. Capture an idea or change your filters.
+      </div>{:else}<div
+        class="grid items-start gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
+      >
+        {#each visible as note (note.id)}<NoteCard {note} {client} />{/each}
+      </div>{/if}
+  </div>
+</section>
+<NoteEditor {client} bind:open={creating} />

@@ -4,19 +4,28 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "exports": { "./server": "./src/server.ts", "./renderer": "./src/lib/renderer.ts" },
+  "exports": {
+    "./server": "./src/server.ts"
+  },
   "scripts": {
     "build": "vite build --logLevel warn",
     "dev": "vite dev",
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@workcore/client": "workspace:*", "@workcore/core": "workspace:*",
-    "@cfworker/json-schema": "^4.1.1", "dompurify": "^3.3.0", "marked": "^17.0.0"
+    "@workcore/client": "workspace:*",
+    "@workcore/core": "workspace:*",
+    "@cfworker/json-schema": "^4.1.1",
+    "dompurify": "^3.3.0",
+    "marked": "^17.0.0"
   },
   "devDependencies": {
-    "@sveltejs/adapter-static": "^4.0.0", "@sveltejs/kit": "^3.1.0",
-    "@sveltejs/vite-plugin-svelte": "^7.3.1", "svelte": "^5.57.2",
-    "svelte-check": "^4.7.7", "typescript": "^6.0.2", "vite": "^8.3.5"
+    "@sveltejs/adapter-static": "^4.0.0",
+    "@sveltejs/kit": "^3.1.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "svelte": "^5.57.2",
+    "svelte-check": "^4.7.7",
+    "typescript": "^6.0.2",
+    "vite": "^8.3.5"
   }
 }

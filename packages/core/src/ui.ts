@@ -131,8 +131,6 @@ export type DisplayDefinition<I extends z.ZodType = z.ZodType, C = unknown> = {
   input?: I;
   document?: DisplayDocument;
   handler?: (ctx: C, input: z.output<I>) => DisplayDocument;
-  /** Resolver for persisted protocol documents; unlike `handler`, it returns validated wire JSON. */
-  wireHandler?: (ctx: C, input: z.output<I>) => unknown;
 };
 export type ComponentDefinition<P extends z.ZodType = z.ZodType> = { version: number; props: P; placement?: 'block' | 'field' | 'cell' };
 export type ComponentDefinitions = Record<string, ComponentDefinition>;
@@ -376,7 +374,6 @@ export type ManifestDocument = NonNullable<ManifestDisplay['document']>;
 export type ManifestOperation = z.infer<typeof operationSchema>;
 
 /** Resolve object references once, then project the serialisable definition for this actor. */
-type WireStateDefinitions = NonNullable<ManifestDocument['state']>;
 
 /** Validate JSON values against the JSON Schema subset emitted for declared display state. */
 function matchesJsonSchema(schema: JsonSchema, value: Json, root: JsonSchema = schema, seen = new Set<string>()): boolean {
@@ -433,7 +430,6 @@ function matchesJsonSchema(schema: JsonSchema, value: Json, root: JsonSchema = s
 export function compileDisplays(
   definition: Definition,
   permitted: (kind: string, name: string) => boolean,
-  wireState?: { display: string; state?: WireStateDefinitions },
 ): Manifest['ui'] {
   const components = Object.fromEntries(Object.entries(definition.displays?.components ?? {}).map(([name, component]) => {
     if (!/^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(name)) throw new Error(`Custom component names must be namespaced: ${name}`);
@@ -598,7 +594,7 @@ export function compileDisplays(
     if (!permitted('display', name)) continue;
     const route = display.metadata.route?.path;
     if (route && (!route.startsWith('/') || route.startsWith('//') || route.split('/').some(part => part === '.' || part === '..'))) throw new Error(`Invalid route path for display ${name}`);
-    if ([display.document, display.handler, display.wireHandler].filter(Boolean).length !== 1) throw new Error(`Display ${name} must define exactly one of document or resolver`);
+    if ([display.document, display.handler].filter(Boolean).length !== 1) throw new Error(`Display ${name} must define exactly one of document or resolver`);
     const input = display.input ? JSON.parse(JSON.stringify(z.toJSONSchema(display.input, { io: 'input' }))) as JsonSchema : undefined;
     if (!display.document) {
       displays[name] = { metadata: display.metadata, ...(input ? { input } : {}) };
@@ -610,19 +606,6 @@ export function compileDisplays(
     const stateSchemas = new Map<string, JsonSchema>();
     const stateValidators = new Map<string, (value: Json) => boolean>();
     const manifestState: Record<string, { schema: JsonSchema; default: Json; persistence: 'memory' | 'url' }> = {};
-    const wireDefinitions = wireState?.display === name ? wireState.state ?? {} : undefined;
-    if (wireDefinitions) {
-      for (const [stateName, stateDefinition] of Object.entries(wireDefinitions)) {
-        if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(stateName)) throw new Error(`Invalid display state name in ${name}: ${stateName}`);
-        if (!stateDefinition.schema || typeof stateDefinition.schema !== 'object' || Array.isArray(stateDefinition.schema) || !matchesJsonSchema(stateDefinition.schema, stateDefinition.default, stateDefinition.schema)) {
-          throw new Error(`Invalid default or schema for display state: ${stateName}`);
-        }
-        const schema = JSON.parse(JSON.stringify(stateDefinition.schema)) as JsonSchema;
-        stateSchemas.set(stateName, schema);
-        stateValidators.set(stateName, value => matchesJsonSchema(schema, value, schema));
-        manifestState[stateName] = { schema, default: stateDefinition.default, persistence: stateDefinition.persistence };
-      }
-    } else {
       for (const [stateName, stateDefinition] of Object.entries(display.document.state ?? {})) {
         if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(stateName)) throw new Error(`Invalid display state name in ${name}: ${stateName}`);
         const parsedDefault = stateDefinition.schema.parse(stateDefinition.default) as Json;
@@ -634,7 +617,6 @@ export function compileDisplays(
         });
         manifestState[stateName] = { schema, default: parsedDefault, persistence: stateDefinition.persistence ?? 'memory' };
       }
-    }
     const collectSelections = (block: BlockDefinition) => {
       if (block.kind === 'collection' && block.selection) {
         const source = reference(block.source, ['view', 'query']);
@@ -756,47 +738,4 @@ export function compileDisplays(
     }
   }
   return { title: definition.displays?.title ?? 'Workcore', description: definition.displays?.description ?? 'Your live workspace and its operations.', displays, components };
-}
-
-/** Compile a persisted protocol document without pretending its JSON Schemas are Zod schemas. */
-export function compileWireDisplayDocument(
-  definition: Definition,
-  name: string,
-  input: unknown,
-  permitted: (kind: string, name: string) => boolean,
-): ManifestDocument {
-  const wire = displayDocumentSchema.parse(input) as ManifestDocument;
-  const getOperation = (kind: string, operationName: string): Target => {
-    const map = kind === 'view' ? definition.views : kind === 'query' ? definition.queries : kind === 'mutation' ? definition.mutations : definition.jobs;
-    const target = map[operationName];
-    if (!target) throw new Error(`Unknown ${kind} reference: ${operationName}`);
-    return target;
-  };
-  const compileAction = (value: any): ActionDefinition => {
-    const { operation, ...options } = value;
-    return { ...options, target: getOperation(operation.kind, operation.name) } as ActionDefinition;
-  };
-  const compileBlock = (value: any): BlockDefinition => {
-    const result = { ...value };
-    if (value.source) {
-      result.source = getOperation(value.source.kind, value.source.name);
-      if (value.actions) result.actions = value.actions.map(compileAction);
-      if (value.send) result.send = compileAction(value.send);
-    } else if (value.kind === 'form' || value.kind === 'button') result.action = compileAction(value.action);
-    if (value.children) result.children = value.children.map(compileBlock);
-    if (value.kind === 'columns') result.columns = value.columns.map((column: any) => ({ ...column, children: column.children.map(compileBlock) }));
-    return result as BlockDefinition;
-  };
-  const document: DisplayDocument = { blocks: wire.blocks.map(compileBlock) };
-  const displays = definition.displays?.displays ?? {};
-  const candidate = {
-    ...definition,
-    displays: {
-      ...(definition.displays ?? {}),
-      displays: { ...displays, [name]: { metadata: displays[name]?.metadata ?? { title: 'Saved display' }, ...(displays[name]?.input ? { input: displays[name]!.input } : {}), document } },
-    },
-  } as Definition;
-  const compiled = compileDisplays(candidate, permitted, { display: name, state: wire.state }).displays[name]?.document;
-  if (!compiled) throw new Error(`Wire display ${name} could not be compiled`);
-  return displayDocumentSchema.parse(compiled) as ManifestDocument;
 }

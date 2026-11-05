@@ -90,7 +90,7 @@ test('guided pages, generated forms, row actions, local filters and deep links',
   expect(errors).toEqual([]);
 });
 
-test('live updates, private projections, server scope and responsive navigation', async ({ page, browser }) => {
+test('live updates, private projections, server scope and responsive navigation', async ({ page, browser }, testInfo) => {
   await signIn(page);
   const bobContext = await browser.newContext();
   const bob = await bobContext.newPage();
@@ -122,11 +122,11 @@ test('live updates, private projections, server scope and responsive navigation'
   await page.getByRole('button', { name: 'Toggle navigation' }).click();
   await page.getByRole('link', { name: 'Overview', exact: false }).click();
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
-  await page.screenshot({ path: '/tmp/opencode/workcore-admin-mobile.png', fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath('workcore-admin-mobile.png'), fullPage: true });
   await bobContext.close();
 });
 
-test('private persisted chat, run timelines and scheduled execution', async ({ page }) => {
+test('private persisted chat, run timelines and scheduled execution', async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await signIn(page);
@@ -135,18 +135,18 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
   const sent = page.waitForResponse(response => response.url().endsWith('/mutate') && response.request().postDataJSON()?.name === 'sendMessage');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   const runId = (await (await sent).json()).data.runId as string;
-  await expect(page.getByRole('log', { name: 'Conversation' })).toContainText('Demo assistant', { timeout: 15_000 });
+  await expect(page.getByRole('log', { name: 'Conversation' })).toContainText('tasks', { timeout: 15_000 });
   await expect(page.locator('.chat-thread img')).toHaveCount(0);
   await page.reload();
-  await expect(page.getByRole('log', { name: 'Conversation' })).toContainText('Demo assistant');
+  await expect(page.getByRole('log', { name: 'Conversation' })).toContainText('tasks');
   await expect(page.getByLabel('Agent progress')).toContainText('Offline demo');
   await page.getByRole('link', { name: 'Inspect run', exact: false }).click();
    await expect(page).toHaveURL(new RegExp('/displays/systemRunDetail\\?runId=' + runId));
   await expect(page.getByRole('heading', { name: 'Execution timeline' })).toBeVisible();
   await expect(page.getByLabel('Agent progress')).toContainText('Turn 1');
-  await expect(page.getByText('Summarise the first page of my tasks', { exact: true })).toBeVisible();
+  await expect(page.getByText('Handle the demo request', { exact: true })).toBeVisible();
   await page.getByText('Step result', { exact: true }).click();
-  await expect(page.locator('.timeline').getByText('Demo assistant:', { exact: false })).toBeVisible();
+  await expect(page.locator('.timeline').getByText('Here are your', { exact: false })).toBeVisible();
 
   await page.locator('a[href="/admin/demo/displays/tasks"]').click();
   const title = `Scheduled task ${Date.now()}`;
@@ -162,23 +162,12 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
   await page.getByRole('link', { name: 'Schedules', exact: false }).click();
   const schedule = page.getByRole('row').filter({ hasText: scheduleId.slice(0, 8) });
   await expect(schedule.getByRole('link', { name: 'Inspect run', exact: false })).toBeVisible({ timeout: 15_000 });
-  await page.screenshot({ path: '/tmp/opencode/workcore-admin-schedules.png', fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath('workcore-admin-schedules.png'), fullPage: true });
   await page.getByRole('link', { name: 'Overview', exact: false }).click();
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Project tasks', exact: true })).toBeVisible();
-  await page.screenshot({ path: '/tmp/opencode/workcore-admin-overview.png', fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath('workcore-admin-overview.png'), fullPage: true });
   expect(errors).toEqual([]);
-});
-
-test('assistant renders a live display reference inside a chat message', async ({ page }) => {
-  await signIn(page);
-  await page.getByRole('link', { name: 'Assistant', exact: false }).click();
-  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Show my tasks as a dashboard.');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
-  const conversation = page.getByRole('log', { name: 'Conversation' });
-  await expect(conversation).toContainText('Live display', { timeout: 15_000 });
-  await expect(conversation.getByRole('heading', { name: 'Project tasks' })).toBeVisible();
-  await expect(conversation.getByText('Open this workspace in two browser windows')).toBeVisible();
 });
 
 test('operation explorer, validation, JSON fallback and unavailable deep links', async ({ page }) => {
@@ -354,26 +343,6 @@ test('relationship lookups, property-bound detail displays and back navigation p
   await expect(page).toHaveURL(/filter\.project-tasks\.search=/);
   await expect(page.getByRole('searchbox', { name: 'Search Project tasks' })).toHaveValue('Relationship detail fixture');
   await expect(page.getByRole('row').filter({ hasText: 'Relationship detail fixture' })).toBeVisible();
-});
-
-test('agent-composable saved documents are policy-checked, private, navigable and dynamically resolved', async ({ page }) => {
-  await signIn(page);
-  await page.getByRole('link', { name: 'Saved displays', exact: true }).click();
-  await expect(page.locator('.source-status').filter({ hasText: 'Live' }).first()).toBeVisible();
-  await page.getByRole('textbox', { name: 'Title', exact: false }).fill('My inbox dashboard');
-  await page.getByRole('button', { name: 'Create dashboard draft', exact: true }).click();
-  await expect(page).toHaveURL(/\/displays\/savedDisplay\?savedDisplayId=/);
-  await expect(page.getByRole('heading', { name: 'Saved display' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Project summary' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Project tasks' })).toBeVisible();
-  await expect(page.getByText('Open this workspace in two browser windows')).toBeVisible();
-  const savedDisplayId = new URL(page.url()).searchParams.get('savedDisplayId');
-  expect(savedDisplayId).toBeTruthy();
-
-  await signIn(page, 'member');
-  await page.goto(`/admin/demo/displays/savedDisplay?savedDisplayId=${encodeURIComponent(savedDisplayId!)}`);
-  await expect(page.getByRole('alert')).toContainText('not found');
-  await expect(page.getByRole('heading', { name: 'Project tasks' })).toHaveCount(0);
 });
 
 test('a registered custom task-board renderer loads its authorized live source', async ({ page }) => {

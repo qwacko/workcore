@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { type Snippet } from 'svelte';
   import type { Json, JsonSchema, ManifestOperation, ManifestSourceBlock } from '@workcore/core';
   import type { SourceLoader } from './source.svelte.js';
   import SchemaForm from './SchemaForm.svelte';

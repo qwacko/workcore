@@ -20,8 +20,9 @@ export class NotesWorkspace extends Workspace<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith('/api/auth/')) return (await authFor(env)).handler(request);
-    const session = await (await authFor(env)).api.getSession({ headers: request.headers });
+    const requestEnv = env.BETTER_AUTH_URL ? env : { ...env, BETTER_AUTH_URL: url.origin };
+    if (url.pathname.startsWith('/api/auth/')) return (await authFor(requestEnv)).handler(request);
+    const session = await (await authFor(requestEnv)).api.getSession({ headers: request.headers });
     if (url.pathname === '/api/admin-navigation') {
       if (!session) return Response.json({ error: 'UNAUTHENTICATED' }, { status: 401 });
       return Response.json({ homeHref: '/', workspaces: [{ id: 'demo', label: 'Tasks' }, { id: 'notes', label: 'Notes' }] }, { headers: { 'cache-control': 'no-store' } });

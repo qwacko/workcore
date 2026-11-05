@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
-import { APICallError } from 'ai';
+import { APICallError, simulateReadableStream } from 'ai';
 import { z } from 'zod';
 import { createAI, externalTool, modelSpec, operationTool, resolveModel, terminatingTool } from '../packages/ai/src/index.js';
 import type { ModelProfile } from '../packages/ai/src/index.js';
@@ -38,6 +38,24 @@ const empty = z.object({});
 const write = app.mutation({ input: z.object({ title: z.string() }), output: z.string(), handler: ({ db }, input) => { db.insert(notes).values({ id: 'one', ...input }).run(); return 'one'; } });
 
 describe('AI SDK integration', () => {
+  it('delivers transient inference deltas while preserving the normal bounded completion contract', async () => {
+    type StreamResponse = Awaited<ReturnType<MockLanguageModelV4['doStream']>>;
+    type Part = StreamResponse['stream'] extends ReadableStream<infer P> ? P : never;
+    const model = new MockLanguageModelV4({ doStream: {
+      stream: simulateReadableStream<Part>({ chunks: [
+        { type: 'stream-start', warnings: [] },
+        { type: 'text-start', id: 'text' }, { type: 'text-delta', id: 'text', delta: 'Hello ' },
+        { type: 'text-delta', id: 'text', delta: 'world' }, { type: 'text-end', id: 'text' },
+        { type: 'finish', finishReason: { unified: 'stop', raw: undefined }, usage: response().usage },
+      ] }),
+    } });
+    const deltas: string[] = [];
+    const result = await createAI({ profiles: { assistant: profile } }, { resolve: () => model }).run(context(), { ...prompt, onTextDelta: (delta, turn) => { expect(turn).toBe(1); deltas.push(delta); } });
+    expect(deltas).toEqual(['Hello ', 'world']);
+    expect(result).toMatchObject({ finishReason: 'text', text: 'Hello world', turns: 1 });
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(model.doGenerateCalls).toHaveLength(0);
+  });
   it.each([undefined, 'text-or-tool'] as const)('allows text completion with the default/explicit policy (%s)', async completion => {
     const model = new MockLanguageModelV4({ doGenerate: response() });
     const result = await createAI({ profiles: { assistant: profile } }, { resolve: () => model }).run(context(), { ...prompt, completion });

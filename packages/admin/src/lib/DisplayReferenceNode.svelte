@@ -4,7 +4,7 @@
   import { displayDocumentSchema } from '@workcore/core';
   import { sessionKey, type SessionStore } from './session.js';
   import { useSource } from './source.svelte.js';
-  import { embedContextKey, type EmbedContext } from './embed-context.svelte.js';
+  import { displayIdentity, embedContextKey, type EmbedContext } from './embed-context.svelte.js';
   import { rendererRegistryKey, type RendererRegistryContext } from './renderer-context.js';
   import { useDisplayContext } from './display-context.svelte.js';
   import { readPath } from './data.js';
@@ -17,7 +17,6 @@
   const displayContext = useDisplayContext();
   const getRenderers = getContext<RendererRegistryContext>(rendererRegistryKey);
   const registry = $derived(getRenderers?.() ?? {});
-  const cycle = $derived(parent?.ancestry.includes(block.display) ?? false);
   const tooDeep = $derived((parent?.ancestry.length ?? 0) >= 8);
   let admitted = $state(false);
   let budgetRevision = $state(0);
@@ -46,6 +45,7 @@
     const resolvedInput = resolve(block.input ?? {}) ?? {};
     return { ready, input: resolvedInput };
   });
+  const cycle = $derived(parent?.ancestry.includes(displayIdentity($session?.workspace, block.display, resolved.input)) ?? false);
   const loader = useSource<Json>(() => cycle || limited || !resolved.ready ? null : $session?.sources ?? null, () => cycle || limited || !resolved.ready ? null : { kind: 'display', name: block.display }, () => resolved.input, value => displayDocumentSchema.parse(value) as unknown as Json);
   const document = $derived(loader.data === undefined ? undefined : displayDocumentSchema.parse(loader.data));
 </script>

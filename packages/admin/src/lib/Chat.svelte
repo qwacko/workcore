@@ -5,7 +5,6 @@
   import { sessionKey, type SessionStore } from './session.js';
   import Markdown from './Markdown.svelte';
   import AgentProgress from './AgentProgress.svelte';
-  import ChatDisplayPart from './ChatDisplayPart.svelte';
   import { useSource } from './source.svelte.js';
   import { useRendererHost } from './host-context.svelte.js';
   let { block, data }: { block: Extract<ManifestBlock, { kind: 'chat' }>; data: Json } = $props();
@@ -40,13 +39,11 @@
   {#each messages ?? [] as message (String(readPath(message, block.message?.id ?? 'id')))}
     <article class="chat-message" data-role={readPath(message, block.message?.role ?? 'role')}>
       <div class="message-meta"><strong>{readPath(message, block.message?.role ?? 'role') === 'user' ? 'You' : 'Assistant'}</strong>{#if block.message?.at}<time>{date(readPath(message, block.message.at))}</time>{/if}</div>
-      {#if block.message?.parts && Array.isArray(readPath(message, block.message.parts))}
-        {#each readPath(message, block.message.parts) as part, index (index)}
-          {#if part && typeof part === 'object' && !Array.isArray(part) && part.type === 'text'}<Markdown content={text(part.text)} />
-          {:else if part && typeof part === 'object' && !Array.isArray(part) && part.type === 'display' && (part.mode === 'live' || part.mode === 'snapshot') && typeof part.display === 'string'}<ChatDisplayPart {part} instanceId={`chat-${String(readPath(message, block.message?.id ?? 'id'))}-${index}`} />
-          {:else}<p class="notice warning">Unsupported chat content part.</p>{/if}
+      {#if block.message?.content}<Markdown content={text(readPath(message, block.message.content))} />{:else if block.message?.parts && Array.isArray(readPath(message, block.message.parts))}
+        {#each readPath(message, block.message.parts) as part}
+          {#if part && typeof part === 'object' && !Array.isArray(part) && part.type === 'text'}<Markdown content={text(part.text)} />{/if}
         {/each}
-      {:else if block.message?.content}<Markdown content={text(readPath(message, block.message.content))} />{/if}
+      {/if}
     </article>
   {/each}
 </div>
@@ -65,4 +62,4 @@
   </form>
 {:else}<p class="help">Read-only conversation. You do not have permission to send messages.</p>{/if}
 {#if error}<p class="error" role="alert">{error}</p>{/if}
-<p class="help">Replies execute in the background. You can leave this page and return; this is persisted chat, not token streaming.</p>
+<p class="help">Replies execute in the background. You can leave this page and return; the application controls how messages and attachments are presented.</p>

@@ -19,7 +19,7 @@ pnpm dev
 
 Copy `examples/workcore-demo/.env.example` to `examples/workcore-demo/.env` and set `BETTER_AUTH_URL` to the exact browser origin (the example uses `http://127.0.0.1:8787`). Restart `pnpm dev`, open that origin, and create an account. The local demo uses Better Auth and a local D1 database for identities; Workcore data lives in SQLite Durable Objects.
 
-The SvelteKit SPA starts with your tasks. Switch to **Everyone** to see shared tasks, or use the board and list views. Private tasks are filtered on the server. Notes are private and support editing, starring and archiving. Open another tab to see live updates. The **Admin** link opens the default Workcore console for the current workspace, including generated displays, operations and the assistant.
+The shadcn-svelte frontend opens to chat. Ask it to create tasks or notes, or attach live lists. The **Tasks** section provides compact list and board views, with a filter for your own work. Private tasks are filtered on the server. Notes are private and support editing, starring and archiving. Open another tab to see live updates. The **Admin** link opens the default Workcore console for the current workspace, including generated displays, operations and the assistant.
 
 The launcher builds the admin and SPA assets, then runs the SPA with hot module replacement and proxies API, admin and WebSocket requests to a local Wrangler Worker. Production serves both static builds from the Worker. See [the demo README](examples/workcore-demo/README.md) for deployment and configuration.
 
@@ -71,7 +71,7 @@ await tasks.whenRevision(result.revision);
 
 ## Deliberate boundaries
 
-No offline writes, cross-workspace transactions, arbitrary client query language, automatic incremental SQL views, backend portability, cron/timezones, resumable agents, or raw admin record editing. Chat is persisted messaging with background replies, not token streaming or resumable model execution. Wire values are plain JSON—not JavaScript dates, maps or custom classes.
+No offline writes, cross-workspace transactions, arbitrary client query language, automatic incremental SQL views, backend portability, cron/timezones, resumable agents, or raw admin record editing. Chat history is persisted; optional inference deltas provide transient progress, without resumable model execution. Wire values are plain JSON—not JavaScript dates, maps or custom classes.
 
 Large collections use explicit indexes and pages. `all()` is capped at 1,000 records. Array live views default to 500 rows and fail rather than truncate. Both live results and query responses have a 512 KiB data limit.
 
@@ -96,3 +96,5 @@ pnpm docs:dev
 - [Live views and large datasets](docs/sync.md)
 - [Tasks, schedules and agents](docs/execution.md)
 - [Security and actual limits](docs/security.md)
+
+Custom frontends use the typed client directly. The demo uses shadcn-svelte and application-owned live task/note attachments, with paginated chat history and streaming run progress. See [Custom frontends and chat](docs/custom-frontends.md).

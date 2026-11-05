@@ -9,18 +9,19 @@ pnpm install
 pnpm dev
 ```
 
-Open the local URL printed by `pnpm dev`. Choose Alice (admin) or Bob (member), follow the workspace overview, and create a task in a second window. The task list updates live; Alice's private row is not sent to Bob.
+Open the local URL printed by `pnpm dev` and create an account. Use the custom shadcn-svelte frontend to manage tasks, private notes and chat. Open another window to see live updates. A separate account cannot receive your private records.
 
-The SvelteKit console reads display documents from the runtime manifest. It generates forms from annotated schemas and renders table, list, record, JSON, safe Markdown and private chat presentations. Row actions bind record IDs and application-defined versions without making users copy them. Execution timelines, schedule controls, history and bounded read-only raw-table inspection remain server-authorised. It deliberately does not provide raw database editing or an arbitrary UI/template language.
+The optional SvelteKit admin console reads display documents from the runtime manifest. It generates forms from annotated schemas and renders table, list, record, JSON, safe Markdown and private chat presentations. Row actions bind record IDs and application-defined versions without making users copy them. Execution timelines, schedule controls, history and bounded read-only raw-table inspection remain server-authorised. It deliberately does not provide raw database editing or an arbitrary UI/template language.
 
-The tracker includes a scheduled task and an AI SDK assistant. Without a selected model it produces an explicitly labelled deterministic demo summary. With `WORKCORE_AGENT_MODEL` and provider credentials it uses tracked multi-turn calls, checked tools and optional cross-provider fallback. See [AI SDK agents](./ai).
+The tracker includes a scheduled task and an AI SDK assistant. Without a selected model it uses a deterministic application fallback for task/note creation and live lists. With `WORKCORE_AGENT_MODEL` and provider credentials it uses tracked multi-turn calls, checked tools and optional cross-provider fallback. See [AI SDK agents](./ai).
 
 ## Read next
 
 - [Architecture](./architecture): ownership, transaction boundaries and deployment.
 - [Authoring](./authoring): tables, mutations, queries, migrations and the typed client.
-- [Display authoring](./admin): typed field hints, display documents, actions and client state.
-- [Display protocol v1](./display-protocol): wire contract, bindings, lifecycle, compatibility, limits, and conformance fixtures.
+- [Custom frontends and chat](./custom-frontends): typed subscriptions, application-owned attachments, pagination and streaming progress.
+- [Optional admin metadata](./admin): typed field hints, display documents, actions and client state.
+- [Admin display protocol v3](./display-protocol): wire contract, bindings, lifecycle, compatibility, limits, and conformance fixtures.
 - [Sync](./sync): bounded live views, personalised results and larger datasets.
 - [File storage](./files): optional R2-backed files, metadata and lifecycle.
 - [Execution](./execution): tasks, schedules, agent tools and interruption.

@@ -46,6 +46,12 @@ On object reconstruction, previously running jobs become `interrupted`. They are
 
 An idle object is not a permanently running server. Authoritative state lives in SQLite. WebSocket attachments retain only the trusted identity, expiry and small subscription descriptions, allowing Cloudflare's hibernation APIs to manage connections.
 
+## Frontends and administration
+
+The typed client is the application boundary. Frontends own their components, routing and interaction state. Agents call registered operations and may persist application-defined data references as message attachments; they do not author wire layouts. Pagination and streaming progress are independent of frontend presentation.
+
+The optional admin console consumes actor-filtered operation metadata and its own display definitions to provide generated forms, data inspection and execution controls. Applications do not need to consume that rendering contract. See [Custom frontends and chat](./custom-frontends.md).
+
 ## Hosting
 
 ```ts

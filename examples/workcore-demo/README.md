@@ -1,6 +1,6 @@
 # workcore-demo
 
-A SvelteKit single-page workspace, served by a Cloudflare Worker. The tasks and notes interfaces use typed `@workcore/client` live subscriptions; tasks default to your own, with an option to see everyone's shared work. Notes are private. The default Workcore console is available at `/admin/demo` and `/admin/notes`. Tasks and notes are separate Durable Objects; Better Auth uses D1 for accounts.
+A SvelteKit single-page workspace, served by a Cloudflare Worker. The tasks and notes interfaces use typed `@workcore/client` live subscriptions; tasks can be filtered to your own or everyone's shared work. Notes are private. The default Workcore console is available at `/admin/demo` and `/admin/notes`. Tasks and notes are separate Durable Objects; Better Auth uses D1 for accounts.
 
 ## Local development
 
@@ -34,3 +34,11 @@ pnpm deploy
 ```
 
 The build compiles the demo and the default admin into one assets directory and performs a Wrangler dry-run before deployment. Configure both Durable Object namespaces and the R2 bucket in the Cloudflare account. This sample permits account creation without email verification and should be hardened for a public deployment.
+
+## Custom frontend and chat
+
+The frontend uses shadcn-svelte, Tailwind and ordinary typed Workcore subscriptions. Tasks and notes share application components with chat attachments. There is no dependency on an over-the-wire UI layout protocol. Add components with `pnpm dlx shadcn-svelte@latest add <component>` from this directory.
+
+Chat has a 40-message live tail, cursor-based older history, anchored scrolling, multiline composition, Markdown, copying, run progress and cancellation. Configured models stream transient inference text through bounded run progress; the terminating reply tool persists final replies. Without a model, demo mode supports task/note creation and live lists through a deterministic application fallback.
+
+Old message text remains readable. Known task/note display references are translated into data attachments. Saved-page authoring and the Pages section have been removed; historical migrations remain and no old saved-page rows are deleted. See [Custom frontends and chat](../../docs/custom-frontends.md) for the library/application boundary.

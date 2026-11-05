@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { getTableName } from 'drizzle-orm';
 import { and, eq, gt, lt, or } from 'drizzle-orm';
 import { workcoreSchema } from './schema.js';
-import { compileDisplays, compileWireDisplayDocument, displayDocumentSchema, manifestSchema } from './ui.js';
+import { compileDisplays, displayDocumentSchema, manifestSchema } from './ui.js';
 import type { JsonSchema, ManifestDisplay } from './ui.js';
 import type { Actor, Definition, Job, Json, MutationContext, Operation, ReadContext, RunContext } from './definitions.js';
 import { assertSync, checkName, encode, json, WorkcoreError } from './json.js';
@@ -238,11 +238,6 @@ export class Engine {
       if (!display) throw new WorkcoreError('NOT_FOUND', 'Unknown display', 404);
       this.authorize(db, actor, `display:${name}`);
       const parsedInput = (display.input ?? z.object({})).parse(input);
-      if (display.wireHandler) {
-        const wire = display.wireHandler({ db: db.db, kv: db.kv, actor, now: Date.now() }, parsedInput);
-        assertSync(wire);
-        return json(compileWireDisplayDocument(this.definition, name, wire, (kind, operation) => this.allowed(db, actor, `${kind}:${operation}`)));
-      }
       const document = display.handler
         ? display.handler({ db: db.db, kv: db.kv, actor, now: Date.now() }, parsedInput)
         : display.document;

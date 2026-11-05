@@ -13,7 +13,7 @@ import type { DisplayContext } from '../packages/admin/src/lib/display-context.s
 import { resetDisplayState } from '../packages/admin/src/lib/display-state.js';
 import { runSuccessEffects } from '../packages/admin/src/lib/success-effects.js';
 import type { RendererHost } from '../packages/admin/src/lib/host-context.svelte.js';
-import { createEmbedBudget } from '../packages/admin/src/lib/embed-context.svelte.js';
+import { createEmbedBudget, displayIdentity } from '../packages/admin/src/lib/embed-context.svelte.js';
 
 const app = workspace((await import('../examples/workcore-demo/src/schema.js')).schema, (await import('../examples/workcore-demo/src/migrations.js')).default);
 const rows = app.view({ input: z.object({}), output: z.array(z.object({ id: z.string(), revision: z.number(), title: z.string() })), dependsOn: [], handler: () => [] });
@@ -28,6 +28,11 @@ const definition = app.define({
 });
 
 describe('typed metadata and authorised UI manifests', () => {
+  it('identifies embedded displays by workspace and parameters, independent of object-key order', () => {
+    expect(displayIdentity('tasks', 'page', { id: 'a', status: 'open' })).toBe(displayIdentity('tasks', 'page', { status: 'open', id: 'a' }));
+    expect(displayIdentity('tasks', 'page', { id: 'a' })).not.toBe(displayIdentity('notes', 'page', { id: 'a' }));
+    expect(displayIdentity('tasks', 'page', { id: 'a' })).not.toBe(displayIdentity('tasks', 'page', { id: 'b' }));
+  });
   it('reserves active embed slots synchronously and releases them for later siblings', () => {
     const budget = createEmbedBudget(2);
     const first = Symbol('first'); const second = Symbol('second'); const third = Symbol('third');

@@ -1,4 +1,4 @@
-import { generateText, jsonSchema, APICallError, type LanguageModel, type ModelMessage } from 'ai';
+import { generateText, streamText, jsonSchema, APICallError, type LanguageModel, type ModelMessage } from 'ai';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
@@ -121,6 +121,8 @@ export function createAI(config: AIConfig, options: { resolve?: typeof resolveMo
       tools?: Record<string, AgentTool>;
       /** Fixed for the whole run, including profile switches and provider fallback. */
       completion?: CompletionMode;
+      /** Optional transient inference text. Applications own delivery and final persistence. */
+      onTextDelta?: (delta: string, turn: number) => void;
       /** Select a named profile for each turn (e.g. planning versus writing). */
       selectProfile?: (turn: number) => string;
     }): Promise<AgentResult> {
@@ -169,18 +171,33 @@ export function createAI(config: AIConfig, options: { resolve?: typeof resolveMo
           try {
             turn = await ctx.step(`Model turn ${index + 1} · ${spec.provider}/${spec.model}${attempt ? ' · fallback' : ''}`, async () => {
               // No execute callbacks: successful tool effects cannot be inside the fallback boundary.
-              const result = await generateText({
+              const request = {
                 model: (options.resolve ?? resolveModel)(spec, ctx.env, config.providers),
                 system, messages, tools: schemas, maxOutputTokens,
                 maxRetries: 0, abortSignal: signal,
-              });
+              };
+              const result = input.onTextDelta ? streamText({ ...request, onError: () => {} }) : await generateText(request);
+              if ('fullStream' in result) {
+                for await (const part of result.fullStream) {
+                  checkAbort();
+                  if (part.type === 'error') throw part.error;
+                  if (part.type === 'text-delta') {
+                    try { input.onTextDelta?.(part.text, index + 1); }
+                    catch (error) {
+                      if (error instanceof WorkcoreError) throw error;
+                      throw new WorkcoreError('AI_STREAM_CALLBACK_FAILED', 'Unable to deliver inference text');
+                    }
+                  }
+                }
+              }
+              const [text, response, toolCalls, finishReason, resultUsage] = await Promise.all([result.text, result.response, result.toolCalls, result.finishReason, result.usage]);
               return {
-                text: result.text,
+                text,
                 // Preserve reasoning/tool signatures needed by subsequent provider calls, not HTTP metadata.
-                messages: JSON.parse(JSON.stringify(result.response.messages)) as Json[],
-                calls: result.toolCalls.map(call => ({ id: call.toolCallId, name: call.toolName, input: JSON.parse(encodeJson(call.input)) as Json })),
-                finishReason: result.finishReason,
-                usage: { inputTokens: result.usage.inputTokens ?? 0, outputTokens: result.usage.outputTokens ?? 0, totalTokens: result.usage.totalTokens ?? 0 },
+                messages: JSON.parse(JSON.stringify(response.messages)) as Json[],
+                calls: toolCalls.map(call => ({ id: call.toolCallId, name: call.toolName, input: JSON.parse(encodeJson(call.input)) as Json })),
+                finishReason,
+                usage: { inputTokens: resultUsage.inputTokens ?? 0, outputTokens: resultUsage.outputTokens ?? 0, totalTokens: resultUsage.totalTokens ?? 0 },
               };
             });
             break;

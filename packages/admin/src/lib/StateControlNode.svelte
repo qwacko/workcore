@@ -1,15 +1,19 @@
 <script lang="ts">
   import type { Json, ManifestBlock } from '@workcore/core';
   import { useDisplayContext } from './display-context.svelte.js';
+  import { getContext } from 'svelte';
+  import { embedContextKey, type EmbedContext } from './embed-context.svelte.js';
   let { block }: { block: Extract<ManifestBlock, { kind: 'state-control' }> } = $props();
   const context = useDisplayContext();
   const address = $derived(`state.${block.state}`);
   const value = $derived(context.get(address));
+  const embed = getContext<EmbedContext | undefined>(embedContextKey);
+  const controlId = $derived(`state-${embed?.instanceId ?? 'display'}-${block.id}`);
 </script>
 
-<label class="field state-control" for={`state-${block.id}`}>
+<label class="field state-control" for={controlId}>
   <span>{block.label}</span>
-  <select id={`state-${block.id}`} value={value === undefined ? '' : JSON.stringify(value)} onchange={event => {
+  <select id={controlId} value={value === undefined ? '' : JSON.stringify(value)} onchange={event => {
     const selected = event.currentTarget.value;
     if (selected) context.set(address, JSON.parse(selected) as Json);
   }}>
