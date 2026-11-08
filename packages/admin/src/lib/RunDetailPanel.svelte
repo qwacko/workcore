@@ -10,6 +10,7 @@
   import { Badge } from './components/ui/badge/index.js';
   import EmptyState from './EmptyState.svelte';
   import Alert from './Alert.svelte';
+  import { useRendererHost } from './host-context.svelte.js';
   let { state, run, traceRows, traceCursor, error, onrefresh, onmore, oncontrol }: {
     state: LiveState<Json>;
     run?: Record<string, Json>;
@@ -21,6 +22,7 @@
     oncontrol: (action: 'retry' | 'cancel') => void;
   } = $props();
   const session = getContext<SessionStore>(sessionKey);
+  const host = useRendererHost();
 </script>
 
 {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -28,6 +30,7 @@
 {#if run}
   {#if run.progress}<AgentProgress value={run.progress} status={run.status} />{/if}
   {#if run.status === 'interrupted'}<Alert title="Execution was interrupted">Inspect external effects before retrying.</Alert>{/if}
+  {#if typeof run.retryOf === 'string' && host.runHref}<Button variant="outline" href={host.runHref(run.retryOf)}>Original run →</Button>{/if}
   <DisplayCard><dl class="grid grid-cols-[repeat(auto-fit,minmax(12rem,1fr))] gap-6 py-2"><div><dt class="text-sm text-muted-foreground">Started by</dt><dd class="mt-2 break-words text-2xl font-semibold">{text((run.actor as { id: string })?.id)}</dd></div><div><dt class="text-sm text-muted-foreground">Created</dt><dd class="mt-2 break-words text-2xl font-semibold">{date(run.createdAt)}</dd></div><div><dt class="text-sm text-muted-foreground">Last update</dt><dd class="mt-2 break-words text-2xl font-semibold">{date(run.updatedAt)}</dd></div><div><dt class="text-sm text-muted-foreground">Elapsed</dt><dd class="mt-2 break-words text-2xl font-semibold">{duration(run.createdAt, run.updatedAt)}</dd></div><div><dt class="text-sm text-muted-foreground">Attempt</dt><dd class="mt-2 break-words text-2xl font-semibold">{text(run.attempt)}</dd></div></dl>
     {#if run.error}<p class="error">{text(run.error)}</p>{/if}
     <div class="row-actions"><Button variant="outline" onclick={onrefresh}>Refresh</Button>{#if $session?.manifest.admin}{#if run.status === 'running' || run.status === 'queued'}<Button variant="destructive" onclick={() => oncontrol('cancel')}>Request cancellation</Button>{:else if ['failed', 'interrupted', 'cancelled'].includes(String(run.status))}<Button variant="outline" onclick={() => oncontrol('retry')}>Retry as new run</Button>{/if}{/if}</div>

@@ -5,9 +5,9 @@
   let { title, children, onclose }: { title: string; children: Snippet; onclose: () => void } = $props();
 </script>
 <Dialog.Root open onOpenChange={value => { if (!value) onclose(); }}>
-  <Dialog.Portal><Dialog.Overlay /><Dialog.Content>
+  <Dialog.Content class="max-h-[calc(100dvh-2rem)] overflow-y-auto">
     <Dialog.Header><Dialog.Title>{title}</Dialog.Title></Dialog.Header>
     {@render children()}
     <Dialog.Footer><Button variant="outline" onclick={onclose}>Close</Button></Dialog.Footer>
-  </Dialog.Content></Dialog.Portal>
+  </Dialog.Content>
 </Dialog.Root>

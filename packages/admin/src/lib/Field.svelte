@@ -56,7 +56,7 @@
     <div class="mb-4 grid gap-2 text-sm">
       <Label for={fieldId}>{title}{required ? ' *' : ''}</Label>
       {#if hints.renderer}<span class="help" role="status">Custom field renderer “{hints.renderer}” is not registered; using the standard control.</span>{/if}
-      {#if nullable}<label class="flex items-center gap-2 pt-1 text-muted-foreground"><Checkbox checked={value === null} disabled={locked} onchange={checked => onchange(checked ? null : restoreValue())} /> <span>No value</span></label>{/if}
+      {#if nullable}<label class="flex items-center gap-2 pt-1 text-muted-foreground"><Checkbox checked={value === null} disabled={locked} onCheckedChange={checked => onchange(checked ? null : restoreValue())} /> <span>No value</span></label>{/if}
       {#if relationship}
         <RelationshipLookupField config={relationship} {title} fieldId={fieldId} value={value as Json | undefined} onchange={next => onchange(next)} disabled={locked} error={errors[path]} />
       {:else if repeatable && itemSchema}
@@ -69,7 +69,7 @@
       {:else if resolved.enum || resolved.const !== undefined}
         <Select id={fieldId} disabled={locked} value={JSON.stringify(value)} options={[...(!required ? [{ value: '', label: 'Not set' }] : []), ...(resolved.enum ?? [resolved.const]).map(option => ({ value: JSON.stringify(option), label: hints.enumLabels?.[String(option)] ?? String(option) }))]} onchange={selected => onchange(selected === '' ? undefined : JSON.parse(selected))} />
       {:else if resolved.type === 'boolean'}
-        <label class="flex items-center gap-2 pt-1 text-muted-foreground"><Checkbox id={fieldId} checked={value === true} disabled={locked} onchange={checked => onchange(checked)} /> <span>{value ? 'Yes' : 'No'}</span></label>
+        <label class="flex items-center gap-2 pt-1 text-muted-foreground"><Checkbox id={fieldId} checked={value === true} disabled={locked} onCheckedChange={checked => onchange(checked)} /> <span>{value ? 'Yes' : 'No'}</span></label>
       {:else if complex}
         <Textarea id={fieldId} class="code" value={jsonText} disabled={locked} oninput={event => {
           jsonText = event.currentTarget.value;

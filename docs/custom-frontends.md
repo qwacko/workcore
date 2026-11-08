@@ -8,7 +8,7 @@ Workcore supplies typed operations, authorized live queries, durable storage and
 import { createClient } from '@workcore/client';
 import type { tracker } from './server-definition';
 
-const client = createClient<typeof tracker>({ baseUrl: '/api/workspaces/team' });
+const client = createClient<typeof tracker>({ baseUrl: '/api/workspaces/demo' });
 const subscription = client.subscribe('tasks', { projectId: 'inbox' }, state => {
   // state is typed: loading, live, reconnecting or error, with data and revision.
 });
@@ -30,7 +30,7 @@ The defaults retain the server subscription for one second after its last consum
 
 ```ts
 const client = createClient<typeof tracker>({
-  baseUrl: '/api/workspaces/team',
+  baseUrl: '/api/workspaces/demo',
   subscriptions: { keepAliveMs: 1000, cacheTimeMs: 30_000, maxCached: 64 },
 });
 ```

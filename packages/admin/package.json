@@ -1,14 +1,17 @@
 {
   "name": "@workcore/admin",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/qwacko/workcore.git", "directory": "packages/admin" },
   "type": "module",
   "exports": {
-    "./server": "./src/server.ts"
+    "./server": "./src/server.ts",
+    "./assets": "./scripts/assets.mjs"
   },
+  "files": ["dist", "build", "scripts/assets.mjs", "LICENSE", "README.md"],
+  "publishConfig": { "access": "public", "exports": { "./server": { "types": "./dist/server.d.ts", "import": "./dist/server.js" }, "./assets": "./scripts/assets.mjs" } },
   "scripts": {
-    "build": "vite build --logLevel warn",
+    "build": "vite build --logLevel warn && tsc -p tsconfig.server.json",
     "dev": "vite dev",
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
   },

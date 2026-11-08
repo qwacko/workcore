@@ -1,5 +1,5 @@
 import { and, desc, eq } from 'drizzle-orm';
-import { field, ui, workspace, WorkcoreError } from '@workcore/core';
+import { field, ui, workspace, requireChanged, versionMatch } from '@workcore/core';
 import { z } from 'zod';
 import { defineSchema, idColumn, timestampColumns, versionColumn } from '@workcore/core';
 import { notes } from './schema.js';
@@ -159,12 +159,11 @@ const update = app.mutation({
       .update(notes)
       .set({ ...values, version: expectedRevision + 1, updatedAt: now })
       .where(
-        and(eq(notes.id, id), eq(notes.ownerId, actor.id), eq(notes.version, expectedRevision)),
+        and(eq(notes.id, id), eq(notes.ownerId, actor.id), versionMatch(notes.version, expectedRevision)),
       )
       .returning()
       .get();
-    if (!row) throw new WorkcoreError('CONFLICT', 'Note changed or not found', 409);
-    return row;
+    return requireChanged(row);
   },
 });
 const remove = app.mutation({
@@ -179,12 +178,12 @@ const remove = app.mutation({
         and(
           eq(notes.id, input.id),
           eq(notes.ownerId, actor.id),
-          eq(notes.version, input.expectedRevision),
+          versionMatch(notes.version, input.expectedRevision),
         ),
       )
       .returning()
       .get();
-    if (!row) throw new WorkcoreError('NOT_FOUND', 'Note changed or not found', 404);
+    requireChanged(row);
     return null;
   },
 });

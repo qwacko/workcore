@@ -7,6 +7,7 @@ const finishLater = app.task({
   input: z.object({ id: z.string() }),
   output: taskRowSchema,
   maxAttempts: 1,
+  timeoutMs: 60_000, // optional cooperative deadline per attempt
   handler: async (ctx, input) => ctx.mutate(completeTask, input),
 });
 ```
@@ -24,6 +25,10 @@ Runs have queued, running, completed, failed, interrupted or cancelled status. W
 Known task failures may be retried with `maxAttempts` (default 1, runtime maximum 10) and `retryDelayMs` (default 5 seconds, minimum 1 second). Only opt into retries when the handler's external effects are idempotent or otherwise safe to repeat.
 
 Object reconstruction changes previously running runs to `interrupted`; it does not guess whether an email, model call or tool action completed. An admin may inspect and explicitly retry a failed/interrupted/cancelled run. Manual retry creates a **new** run and can repeat effects.
+
+Both `client.control('run', id, 'retry')` and `client.system('runs.retry', { runId: id })` return `{ revision, runId }`. The new run has `retryOf` pointing to the original and retains the original initiating actor, subject to current job authorization. The console follows the new run and links back to its original. `runs.list` accepts an optional status filter; the console offers failed/interrupted filters.
+
+`timeoutMs` is optional, from 1 to 600,000 milliseconds per attempt. A deadline aborts `ctx.signal` and refuses subsequent tools/progress/completion. Pass that signal to external clients. A timed-out attempt becomes `interrupted` with `RUN_TIMEOUT` and is **not automatically retried**, because its external effects may be uncertain. The executor still waits for the handler to settle, preserving one-job-at-a-time behavior. It cannot forcibly stop non-cooperative code or bypass Cloudflare's runtime limits.
 
 Cancelling a queued run prevents execution. Cancelling a running run sets a request checked before subsequent tools/steps and before completion. It cannot undo an external effect or forcibly abort arbitrary application code already executing.
 

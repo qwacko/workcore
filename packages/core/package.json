@@ -1,13 +1,24 @@
 {
   "name": "@workcore/core",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/qwacko/workcore.git", "directory": "packages/core" },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./cloudflare": "./src/cloudflare.ts",
-    "./schema": "./src/schema.ts"
+    "./schema": "./src/schema.ts",
+    "./backup": "./src/backup.ts"
+  },
+  "files": ["dist", "LICENSE", "README.md", "AGENTS.example.md"],
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+      "./cloudflare": { "types": "./dist/cloudflare.d.ts", "import": "./dist/cloudflare.js" },
+      "./schema": { "types": "./dist/schema.d.ts", "import": "./dist/schema.js" },
+      "./backup": { "types": "./dist/backup.d.ts", "import": "./dist/backup.js" }
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

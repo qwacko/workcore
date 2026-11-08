@@ -1,4 +1,4 @@
-import { builtinTriggers, field, workspace, WorkcoreError } from '@workcore/core';
+import { builtinTriggers, field, workspace, WorkcoreError, requireChanged, versionMatch } from '@workcore/core';
 import type { Json, ReadContext } from '@workcore/core';
 import { z } from 'zod';
 import { and, asc, desc, eq, gt, lt, or } from 'drizzle-orm';
@@ -426,13 +426,12 @@ const editTask = app.mutation({
         and(
           eq(taskTable.id, input.id),
           eq(taskTable.ownerId, actor.id),
-          eq(taskTable.version, input.expectedRevision),
+          versionMatch(taskTable.version, input.expectedRevision),
         ),
       )
       .returning()
       .get();
-    if (!result) throw new WorkcoreError('CONFLICT', 'Task has changed or is not yours', 409);
-    return result;
+    return requireChanged(result);
   },
 });
 const completeTask = app.mutation({
@@ -448,13 +447,12 @@ const completeTask = app.mutation({
         and(
           eq(taskTable.id, input.id),
           eq(taskTable.ownerId, actor.id),
-          eq(taskTable.version, input.expectedRevision),
+          versionMatch(taskTable.version, input.expectedRevision),
         ),
       )
       .returning()
       .get();
-    if (!result) throw new WorkcoreError('CONFLICT', 'Task has changed or is not yours', 409);
-    return result;
+    return requireChanged(result);
   },
 });
 const reopenTask = app.mutation({
@@ -470,13 +468,12 @@ const reopenTask = app.mutation({
         and(
           eq(taskTable.id, input.id),
           eq(taskTable.ownerId, actor.id),
-          eq(taskTable.version, input.expectedRevision),
+          versionMatch(taskTable.version, input.expectedRevision),
         ),
       )
       .returning()
       .get();
-    if (!result) throw new WorkcoreError('CONFLICT', 'Task has changed or is not yours', 409);
-    return result;
+    return requireChanged(result);
   },
 });
 const saveSummary = app.mutation({

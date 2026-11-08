@@ -1,5 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 
+async function choose(page: Page, name: string, option: string) {
+  await page.getByRole('combobox', { name, exact: true }).click();
+  await page.getByRole('option', { name: option, exact: true }).click();
+}
+
 async function signIn(page: Page, role: 'admin' | 'member' = 'admin') {
   // Register through Better Auth; only the test host can provision an admin role.
   await page.request.post('/api/auth/sign-out', { headers: { origin: 'http://localhost:8788' } });
@@ -30,6 +35,30 @@ test('run inspection explains structured tool completion without a fabricated an
   await expect(page.getByLabel('Agent progress')).toContainText(/completed\s+via submitReport/);
   await expect(page.getByLabel('Agent progress')).toContainText('Terminating tool required');
   await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'Result', exact: true }) })).toContainText('report-1');
+});
+
+test('health diagnostics and failed-run recovery follow retry lineage', async ({ page }) => {
+  await signIn(page);
+  const queued = await page.request.post('/api/workspaces/demo/enqueue', { data: { name: 'assistant', input: {}, requestId: crypto.randomUUID() } });
+  const runId = (await queued.json()).data as string;
+  await expect.poll(async () => (await (await page.request.post('/api/workspaces/demo/system', { data: { name: 'runs.inspect', input: { runId } } })).json()).status, { timeout: 15000 }).toBe('completed');
+  expect((await page.request.post('/__test/fail-run', { data: { id: runId } })).status()).toBe(204);
+  await page.goto('/admin/demo/displays/systemHealth');
+  await expect(page.getByRole('heading', { name: 'Workspace health', exact: true }).first()).toBeVisible();
+  await expect(page.locator('pre')).toContainText('oldestQueuedAt');
+  await expect(page.locator('pre')).toContainText('"failed":');
+  await page.goto('/admin/demo/displays/systemRuns');
+  await choose(page, 'Run status', 'Failed');
+  await expect(page).toHaveURL(/status=failed/);
+  const failed = page.getByRole('row').filter({ hasText: runId });
+  await expect(failed).toContainText('TEST_FAILURE');
+  page.once('dialog', dialog => dialog.accept());
+  const retry = page.waitForResponse(response => response.url().endsWith('/system') && response.request().postDataJSON()?.name === 'runs.retry');
+  await failed.getByRole('button', { name: 'Retry', exact: true }).click();
+  const newRunId = (await (await retry).json()).runId as string;
+  expect(newRunId).not.toBe(runId);
+  await expect(page).toHaveURL(new RegExp(`runId=${newRunId}`));
+  await expect(page.getByRole('link', { name: 'Original run' })).toHaveAttribute('href', new RegExp(`runId=${runId}`));
 });
 
 test('file administration uploads, downloads and deletes R2-backed files', async ({ page }) => {
@@ -81,10 +110,10 @@ test('guided pages, generated forms, row actions, local filters and deep links',
   await page.reload();
   await expect(page.getByRole('searchbox', { name: 'Search Project tasks' })).toHaveValue(title);
   await page.getByRole('button', { name: 'List', exact: true }).click();
-  await expect(page.locator('.record-list')).toContainText(title + ' edited');
+  await expect(page.getByRole('heading', { name: title + ' edited', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Table', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Table', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await page.getByLabel('Completion', { exact: true }).selectOption('false');
+  await choose(page, 'Completion', 'Open');
   await page.getByRole('row').filter({ hasText: title }).getByRole('button', { name: 'Complete', exact: true }).click();
   await expect(page.getByRole('row').filter({ hasText: title })).toHaveCount(0);
   expect(errors).toEqual([]);
@@ -106,13 +135,18 @@ test('live updates, private projections, server scope and responsive navigation'
   await expect(bob.getByRole('row').filter({ hasText: title }).getByRole('button')).toHaveCount(0);
   await page.getByRole('row').filter({ hasText: title }).getByRole('button', { name: 'Edit task', exact: true }).click();
   await page.getByRole('dialog').getByRole('checkbox').check();
+  const saved = page.waitForResponse(response => response.url().endsWith('/mutate') && response.request().postDataJSON()?.name === 'editTask');
   await page.getByRole('dialog').getByRole('button', { name: 'Edit task', exact: true }).click();
+  const editResponse = await saved;
+  expect(editResponse.request().postDataJSON().input.private).toBe(true);
+  expect((await editResponse.json()).data.private).toBe(true);
   await expect(bob.getByRole('row').filter({ hasText: title })).toHaveCount(0);
 
   await page.locator('a[href="/admin/demo/displays/tasks"]').click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
-  await page.locator('.scope summary').click();
-  await page.locator('.scope').getByLabel('Project', { exact: false }).fill('another-project');
+  const scope = page.getByRole('group').filter({ has: page.getByText('Data scope', { exact: false }) }).first();
+  await scope.locator('summary').click();
+  await scope.getByLabel('Project', { exact: false }).fill('another-project');
   await page.getByRole('button', { name: 'Apply server scope', exact: true }).click();
   await expect(page.getByText('Nothing here yet', { exact: true })).toBeVisible();
   await page.reload();
@@ -120,7 +154,7 @@ test('live updates, private projections, server scope and responsive navigation'
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Toggle navigation' }).click();
-  await page.getByRole('link', { name: 'Overview', exact: false }).click();
+  await page.getByRole('link', { name: 'Workspace overview', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('workcore-admin-mobile.png'), fullPage: true });
   await bobContext.close();
@@ -146,7 +180,7 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
   await expect(page.getByLabel('Agent progress')).toContainText('Turn 1');
   await expect(page.getByText('Handle the demo request', { exact: true })).toBeVisible();
   await page.getByText('Step result', { exact: true }).click();
-  await expect(page.locator('.timeline').getByText('Here are your', { exact: false })).toBeVisible();
+  await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'Execution timeline', exact: true }) }).getByText('Here are your', { exact: false })).toBeVisible();
 
   await page.locator('a[href="/admin/demo/displays/tasks"]').click();
   const title = `Scheduled task ${Date.now()}`;
@@ -163,7 +197,7 @@ test('private persisted chat, run timelines and scheduled execution', async ({ p
   const schedule = page.getByRole('row').filter({ hasText: scheduleId.slice(0, 8) });
   await expect(schedule.getByRole('link', { name: 'Inspect run', exact: false })).toBeVisible({ timeout: 15_000 });
   await page.screenshot({ path: testInfo.outputPath('workcore-admin-schedules.png'), fullPage: true });
-  await page.getByRole('link', { name: 'Overview', exact: false }).click();
+  await page.getByRole('link', { name: 'Workspace overview', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Project tasks', exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('workcore-admin-overview.png'), fullPage: true });
@@ -224,16 +258,16 @@ test('typed display state drives multiple sources and persists only when declare
   await signIn(page);
   await page.goto('/admin/demo/displays/statefulProject?projectId=%22inbox%22');
   const status = page.getByLabel('Shared task status');
-  await expect(status).toHaveValue('"open"');
-  const summary = page.locator('.panel').filter({ has: page.getByRole('heading', { name: 'Matching tasks' }) });
+  await expect(status).toContainText('Open tasks');
+  const summary = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Matching tasks' }) });
   await expect(summary).toContainText('Count');
-  await status.selectOption('"done"');
+  await choose(page, 'Shared task status', 'Completed tasks');
   await expect(page).toHaveURL(/__state\.statefulProject\.status=%22done%22/);
   await expect(page.getByRole('heading', { name: 'Tasks in selected state' })).toBeVisible();
   await page.reload();
-  await expect(page.getByLabel('Shared task status')).toHaveValue('"done"');
+  await expect(page.getByLabel('Shared task status')).toContainText('Completed tasks');
   await page.getByRole('button', { name: 'Apply all-task filter', exact: true }).click();
-  await expect(page.getByLabel('Shared task status')).toHaveValue('"all"');
+  await expect(page.getByLabel('Shared task status')).toContainText('All tasks');
   await expect(page).toHaveURL(/__state\.statefulProject\.status=%22all%22/);
 
   const commandRow = page.getByRole('row').filter({ hasText: 'Alice’s private task — Bob cannot sync this row' });
@@ -289,7 +323,7 @@ test('recursive layouts render columns and dialogs and submit a declared action 
   await signIn(page);
   await page.goto('/admin/demo/displays/layouts');
   await expect(page.getByRole('heading', { name: 'Layout example' })).toBeVisible();
-  await expect(page.locator('.display-columns > .display-column')).toHaveCount(2);
+  await expect(page.locator('[data-column]')).toHaveCount(2);
   await page.getByRole('button', { name: 'Open layout dialog' }).click();
   const dialog = page.getByRole('dialog', { name: 'Helpful details' });
   await expect(dialog.getByRole('heading', { name: 'Dialog content' })).toBeVisible();
@@ -314,7 +348,7 @@ test('a collection selection drives a separately loaded and authorized record so
   const selectedTitle = await row.locator('td').first().innerText();
   await row.getByRole('button', { name: 'Select', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Selected task', exact: true })).toBeVisible();
-  await expect(page.locator('.panel').filter({ has: page.getByRole('heading', { name: 'Selected task', exact: true }) })).toContainText(selectedTitle);
+  await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'Selected task', exact: true }) }).last()).toContainText(selectedTitle);
   await row.getByRole('button', { name: 'Selected', exact: true }).click();
   await expect(page.getByText('Select a row in the related collection to load this result.')).toBeVisible();
 });
@@ -322,8 +356,7 @@ test('a collection selection drives a separately loaded and authorized record so
 test('relationship lookups, property-bound detail displays and back navigation preserve collection state', async ({ page }) => {
   await signIn(page);
   await page.goto('/admin/demo/displays/tasks');
-  await expect(page.getByRole('combobox', { name: 'Project', exact: true })).toContainText('Roadmap');
-  await page.getByRole('combobox', { name: 'Project', exact: true }).selectOption('"roadmap"');
+  await choose(page, 'Project', 'Roadmap');
   await page.getByRole('textbox', { name: 'Task title' }).fill('Relationship detail fixture');
   await page.getByRole('button', { name: 'Create task', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Task details' })).toBeVisible();
@@ -350,5 +383,5 @@ test('a registered custom task-board renderer loads its authorized live source',
   await page.goto('/admin/demo/displays/board');
   await expect(page.getByRole('heading', { name: 'Component demo' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Tasks grouped by status' })).toBeVisible();
-  await expect(page.locator('.task-lane').filter({ hasText: 'Open this workspace in two browser windows' })).toContainText('Open this workspace in two browser windows');
+  await expect(page.getByRole('region', { name: 'Tasks grouped by status' })).toContainText('Open this workspace in two browser windows');
 });

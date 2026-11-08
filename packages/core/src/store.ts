@@ -13,7 +13,7 @@ export type Run = {
   id: string; job: string; kind: 'task' | 'agent'; actor: { id: string }; input: Json;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled';
   attempt: number; due: number; createdAt: number; updatedAt: number; result?: Json; error?: string;
-  cancelRequested?: boolean; scheduleId?: string; progress?: Json;
+  cancelRequested?: boolean; scheduleId?: string; progress?: Json; retryOf?: string;
 };
 export type Schedule = {
   id: string; job: string; actor: { id: string }; input: Json; at: number; everyMs?: number;
@@ -43,17 +43,34 @@ export class Store<S extends Tables = Tables> {
   readonly kv = {
     get: (key: string): Json | null => {
       this.check();
-      const row = this.sql.exec<{ value: string }>('SELECT value FROM wc_kv WHERE key = ?', key).toArray()[0];
+      const row = this.storage.sql.exec<{ value: string }>('SELECT value FROM wc_kv WHERE key = ?', key).toArray()[0];
       return row ? JSON.parse(row.value) as Json : null;
     },
     set: (key: string, value: Json): void => {
-      this.check(true); this.sql.exec('INSERT OR REPLACE INTO wc_kv (key, value) VALUES (?, ?)', key, encode(value, 262_144)); this.changed.add(builtinTriggers.kv);
+      this.check(true); this.storage.sql.exec('INSERT OR REPLACE INTO wc_kv (key, value) VALUES (?, ?)', key, encode(value, 262_144)); this.changed.add(builtinTriggers.kv);
     },
-    delete: (key: string): void => { this.check(true); this.sql.exec('DELETE FROM wc_kv WHERE key = ?', key); this.changed.add(builtinTriggers.kv); },
+    delete: (key: string): void => { this.check(true); this.storage.sql.exec('DELETE FROM wc_kv WHERE key = ?', key); this.changed.add(builtinTriggers.kv); },
   };
   private active = true;
-  constructor(readonly sql: Sql, schema: S, readonly revision: number, private writable: boolean) {
-    const raw = drizzle({ sql } as any, { schema, logger: false }) as DrizzleSqliteDODatabase<S>;
+  constructor(private storage: Storage, schema: S, readonly revision: number, private writable: boolean) {
+    // Guard execution too: raw SQL, relational queries and retained sessions must
+    // obey the same lifetime/read-only rules as ordinary query builders.
+    const sql = { exec: (query: string, ...bindings: SqlValue[]) => {
+      this.check();
+      if (this.writable) return storage.sql.exec(query, ...bindings);
+      const statement = query.replace(/'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\//g, token => token.startsWith('--') || token.startsWith('/*') ? ' ' : ' literal ').trim();
+      if (!/^(?:select|with|explain)\b/i.test(statement) || /;\s*\S/.test(statement)) throw new WorkcoreError('READ_ONLY', 'Reads require a single read-only SQL statement');
+      return storage.transactionSync(() => {
+        const cursor = storage.sql.exec(query, ...bindings) as ReturnType<Sql['exec']> & { rowsWritten: number; raw(): { toArray(): SqlValue[][] }; columnNames: string[] };
+        const columns = cursor.columnNames;
+        const rows = cursor.raw().toArray();
+        if (cursor.rowsWritten !== 0) throw new WorkcoreError('READ_ONLY', 'Reads cannot change state');
+        const records = rows.map(row => Object.fromEntries(columns.map((column, index) => [column, row[index]])));
+        const iterator = records[Symbol.iterator]();
+        return Object.assign(iterator, { toArray: () => records, raw: () => ({ toArray: () => rows }) });
+      });
+    } };
+    const raw = drizzle({ sql, transactionSync: (callback: () => unknown) => { this.check(true); return storage.transactionSync(callback); } } as any, { schema, logger: false }) as DrizzleSqliteDODatabase<S>;
     this.db = this.guard(raw) as DrizzleSqliteDODatabase<S>;
   }
   close(): void { this.active = false; }

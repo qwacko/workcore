@@ -168,6 +168,8 @@ describe('Cloudflare Worker and live protocol', () => {
     expect(listed.rows).toHaveLength(1);
     expect(listed.rows[0]).toMatchObject({ filename: 'hello.txt', size: 11, status: 'ready', ownerId: users.alice!.id });
     expect(listed.rows[0]).not.toHaveProperty('objectKey');
+    const health = await (await api(workspace, 'system', { name: 'health.inspect', input: {} })).json() as any;
+    expect(health.files).toEqual({ ready: 1 });
     const bobList = await (await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files`, { headers: { cookie: users.bob!.cookie } }), bindings)).json() as any;
     expect(bobList.rows).toHaveLength(0);
     expect((await worker.fetch(new Request(`http://localhost/api/workspaces/${workspace}/files/${created.id}`, { headers: { cookie: users.bob!.cookie } }), bindings)).status).toBe(403);
@@ -188,6 +190,15 @@ describe('Cloudflare Worker and live protocol', () => {
     expect(response.status).toBe(201);
     const { id } = await response.json() as { id: string };
     const stub = bindings.WORKSPACES.get(bindings.WORKSPACES.idFromName(workspace));
+    await runInDurableObject(stub, (instance: TrackerWorkspace) => {
+      instance.engine.storage.sql.exec('UPDATE files SET status = ? WHERE id = ?', 'pending', id);
+    });
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: TrackerWorkspace, state) => {
+      const deadline = instance.engine.nextDue();
+      expect(deadline).toBeGreaterThan(Date.now() + 86_000_000);
+      expect(await state.storage.getAlarm()).toBe(deadline);
+    });
     await runInDurableObject(stub, (instance: TrackerWorkspace) => {
       instance.engine.storage.sql.exec('UPDATE files SET status = ?, created_at = ? WHERE id = ?', 'pending', Date.now() - 86_400_001, id);
     });

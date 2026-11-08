@@ -96,7 +96,7 @@ const taskList = app.view({
 - `'*'` in either array means wildcard. Matching views rerun once per commit and receive replacement snapshots; unmatched views still receive a revision acknowledgement.
 - Dynamic and static keys publish only after the mutation transaction commits. Rollbacks, including output-validation failures, publish nothing. Calls after the mutation context expires fail.
 - Workcore emits built-in keys when its own KV, file, run, schedule, or history state changes. A job's `ctx.mutate(...)` emits the called mutation's keys when that mutation executes; merely scheduling future work does not emit the future mutation's keys.
-- Authorization is rechecked for every subscription on every commit, even when keys do not match. If membership affects the rows a still-authorized view returns, that view must also depend on the application's permissions key.
+- Authorization is rechecked for every subscription on every commit, even when keys do not match. If permission data affects the rows a still-authorized view returns, that view must also depend on the application's permissions key.
 
 Declarations are promises: Workcore does not inspect SQL to verify that a mutation only changes its declared data. Missing a key may leave a subscription stale until its next full refresh. Use wildcard defaults where the impact is uncertain.
 

@@ -1,12 +1,14 @@
 {
   "name": "@workcore/files",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/qwacko/workcore.git", "directory": "packages/files" },
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
+  "files": ["dist", "LICENSE", "README.md"],
+  "publishConfig": { "access": "public", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"

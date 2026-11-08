@@ -13,7 +13,7 @@
 </script>
 
 <div class="mb-4 grid gap-2 text-sm">
-  <span>{block.label}</span>
+  <label for={controlId}>{block.label}</label>
   <Select id={controlId} value={value === undefined ? '' : JSON.stringify(value)} options={block.options.map(option => ({ value: JSON.stringify(option.value), label: option.label }))} onchange={selected => {
     if (selected) context.set(address, JSON.parse(selected) as Json);
   }} />

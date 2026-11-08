@@ -10,8 +10,9 @@
     "bindings": [
       { "name": "WORKSPACES", "class_name": "TrackerWorkspace" },
       { "name": "NOTES", "class_name": "NotesWorkspace" },
-      { "name": "TEST", "class_name": "TestWorkspace" }
+      { "name": "TEST", "class_name": "TestWorkspace" },
+      { "name": "PERMISSIONS", "class_name": "PermissionsWorkspace" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TrackerWorkspace", "NotesWorkspace", "TestWorkspace"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TrackerWorkspace", "NotesWorkspace", "TestWorkspace", "PermissionsWorkspace"] }]
 }

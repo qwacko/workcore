@@ -10,7 +10,7 @@ The SPA subscribes to bounded live datasets (up to 500 tasks in the inbox and 20
 
 ## Administrator access
 
-Accounts are ordinary members by default. To grant an existing, trusted account access to administrator operations in **both** workspaces:
+Accounts have ordinary application access by default. To grant an existing, trusted account access to administrator operations in **both** workspaces:
 
 1. Create the account first and confirm its identity out of band. Better Auth user IDs are generated IDs, not email addresses. For local development, inspect the local D1 database:
 
@@ -25,15 +25,56 @@ For a deployed Worker, inspect the production database with `wrangler d1 execute
 
 ## Cloudflare deployment
 
-Create a D1 database and replace `AUTH_DB`'s placeholder `database_id` in `wrangler.jsonc`; create the configured R2 bucket. Set a unique secret and the canonical HTTPS origin:
+Deploying this application to Cloudflare does **not** publish the library packages to npm. The app stays private; the reusable `@workcore/*` packages have a separate [publication procedure](../../docs/publishing.md).
+
+1. Install the repo dependencies and authenticate Wrangler to the intended Cloudflare account:
+
+   ```sh
+   pnpm install --frozen-lockfile
+   pnpm exec wrangler login
+   pnpm exec wrangler whoami
+   ```
+
+2. Create the application's production resources (these commands create real resources):
+
+   ```sh
+   pnpm --filter workcore-demo exec wrangler d1 create workcore-auth --env=''
+   pnpm --filter workcore-demo exec wrangler r2 bucket create workcore-files --env=''
+   ```
+
+   Replace the production `AUTH_DB.database_id` placeholder in `wrangler.jsonc` with the returned D1 ID. Keep the R2 bucket name in sync if you choose a different name. The `WORKSPACES` and `NOTES` bindings and `new_sqlite_classes` class migrations are already configured; Wrangler provisions those Durable Object namespaces during deployment. Application SQL migrations are bundled separately and applied by Workcore; Better Auth initializes its D1 schema through the example's auth setup.
+
+3. Configure production secrets using the default environment (`--env=''`), **not** the local demo environment:
 
 ```sh
 pnpm --filter workcore-demo exec wrangler secret put BETTER_AUTH_SECRET --env=''
 pnpm --filter workcore-demo exec wrangler secret put BETTER_AUTH_URL --env=''
-pnpm deploy
 ```
 
-The build compiles the demo and the default admin into one assets directory and performs a Wrangler dry-run before deployment. Configure both Durable Object namespaces and the R2 bucket in the Cloudflare account. This sample permits account creation without email verification and should be hardened for a public deployment.
+   Enter a unique random auth secret of at least 32 characters and the exact public HTTPS origin you intend to use, without a path. Local `.env` values are not a production secret deployment mechanism. Leave production `DEMO_MODE=false`. Optional model-provider secrets must also be installed as Worker secrets if you enable model inference.
+
+4. Verify the application artifact without deploying:
+
+   ```sh
+   pnpm typecheck
+   pnpm test
+   pnpm build
+   pnpm test:packages
+   ```
+
+   `pnpm build` compiles the app/admin assets and runs Wrangler with `--dry-run`. `pnpm test:packages` packs the five libraries, checks the documented usage, and builds a temporary copy of **this same example** against their published exports. It uses installed third-party dependencies, not a registry installation, and makes no remote changes.
+
+5. Deploy explicitly when ready:
+
+   ```sh
+   pnpm deploy
+   ```
+
+   The command rebuilds, performs a dry run and then deploys the Worker/static assets. Open the configured public origin, sign up/sign in, create a todo and a note, and verify updates across two tabs. Grant administrator inspection using the earlier instructions only to a trusted account. Check the Files page and a scheduled job if using those capabilities.
+
+This sample permits account creation without email verification; choose the appropriate authentication policy before exposing it publicly. Rehearse [backup and recovery](../../docs/recovery.md) before putting important data into it.
+
+The example's access rules are intentionally small: shared or private todos, owner-only task changes, private notes, and explicitly granted administrator inspection. There is no team setup or enrollment flow. See [application permissions](../../docs/multi-user.md) for the boundary between host authentication, operation access and record-level checks.
 
 ## Custom frontend and chat
 

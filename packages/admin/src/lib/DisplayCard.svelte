@@ -9,7 +9,7 @@
   } = $props();
 </script>
 
-<Card.Root class={`mb-5 ${wide ? 'wide' : ''}`}>
-  {#if title || description}<Card.Header><div>{#if title}<Card.Title>{title}</Card.Title>{/if}{#if description}<Card.Description>{description}</Card.Description>{/if}</div></Card.Header>{/if}
+<section class={wide ? 'wide' : ''}><Card.Root class="mb-5">
+  {#if title || description}<Card.Header><div>{#if title}<h2 class="text-base font-medium leading-normal">{title}</h2>{/if}{#if description}<Card.Description>{description}</Card.Description>{/if}</div></Card.Header>{/if}
   <Card.Content>{@render children()}</Card.Content>
-</Card.Root>
+</Card.Root></section>

@@ -108,7 +108,7 @@ export type BlockDefinition = SourceDefinition & (
   | { kind: 'markdown'; path?: string }
   | { kind: 'chat'; messages: string; message: { id: string; role: string; content?: string; parts?: string; at?: string }; send: ActionDefinition; promptField: string; runId?: string }
 ) | (BlockBase & { kind: 'form'; action: ActionDefinition }) | (BlockBase & {
-  kind: 'system'; system: 'resource' | 'operation-index' | 'operation' | 'run-detail'; resource?: 'runs' | 'schedules' | 'tables' | 'history' | 'files'; operation?: { kind: 'view' | 'query' | 'mutation' | 'job'; name: string };
+  kind: 'system'; system: 'resource' | 'operation-index' | 'operation' | 'run-detail' | 'health'; resource?: 'runs' | 'schedules' | 'tables' | 'history' | 'files'; operation?: { kind: 'view' | 'query' | 'mutation' | 'job'; name: string };
 }) | (BlockBase & { kind: 'custom'; component: string; version: number; props: Json; children?: BlockDefinition[] })
   | (BlockBase & { kind: 'section'; appearance?: 'card' | 'plain'; children: BlockDefinition[] })
   | (BlockBase & { kind: 'columns'; gap?: 'compact' | 'normal' | 'spacious'; columns: { id: string; children: BlockDefinition[] }[] })
@@ -159,7 +159,7 @@ export const ui = {
     navigate<O extends z.ZodType>(display: string, bind: Record<string, Path<z.output<O>>>): SuccessEffect { return { type: 'navigate', display, bind } as SuccessEffect; },
   },
   display<I extends z.ZodType, C = unknown>(definition: DisplayDefinition<I, C>): DisplayDefinition<I, C> { return definition; },
-  system(options: BlockBase & ({ system: 'resource'; resource: 'runs' | 'schedules' | 'tables' | 'history' | 'files' } | { system: 'operation-index' } | { system: 'operation' } | { system: 'run-detail' })): BlockDefinition {
+  system(options: BlockBase & ({ system: 'resource'; resource: 'runs' | 'schedules' | 'tables' | 'history' | 'files' } | { system: 'operation-index' } | { system: 'operation' } | { system: 'run-detail' } | { system: 'health' })): BlockDefinition {
     return { ...options, kind: 'system' } as BlockDefinition;
   },
   displayReference(display: string, options: BlockBase & { input?: Json }): BlockDefinition {
@@ -315,7 +315,7 @@ export type ManifestBlock =
   | (ManifestBlockBase & { kind: 'state-control'; state: string; label: string; options: { label: string; value: Json }[] })
   | (ManifestBlockBase & { kind: 'form'; action: ManifestAction })
   | (ManifestBlockBase & { kind: 'button'; action: ManifestAction; variant?: 'primary' | 'secondary' | 'danger' })
-  | (ManifestBlockBase & { kind: 'system'; system: 'resource' | 'operation-index' | 'operation' | 'run-detail'; resource?: 'runs' | 'schedules' | 'tables' | 'history' | 'files'; operation?: z.infer<typeof systemOperationSchema> })
+  | (ManifestBlockBase & { kind: 'system'; system: 'resource' | 'operation-index' | 'operation' | 'run-detail' | 'health'; resource?: 'runs' | 'schedules' | 'tables' | 'history' | 'files'; operation?: z.infer<typeof systemOperationSchema> })
   | (ManifestBlockBase & { kind: 'custom'; component: string; version: number; props: Json; children?: ManifestBlock[] })
   | (ManifestBlockBase & { kind: 'section'; appearance?: 'card' | 'plain'; children: ManifestBlock[] })
   | (ManifestBlockBase & { kind: 'columns'; gap?: 'compact' | 'normal' | 'spacious'; columns: { id: string; children: ManifestBlock[] }[] })
@@ -333,7 +333,7 @@ blockSchema = z.lazy(() => z.discriminatedUnion('kind', [
   blockBaseSchema.extend({ kind: z.literal('state-control'), state: z.string(), label: z.string(), options: z.array(z.object({ label: z.string(), value: z.json() })).min(1) }),
   blockBaseSchema.extend({ kind: z.literal('form'), action: actionSchema }),
   blockBaseSchema.extend({ kind: z.literal('button'), action: actionSchema, variant: z.enum(['primary', 'secondary', 'danger']).optional() }),
-  blockBaseSchema.extend({ kind: z.literal('system'), system: z.enum(['resource', 'operation-index', 'operation', 'run-detail']), resource: z.enum(['runs', 'schedules', 'tables', 'history', 'files']).optional(), operation: systemOperationSchema.optional() }),
+  blockBaseSchema.extend({ kind: z.literal('system'), system: z.enum(['resource', 'operation-index', 'operation', 'run-detail', 'health']), resource: z.enum(['runs', 'schedules', 'tables', 'history', 'files']).optional(), operation: systemOperationSchema.optional() }),
   blockBaseSchema.extend({ kind: z.literal('custom'), component: z.string(), version: z.number().int().positive(), props: z.json(), children: childNodesSchema.optional() }),
   blockBaseSchema.extend({ kind: z.literal('section'), appearance: z.enum(['card', 'plain']).optional(), children: childNodesSchema }),
   blockBaseSchema.extend({ kind: z.literal('columns'), gap: z.enum(['compact', 'normal', 'spacious']).optional(), columns: z.array(z.object({ id: z.string().min(1).max(64), children: childNodesSchema })).min(1).max(4) }),

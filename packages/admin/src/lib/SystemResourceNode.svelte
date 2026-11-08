@@ -15,6 +15,7 @@
   import Alert from './Alert.svelte';
   import * as Card from './components/ui/card/index.js';
   import { Database } from '@lucide/svelte';
+  import Select from './components/ui/select/select.svelte';
 
   let { block }: { block: Extract<ManifestBlock, { kind: 'system' }> & { system: 'resource' } } = $props();
   const session = getContext<SessionStore>(sessionKey);
@@ -23,7 +24,8 @@
   const table = $derived(host.location().searchParams.get('table'));
   const after = $derived(host.location().searchParams.get('after') ?? '');
   const operation = $derived(resource === 'tables' ? table ? 'tables.read' : 'tables.list' : `${resource}.list`);
-  const input = $derived(JSON.stringify({ ...(resource === 'tables' && table ? { table } : {}), after }));
+  const status = $derived(host.location().searchParams.get('status') ?? '');
+  const input = $derived(JSON.stringify({ ...(resource === 'tables' && table ? { table } : {}), ...(resource === 'runs' && status ? { status } : {}), after }));
   const allowed = $derived(resource === 'runs' ? $session?.manifest.runs : !!$session?.manifest.admin);
   const loader = useSource(() => $session?.sources ?? null, () => allowed ? ({ kind: 'system', name: operation }) : null, () => JSON.parse(input) as Json);
   let detail = $state<Json | undefined>();
@@ -44,7 +46,11 @@
     if (action === 'retry' && !confirm('Create a new run? Previous external effects may already have happened.')) return;
     const name = kind === 'run' ? action === 'retry' ? 'runs.retry' : 'runs.cancel' : action === 'enable' ? 'schedules.enable' : 'schedules.disable';
     actionError = '';
-    try { await $session.client.system(name, kind === 'run' ? { runId: id } : { scheduleId: id }); $session.sources.refresh(); }
+    try {
+      const result = await $session.client.system(name, kind === 'run' ? { runId: id } : { scheduleId: id });
+      $session.sources.refresh();
+      if (result && typeof result === 'object' && !Array.isArray(result) && typeof result.runId === 'string' && host.runHref) await host.navigate(host.runHref(result.runId));
+    }
     catch (error) { actionError = error instanceof Error ? error.message : 'System action failed'; }
   }
   function inspect(id: string) {
@@ -63,6 +69,7 @@
 {#if !allowed}<Alert variant="destructive">This system display is not available to your current actor.</Alert>
 {:else}<DisplayCard title={label(resource)} wide>
   {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
+  {#if resource === 'runs'}<label for="run-status">Run status</label><Select id="run-status" value={status} options={[{ value: '', label: 'All statuses' }, ...['failed', 'interrupted', 'queued', 'running', 'completed', 'cancelled'].map(value => ({ value, label: label(value) }))]} onchange={next => { const url = new URL(host.location().href); url.searchParams.delete('after'); if (next) url.searchParams.set('status', next); else url.searchParams.delete('status'); void host.navigate(url.href); }} />{/if}
   {#if resource === 'runs'}<p class="help">Run status and trace updates arrive live. Inspect a run for full input, result, and timeline details.</p>{:else if resource === 'schedules'}<p class="help">Schedule changes arrive live.</p>{/if}
   {#if resource === 'tables' && table}<Button variant="ghost" size="sm" href="?">← All tables</Button>{/if}
   <LoadBoundary state={loader.state}>

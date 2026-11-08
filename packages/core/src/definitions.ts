@@ -50,6 +50,8 @@ export type Job<I extends z.ZodType = any, O extends z.ZodType = any, C = any> =
   kind: 'task' | 'agent'; input: I; output: O; ui?: OperationUI;
   handler: (ctx: C, input: z.output<I>) => Promise<z.output<O>>;
   maxAttempts?: number; retryDelayMs?: number; maxSteps?: number; tools?: Operation[];
+  /** Cooperative deadline per attempt. Aborts signal and expires tools; cannot stop arbitrary code. */
+  timeoutMs?: number;
 };
 export type MutationContext<S extends Tables, T extends string = string> = {
   db: Database<S>; kv: ReadContext<S>['kv'] & { set(key: string, value: Json): void; delete(key: string): void }; actor: Actor; now: number;

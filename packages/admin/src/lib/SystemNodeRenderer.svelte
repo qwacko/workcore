@@ -6,10 +6,12 @@
   import SystemFilesNode from './SystemFilesNode.svelte';
   import SystemRunDetailNode from './SystemRunDetailNode.svelte';
   import Alert from './Alert.svelte';
+  import SystemHealthNode from './SystemHealthNode.svelte';
   let { block, input = {} }: { block: Extract<ManifestBlock, { kind: 'system' }>; input?: Json } = $props();
 </script>
 
 {#if block.system === 'operation-index'}<SystemOperationIndex />
+{:else if block.system === 'health'}<SystemHealthNode />
 {:else if block.system === 'operation'}<SystemOperationNode {input} />
 {:else if block.system === 'run-detail'}<SystemRunDetailNode {input} />
 {:else if block.system === 'resource' && block.resource === 'files'}<SystemFilesNode {input} />

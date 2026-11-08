@@ -70,7 +70,10 @@ export class Workspace<E = unknown> extends DurableObject<E> {
     if (socket.readyState === WebSocket.OPEN) socket.send(encode(message, maxBytes));
   }
   private refresh(socket: WebSocket, attachment: Attachment, changed?: Set<string>, onlyId?: string): void {
-    try { this.valid(attachment.session); } catch { socket.close(1008, 'Session expired'); return; }
+    try {
+      this.valid(attachment.session);
+      if (!this.engine.can(attachment.session.actor, '$connect')) throw new WorkcoreError('FORBIDDEN', 'Access revoked', 403);
+    } catch { socket.close(1008, 'Session expired or access revoked'); return; }
     const retained: Subscription[] = [];
       for (const subscription of attachment.subscriptions) {
       try {
@@ -88,19 +91,17 @@ export class Workspace<E = unknown> extends DurableObject<E> {
           if (!changed || changed.size) {
             const result = this.engine.resolveDisplay(attachment.session.actor, subscription.name, subscription.input);
              this.send(socket, { type: 'snapshot', id: subscription.id, data: result, revision: this.engine.revision });
-          }
+          } else this.send(socket, { type: 'revision', id: subscription.id, revision: this.engine.revision });
           retained.push(subscription);
           continue;
         }
         if (subscription.kind === 'system') {
           const dependencies = this.engine.systemDependencies(subscription.name);
           if (dependencies === null) throw new WorkcoreError('NOT_SUBSCRIBABLE', 'This system operation does not support live subscriptions');
-          if (!changed || shouldRefreshView(dependencies, changed)) {
-            const data = this.engine.system(attachment.session.actor, subscription.name, subscription.input);
-            this.send(socket, { type: 'snapshot', id: subscription.id, data, revision: this.engine.revision });
-          } else {
-            this.send(socket, { type: 'revision', id: subscription.id, revision: this.engine.revision });
-          }
+          // System results can change scope (all runs -> own runs) when roles change,
+          // even without their resource trigger. Reauthorize AND reproject bounded data.
+          const data = this.engine.system(attachment.session.actor, subscription.name, subscription.input);
+          this.send(socket, { type: 'snapshot', id: subscription.id, data, revision: this.engine.revision });
           retained.push(subscription);
           continue;
         }
@@ -176,8 +177,7 @@ export class Workspace<E = unknown> extends DurableObject<E> {
       } else if (path === '/control') {
         const input = z.object({ resource: z.enum(['run', 'schedule']), id: z.string(), action: z.string() }).parse(body);
         await this.arm();
-        this.engine.control(session.actor, input.resource, input.id, input.action);
-        result = { revision: this.engine.revision };
+        result = this.engine.control(session.actor, input.resource, input.id, input.action);
       } else if (path === '/system') {
         const input = z.object({ name: z.string(), input: z.json().default({}) }).parse(body);
         // Arm before writes so queued or newly scheduled work survives on idle workspaces.
@@ -305,6 +305,8 @@ export async function routeWorkspace(request: Request, options: {
   /** Select a namespace from the public workspace key when an application uses multiple DO definitions. */
   namespaceFor?: (workspaceId: string, request: Request) => DurableObjectNamespace;
   authenticate: (request: Request) => Promise<Session | null> | Session | null;
+  /** Optional host-owned workspace directory check, before creating/contacting a DO. */
+  authorizeWorkspace?: (session: Session, workspaceId: string, request: Request) => Promise<boolean> | boolean;
   prefix?: string;
 }): Promise<Response> {
   try {
@@ -317,6 +319,7 @@ export async function routeWorkspace(request: Request, options: {
     if (request.headers.has('origin') && request.headers.get('origin') !== url.origin) throw new WorkcoreError('ORIGIN_DENIED', 'Same-origin requests only', 403);
     const session = await options.authenticate(request);
     if (!session || !session.actor.id || session.expiresAt <= Date.now()) throw new WorkcoreError('UNAUTHENTICATED', 'Sign in first', 401);
+    if (options.authorizeWorkspace && !await options.authorizeWorkspace(session, workspaceId, request)) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
     const headers = new Headers(request.headers);
     // Only an identity and expiry cross this trusted boundary, never a permission snapshot.
     headers.set('x-workcore-session', encodeURIComponent(encode({ actor: { id: session.actor.id }, expiresAt: Math.min(session.expiresAt, Date.now() + 3_600_000) })));

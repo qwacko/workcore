@@ -13,7 +13,8 @@ import { builtinTriggers, shouldRefreshView } from './triggers.js';
 export type Result = { data: Json; revision: number };
 export type Commit = { revision: number; changed: Set<string> };
 const systemOperationDefinitions = {
-  'runs.list': { permission: '$runs', input: z.object({ after: z.string().optional() }), label: 'List execution runs' },
+  'runs.list': { permission: '$runs', input: z.object({ after: z.string().optional(), status: z.enum(['queued', 'running', 'completed', 'failed', 'interrupted', 'cancelled']).optional() }), label: 'List execution runs' },
+  'health.inspect': { permission: '$admin', input: z.object({}), label: 'Workspace health' },
   'runs.inspect': { permission: '$runs', input: z.object({ runId: z.string() }), label: 'Inspect an execution run' },
   'runs.trace': { permission: '$runs', input: z.object({ runId: z.string(), after: z.number().int().min(0).default(0) }), label: 'Read run trace' },
   'runs.cancel': { permission: '$admin', input: z.object({ runId: z.string() }), label: 'Cancel a run' },
@@ -42,6 +43,13 @@ export class Engine {
         checkName(name);
         z.toJSONSchema(operation.input, { io: 'input' });
         z.toJSONSchema(operation.output);
+        if (group === 'job') {
+          const job = operation as Job;
+          for (const [value, maximum, label] of [[job.maxSteps, 100, 'maxSteps'], [job.maxAttempts, 10, 'maxAttempts'], [job.timeoutMs, 600_000, 'timeoutMs']] as const) {
+            if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > maximum)) throw new Error(`Invalid ${label} for ${name}`);
+          }
+          if (job.retryDelayMs !== undefined && (!Number.isSafeInteger(job.retryDelayMs) || job.retryDelayMs < 1000)) throw new Error(`Invalid retryDelayMs for ${name}`);
+        }
         if (group === 'view') {
           const view = definition.views[name]!;
           if (!Number.isInteger(view.maxRows ?? 500) || (view.maxRows ?? 500) < 1 || (view.maxRows ?? 500) > 1000) throw new Error(`Invalid maxRows for ${name}`);
@@ -59,7 +67,7 @@ export class Engine {
     applyMigrations(storage, definition.migrations);
     storage.transactionSync(() => {
       if (!this.meta('initialized')) {
-        const store = new Store(storage.sql, definition.tables, 1, true);
+        const store = new Store(storage, definition.tables, 1, true);
         try { assertSync(definition.initialize?.(store.db)); } finally { store.close(); }
         this.setMeta('initialized', 'true');
         this.setMeta('revision', '1');
@@ -79,13 +87,13 @@ export class Engine {
   }
   get revision(): number { return Number(this.meta('revision') ?? '0'); }
   private read<T>(callback: (store: Store<any>) => T): T {
-    const store = new Store(this.storage.sql, this.definition.tables, this.revision, false);
+    const store = new Store(this.storage, this.definition.tables, this.revision, false);
     try { return callback(store); } finally { store.close(); }
   }
   private write<T>(callback: (db: Store<any>) => T): T {
     let commit: Commit | undefined;
     const value = this.storage.transactionSync(() => {
-      const db = new Store(this.storage.sql, this.definition.tables, this.revision + 1, true);
+      const db = new Store(this.storage, this.definition.tables, this.revision + 1, true);
       try {
         const result = callback(db);
         assertSync(result);
@@ -102,9 +110,12 @@ export class Engine {
     if (!this.validTriggers.has(key)) throw new WorkcoreError('INVALID_TRIGGER', `Unknown trigger key ${key}`);
   }
   private allowed(store: Store<any>, actor: Actor, action: string): boolean {
-    const result = this.definition.authorize({ db: store.db, kv: store.kv, actor, now: Date.now() }, action);
-    assertSync(result);
-    return result === true;
+    const policy = new Store(this.storage, this.definition.tables, store.revision, false);
+    try {
+      const result = this.definition.authorize({ db: policy.db, kv: policy.kv, actor, now: Date.now() }, action);
+      assertSync(result);
+      return result === true;
+    } finally { policy.close(); }
   }
   private authorize(store: Store<any>, actor: Actor, action: string): void {
     if (!this.allowed(store, actor, action)) throw new WorkcoreError('FORBIDDEN', 'Access denied', 403);
@@ -257,7 +268,7 @@ export class Engine {
     if (!entry) throw new WorkcoreError('UNREGISTERED_OPERATION', 'Operation must be registered in this workspace');
     return entry[0];
   }
-  private queue(db: Store<any>, actor: Actor, job: Job, input: unknown, scheduleId?: string, id = crypto.randomUUID()): string {
+  private queue(db: Store<any>, actor: Actor, job: Job, input: unknown, scheduleId?: string, id = crypto.randomUUID(), retryOf?: string): string {
     db.assertWritable();
     const name = this.nameOf(this.definition.jobs, job);
     this.authorize(db, actor, `job:${name}`);
@@ -265,6 +276,7 @@ export class Engine {
     const now = Date.now();
     const run: Run = { id, job: name, kind: job.kind, actor, input: json(input), status: 'queued', attempt: 0, due: now, createdAt: now, updatedAt: now };
     if (scheduleId) run.scheduleId = scheduleId;
+    if (retryOf) run.retryOf = retryOf;
     saveRun(this.storage.sql, run);
     db.changed.add(builtinTriggers.runs);
     return id;
@@ -373,6 +385,7 @@ export class Engine {
         ui.displays.systemRunDetail = systemDisplay('Execution detail', '/runs/:runId', { system: 'run-detail' }, { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] });
       }
       if (this.allowed(db, actor, '$admin')) {
+        ui.displays.systemHealth = systemDisplay('Workspace health', '/health', { system: 'health' });
         ui.displays.systemSchedules = systemDisplay('Schedules', '/schedules', { system: 'resource', resource: 'schedules' });
         ui.displays.systemTables = systemDisplay('Tables', '/tables', { system: 'resource', resource: 'tables' });
         ui.displays.systemHistory = systemDisplay('History', '/history', { system: 'resource', resource: 'history' });
@@ -389,7 +402,7 @@ export class Engine {
       return json(manifestSchema.parse(manifest));
     });
   }
-  inspect(actor: Actor, resource: string, after = ''): Json {
+  inspect(actor: Actor, resource: string, after = '', status?: string): Json {
     return this.read(db => {
       if (resource.startsWith('run:')) {
         this.authorize(db, actor, '$runs');
@@ -440,7 +453,8 @@ export class Engine {
       const projection = resource === 'runs' ? "json_remove(data, '$.input', '$.result')" : resource === 'schedules' ? "json_remove(data, '$.input')" : 'data';
       const ownRuns = resource === 'runs' && !this.allowed(db, actor, '$admin');
       const scope = ownRuns ? " AND json_extract(data, '$.actor.id') = ?" : '';
-      const rows = this.storage.sql.exec<{ data: string; id: string }>(`SELECT id, ${projection} AS data FROM ${table} WHERE id > ?${scope} ORDER BY id LIMIT 101`, after, ...(ownRuns ? [actor.id] : [])).toArray();
+      const filter = resource === 'runs' && status ? ' AND status = ?' : '';
+      const rows = this.storage.sql.exec<{ data: string; id: string }>(`SELECT id, ${projection} AS data FROM ${table} WHERE id > ?${scope}${filter} ORDER BY id LIMIT 101`, after, ...(ownRuns ? [actor.id] : []), ...(filter ? [status!] : [])).toArray();
       const visible = rows.slice(0, 100).map(row => JSON.parse(row.data) as Record<string, Json>);
       return json({ rows: visible, nextCursor: rows.length > 100 ? rows[99]!.id : null });
     });
@@ -450,11 +464,12 @@ export class Engine {
     if (!operation) throw new WorkcoreError('NOT_FOUND', 'Unknown system operation', 404);
     const parsed = operation.input.parse(input) as Record<string, Json>;
     switch (name) {
-      case 'runs.list': return this.inspect(actor, 'runs', String(parsed.after ?? ''));
+      case 'health.inspect': return this.health(actor);
+      case 'runs.list': return this.inspect(actor, 'runs', String(parsed.after ?? ''), parsed.status as string | undefined);
       case 'runs.inspect': return this.inspect(actor, `run:${parsed.runId}`);
       case 'runs.trace': return this.trace(actor, String(parsed.runId), Number(parsed.after ?? 0));
-      case 'runs.cancel': this.control(actor, 'run', String(parsed.runId), 'cancel'); return json({ revision: this.revision });
-      case 'runs.retry': this.control(actor, 'run', String(parsed.runId), 'retry'); return json({ revision: this.revision });
+      case 'runs.cancel': return json(this.control(actor, 'run', String(parsed.runId), 'cancel'));
+      case 'runs.retry': return json(this.control(actor, 'run', String(parsed.runId), 'retry'));
       case 'schedules.list': return this.inspect(actor, 'schedules', String(parsed.after ?? ''));
       case 'schedules.inspect': return this.inspect(actor, `schedule:${parsed.scheduleId}`);
       case 'schedules.enable': this.control(actor, 'schedule', String(parsed.scheduleId), 'enable'); return json({ revision: this.revision });
@@ -469,6 +484,7 @@ export class Engine {
   /** Trigger dependencies for the read-only system operations that support live subscriptions. */
   systemDependencies(name: string): readonly string[] | null {
     switch (name) {
+      case 'health.inspect': return ['*'];
       case 'runs.list': case 'runs.inspect': case 'runs.trace': return [builtinTriggers.runs];
       case 'schedules.list': case 'schedules.inspect': return [builtinTriggers.schedules];
       case 'history.list': return [builtinTriggers.history];
@@ -479,6 +495,18 @@ export class Engine {
       default: return null;
     }
   }
+  health(actor: Actor): Json {
+    return this.read(db => {
+      this.authorize(db, actor, '$admin');
+      const runs = this.storage.sql.exec<{ status: string; count: number }>('SELECT status, count(*) AS count FROM wc_runs GROUP BY status').toArray();
+      const oldest = this.storage.sql.exec<{ at: number | null }>("SELECT min(json_extract(data, '$.createdAt')) AS at FROM wc_runs WHERE status = 'queued'").toArray()[0]?.at ?? null;
+      const migration = this.storage.sql.exec<{ at: number | null }>('SELECT max(created_at) AS at FROM __drizzle_migrations').toArray()[0]?.at ?? null;
+      const fileTable = this.definition.files?.table;
+      const files = fileTable ? this.storage.sql.exec<{ status: string; count: number }>(`SELECT status, count(*) AS count FROM "${getTableName(this.definition.tables[fileTable] as any).replaceAll('"', '""')}" GROUP BY status`).toArray() : [];
+      const schedule = this.storage.sql.exec<{ at: number | null }>('SELECT min(at) AS at FROM wc_schedules WHERE enabled = 1').toArray()[0]?.at ?? null;
+      return json({ revision: this.revision, runs: Object.fromEntries(runs.map(row => [row.status, row.count])), oldestQueuedAt: oldest, nextWorkDue: this.nextDue(), nextScheduleAt: schedule, migration: migration, files: Object.fromEntries(files.map(row => [row.status, row.count])) });
+    });
+  }
   trace(actor: Actor, runId: string, after = 0): Json {
     return this.read(db => {
       this.authorize(db, actor, '$runs');
@@ -488,7 +516,8 @@ export class Engine {
       return json({ rows: rows.slice(0, 10).map(row => ({ sequence: row.sequence, ...JSON.parse(row.data) as object })), nextCursor: rows.length > 10 ? rows[9]!.sequence : null });
     });
   }
-  control(actor: Actor, resource: 'run' | 'schedule', id: string, action: string): void {
+  control(actor: Actor, resource: 'run' | 'schedule', id: string, action: string): { revision: number; runId?: string } {
+    let runId: string | undefined;
     this.write(db => {
       this.authorize(db, actor, '$admin');
       if (resource === 'schedule') {
@@ -502,7 +531,7 @@ export class Engine {
         if (!run) throw new WorkcoreError('NOT_FOUND', 'Unknown run', 404);
         if (action === 'retry') {
           if (!['failed', 'interrupted', 'cancelled'].includes(run.status)) throw new WorkcoreError('INVALID_STATE', 'Only failed, interrupted or cancelled runs can be retried');
-          this.queue(db, run.actor, this.lookup(this.definition.jobs, run.job), run.input);
+          runId = this.queue(db, run.actor, this.lookup(this.definition.jobs, run.job), run.input, undefined, crypto.randomUUID(), run.id);
         } else if (action === 'cancel') {
           if (run.status === 'running') run.cancelRequested = true;
           else if (run.status === 'queued') run.status = 'cancelled';
@@ -514,13 +543,19 @@ export class Engine {
       this.history(db, actor, `${resource}:${action}`);
     });
     if (resource === 'run' && action === 'cancel') this.controllers.get(id)?.abort();
+    return { revision: this.revision, ...(runId ? { runId } : {}) };
   }
   nextDue(): number | null {
     const values = [
       this.storage.sql.exec<{ due: number | null }>("SELECT min(due) AS due FROM wc_runs WHERE status = 'queued'").toArray()[0]?.due,
       this.storage.sql.exec<{ due: number | null }>('SELECT min(at) AS due FROM wc_schedules WHERE enabled = 1').toArray()[0]?.due,
     ].filter((value): value is number => typeof value === 'number');
-    for (const file of this.fileCleanupCandidates()) values.push(file.status === 'deleting' ? Date.now() + 60_000 : file.createdAt + 86_400_000);
+    const fileTable = this.definition.files?.table;
+    if (fileTable) {
+      const name = getTableName(this.definition.tables[fileTable] as any).replaceAll('"', '""');
+      const fileDue = this.storage.sql.exec<{ due: number | null }>(`SELECT min(CASE WHEN status = 'pending' THEN created_at + 86400000 ELSE ? END) AS due FROM "${name}" WHERE status IN ('pending', 'deleting')`, Date.now() + 60_000).toArray()[0]?.due;
+      if (typeof fileDue === 'number') values.push(fileDue);
+    }
     return values.length ? Math.min(...values) : null;
   }
   dispatchSchedules(now = Date.now()): void {
@@ -558,9 +593,12 @@ export class Engine {
     let steps = 0;
     let active = true;
     const controller = new AbortController();
+    let timedOut = false;
+    const deadline = job?.timeoutMs === undefined ? undefined : setTimeout(() => { timedOut = true; controller.abort(new WorkcoreError('RUN_TIMEOUT', 'Run deadline reached')); }, job.timeoutMs);
     this.controllers.set(run.id, controller);
     const current = () => {
       if (!active) throw new WorkcoreError('EXPIRED_CONTEXT', 'Run context is no longer active');
+      if (timedOut) throw new WorkcoreError('RUN_TIMEOUT', 'Run deadline reached');
       const saved = getJson<Run>(this.storage.sql, 'wc_runs', run.id)!;
       if (saved.cancelRequested || saved.status === 'cancelled') throw new WorkcoreError('CANCELLED', 'Cancellation requested');
       if (saved.status !== 'running') throw new WorkcoreError('EXPIRED_CONTEXT', 'Run is no longer executing');
@@ -639,15 +677,16 @@ export class Engine {
       current();
       run.status = 'completed'; run.result = result; delete run.error;
     } catch (error) {
-      const cancelled = controller.signal.aborted || !!getJson<Run>(this.storage.sql, 'wc_runs', run.id)?.cancelRequested || error instanceof WorkcoreError && error.code === 'CANCELLED';
+      const cancelled = !!getJson<Run>(this.storage.sql, 'wc_runs', run.id)?.cancelRequested || error instanceof WorkcoreError && error.code === 'CANCELLED';
       const terminal = error instanceof z.ZodError || (error instanceof WorkcoreError && ['FORBIDDEN', 'TOOL_DENIED', 'STEP_LIMIT', 'NOT_FOUND', 'UNREGISTERED_OPERATION'].includes(error.code));
-      const retry = !cancelled && !terminal && job?.kind === 'task' && run.attempt < Math.min(10, job.maxAttempts ?? 1);
-      run.status = cancelled ? 'cancelled' : retry ? 'queued' : 'failed';
-      run.error = error instanceof WorkcoreError ? error.code : 'EXECUTION_FAILED';
+      const retry = !timedOut && !cancelled && !terminal && job?.kind === 'task' && run.attempt < Math.min(10, job.maxAttempts ?? 1);
+      run.status = cancelled ? 'cancelled' : timedOut ? 'interrupted' : retry ? 'queued' : 'failed';
+      run.error = timedOut ? 'RUN_TIMEOUT' : error instanceof WorkcoreError ? error.code : 'EXECUTION_FAILED';
       run.due = Date.now() + Math.max(1000, job?.retryDelayMs ?? 5000);
       console.error(`Run ${run.id} ${run.status}`, error);
     }
     active = false;
+    if (deadline !== undefined) clearTimeout(deadline);
     this.controllers.delete(run.id);
     this.write(db => {
       const saved = getJson<Run>(this.storage.sql, 'wc_runs', run.id)!;

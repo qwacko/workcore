@@ -1,12 +1,14 @@
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
-import { asc, eq } from 'drizzle-orm';
-import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { asc, eq, sql } from 'drizzle-orm';
+import { blob, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { builtinTriggers, defineSchema, shouldRefreshView, workspace, WorkcoreError } from '../packages/core/src/index.js';
 import { Engine } from '../packages/core/src/engine.js';
 import type { MigrationBundle } from '../packages/core/src/index.js';
+import { copyBackupFiles, exportWorkspace, restoreWorkspace } from '../packages/core/src/backup.js';
+import type { WorkspaceBackup } from '../packages/core/src/backup.js';
 
 const bindings = env as unknown as { TEST: DurableObjectNamespace };
 const alice = { id: 'alice' };
@@ -46,6 +48,161 @@ async function withEngine(callback: (engine: Engine, state: DurableObjectState) 
 }
 
 describe('Drizzle workspace storage', () => {
+  it('guards raw SQL, CTE writes, relational reads, and retained database sessions', async () => {
+    let escaped: (() => unknown) | undefined;
+    const raw = app.query({ input: z.object({}), output: z.null(), handler: ({ db }) => {
+      expect(() => db.get(sql`INSERT INTO wc_kv (key, value) VALUES ('raw', 'true') RETURNING key`)).toThrow();
+      expect(() => db.all(sql`WITH a AS (SELECT 1) INSERT INTO wc_kv (key, value) VALUES ('cte', 'true') RETURNING key`)).toThrow();
+      expect(() => db.get(sql`CREATE TABLE escaped (id text)`)).toThrow();
+      expect(() => db.all(sql`SELECT 1; DELETE FROM notes;`)).toThrow();
+      expect(db.get(sql`SELECT 'a;b' AS value;`)).toEqual({ value: 'a;b' });
+      expect(db.get(sql`WITH a AS (SELECT 1 AS n) SELECT n FROM a`)).toEqual({ n: 1 });
+      const query = db.query.notes.findMany();
+      expect(query.sync()).toEqual([]);
+      escaped = () => query.sync();
+      return null;
+    } });
+    await withEngine((engine, state) => {
+      const revision = engine.revision;
+      engine.query(alice, 'raw', {});
+      expect(engine.revision).toBe(revision);
+      expect(state.storage.sql.exec('SELECT * FROM wc_kv').toArray()).toEqual([]);
+      expect(escaped).toThrow();
+    }, definition({ queries: { raw } }));
+  });
+
+  it('does not give authorization callbacks a writable context during mutations', async () => {
+    await withEngine((engine, state) => {
+      expect(() => engine.mutate(alice, 'add', { id: 'x', title: 'No' }, 'one')).toThrow();
+      expect(state.storage.sql.exec('SELECT * FROM notes').toArray()).toEqual([]);
+    }, definition({ authorize: ({ db }: any) => { db.insert(notes).values({ id: 'bad', title: 'No', ownerId: 'alice' }).run(); return true; } }));
+  });
+
+  it('returns retry lineage, filters failed runs, and reports bounded health', async () => {
+    const broken = app.task({ input: z.object({}), output: z.null(), handler: async () => { throw new WorkcoreError('EXPECTED', 'Expected'); } });
+    await withEngine(async engine => {
+      const first = engine.enqueue(alice, 'broken', {}, 'one').data as string;
+      await engine.executeNext();
+      expect(engine.system(alice, 'runs.list', { status: 'failed' })).toMatchObject({ rows: [{ id: first }] });
+      expect(engine.system(alice, 'runs.list', { status: 'queued' })).toMatchObject({ rows: [] });
+      const retry = engine.system(alice, 'runs.retry', { runId: first }) as { runId: string };
+      expect(retry.runId).not.toBe(first);
+      expect(engine.inspect(alice, `run:${retry.runId}`)).toMatchObject({ retryOf: first, actor: alice, status: 'queued' });
+      expect(engine.system(alice, 'health.inspect', {})).toMatchObject({ runs: { failed: 1, queued: 1 }, migration: 1, files: {} });
+      expect(() => engine.system({ id: 'bob' }, 'health.inspect', {})).toThrow('Access denied');
+    }, definition({ jobs: { broken } }));
+  });
+
+  it('expires timed-out task tools without retrying uncertain external effects', async () => {
+    let signal: AbortSignal | undefined;
+    let late: (() => unknown) | undefined;
+    const slow = app.task({ input: z.object({}), output: z.null(), timeoutMs: 10, maxAttempts: 3, handler: async ctx => {
+      signal = ctx.signal;
+      late = () => ctx.mutate(add, { id: 'late', title: 'No' });
+      await new Promise(resolve => ctx.signal.addEventListener('abort', resolve, { once: true }));
+      return null;
+    } });
+    await withEngine(async engine => {
+      const id = engine.enqueue(alice, 'slow', {}, 'one').data as string;
+      await engine.executeNext();
+      expect(signal?.aborted).toBe(true);
+      expect(engine.inspect(alice, `run:${id}`)).toMatchObject({ status: 'interrupted', error: 'RUN_TIMEOUT', attempt: 1 });
+      expect(late).toThrow('no longer active');
+      expect(engine.nextDue()).toBeNull();
+    }, definition({ jobs: { slow } }));
+  });
+
+  it('exports/restores atomic data, rejects mismatches, and never replays jobs/schedules', async () => {
+    const noop = app.task({ input: z.object({}), output: z.null(), handler: async () => null });
+    const schedule = app.mutation({ input: z.object({}), output: z.string(), handler: ctx => ctx.schedule(noop, {}, { at: ctx.now + 1000 }) });
+    const def = definition({ jobs: { noop }, mutations: { add, schedule } });
+    await withEngine((engine, state) => {
+      engine.mutate(alice, 'add', { id: 'a', title: 'Before' }, 'add');
+      const id = engine.enqueue(alice, 'noop', {}, 'job').data as string;
+      const scheduleId = engine.mutate(alice, 'schedule', {}, 'schedule').data as string;
+      const backup = exportWorkspace(state.storage, def, { maintenance: true });
+      state.storage.sql.exec("UPDATE notes SET title = 'After'");
+      const current = engine.revision;
+      expect(() => restoreWorkspace(state.storage, def, backup, { maintenance: true, confirm: 'replace-workspace', expectedRevision: current - 1 })).toThrow('changed');
+      expect(() => restoreWorkspace(state.storage, def, { ...backup, schema: 'wrong' }, { maintenance: true, confirm: 'replace-workspace', expectedRevision: current })).toThrow('Schema');
+      const malformed = structuredClone(backup);
+      malformed.tables.find(table => table.name === 'notes')!.rows.push(['a', 'Duplicate', 'alice', 0]);
+      expect(() => restoreWorkspace(state.storage, def, malformed, { maintenance: true, confirm: 'replace-workspace', expectedRevision: current })).toThrow();
+      expect(engine.query(alice, 'mine', {}).data).toEqual(['After']);
+      expect(restoreWorkspace(state.storage, def, JSON.parse(JSON.stringify(backup)), { maintenance: true, confirm: 'replace-workspace', expectedRevision: current })).toBeGreaterThan(current);
+      expect(engine.query(alice, 'mine', {}).data).toEqual(['Before']);
+      expect(engine.inspect(alice, `run:${id}`)).toMatchObject({ status: 'interrupted' });
+      expect(engine.inspect(alice, `schedule:${scheduleId}`)).toMatchObject({ enabled: false });
+      expect(state.storage.sql.exec('SELECT * FROM wc_requests').toArray()).toEqual([]);
+    }, def);
+  });
+
+  it('copies and size-verifies file bytes in both backup and restore directions', async () => {
+    const binding = env as unknown as { FILES_BUCKET: R2Bucket };
+    const key = `workcore/files/${crypto.randomUUID()}`;
+    await binding.FILES_BUCKET.put(key, 'backup bytes');
+    const objects = new Map<string, Uint8Array>();
+    const archive = {
+      async put(key: string, body: any) { objects.set(key, new Uint8Array(await new Response(body).arrayBuffer())); },
+      async head(key: string) { return objects.has(key) ? { size: objects.get(key)!.length } : null; },
+      async get(key: string) { const bytes = objects.get(key); return bytes ? { size: bytes.length, body: new Blob([Uint8Array.from(bytes).buffer]).stream() } : null; },
+      async delete(key: string) { objects.delete(key); },
+    };
+    const backup = { format: 1 as const, createdAt: Date.now(), revision: 1, schema: '', tables: [], files: [{ key, size: 12 }] };
+    await copyBackupFiles(backup, binding.FILES_BUCKET, archive);
+    await binding.FILES_BUCKET.delete(key);
+    await copyBackupFiles(backup, archive, binding.FILES_BUCKET);
+    expect(await (await binding.FILES_BUCKET.get(key))!.text()).toBe('backup bytes');
+    await expect(copyBackupFiles({ ...backup, files: [{ key, size: 13 }] }, archive, binding.FILES_BUCKET)).rejects.toThrow('Missing or changed');
+  });
+
+  it('round-trips binary values and foreign keys, and rolls back corrupt foreign-key restores', async () => {
+    const attachments = sqliteTable('attachments', { id: text('id').primaryKey(), noteId: text('note_id').notNull().references(() => notes.id), bytes: blob('bytes').notNull() });
+    const bundle = { journal: { entries: [...initial.journal.entries, { idx: 1, when: 2, tag: 'attachments', breakpoints: true }] }, migrations: { ...initial.migrations, m0001: 'CREATE TABLE attachments (id text PRIMARY KEY NOT NULL, note_id text NOT NULL REFERENCES notes(id), bytes blob NOT NULL);' } };
+    const def = definition({ tables: defineSchema({ notes, attachments }), migrations: bundle });
+    await withEngine((engine, state) => {
+      engine.mutate(alice, 'add', { id: 'parent', title: 'Parent' }, 'one');
+      state.storage.sql.exec('INSERT INTO attachments (id, note_id, bytes) VALUES (?, ?, ?)', 'a', 'parent', Uint8Array.from([0, 255, 1, 127]).buffer);
+      const backup = JSON.parse(JSON.stringify(exportWorkspace(state.storage, def, { maintenance: true })));
+      const options = { maintenance: true as const, confirm: 'replace-workspace' as const, expectedRevision: engine.revision };
+      restoreWorkspace(state.storage, def, backup, options);
+      const row = state.storage.sql.exec<{ bytes: ArrayBuffer }>('SELECT bytes FROM attachments').toArray()[0]!;
+      expect([...new Uint8Array(row.bytes)]).toEqual([0, 255, 1, 127]);
+      const corrupted = structuredClone(backup);
+      const table = corrupted.tables.find((table: any) => table.name === 'attachments');
+      table.rows[0][table.columns.indexOf('note_id')] = 'missing';
+      expect(() => restoreWorkspace(state.storage, def, corrupted, { ...options, expectedRevision: engine.revision })).toThrow();
+      expect(state.storage.sql.exec('SELECT note_id FROM attachments').toArray()).toEqual([{ note_id: 'parent' }]);
+      expect(() => exportWorkspace(state.storage, def, { maintenance: true, maxBytes: 10 })).toThrow();
+    }, def);
+  });
+
+  it('rejects backup schemas whose trigger effects or unregistered dependents cannot be restored faithfully', async () => {
+    await withEngine((_engine, state) => {
+      state.storage.sql.exec('CREATE TABLE legacy (note_id text REFERENCES notes(id) ON DELETE CASCADE)');
+      expect(() => exportWorkspace(state.storage, definition(), { maintenance: true })).toThrow('unregistered');
+      state.storage.sql.exec('DROP TABLE legacy');
+      state.storage.sql.exec("CREATE TRIGGER audit_note AFTER INSERT ON notes BEGIN INSERT INTO wc_kv (key, value) VALUES (new.id, 'true'); END");
+      expect(() => exportWorkspace(state.storage, definition(), { maintenance: true })).toThrow('triggers');
+    });
+  });
+
+  it('restores a serialized snapshot into a separately initialized workspace', async () => {
+    let backup: WorkspaceBackup;
+    await withEngine((engine, state) => {
+      engine.mutate(alice, 'add', { id: 'source', title: 'Source record' }, 'one');
+      state.storage.sql.exec('INSERT INTO wc_kv (key, value) VALUES (?, ?)', 'private-setting', '{"enabled":true}');
+      backup = JSON.parse(JSON.stringify(exportWorkspace(state.storage, definition(), { maintenance: true })));
+    });
+    await withEngine((engine, state) => {
+      engine.mutate(alice, 'add', { id: 'target', title: 'Replaced record' }, 'two');
+      const next = restoreWorkspace(state.storage, definition(), backup!, { maintenance: true, confirm: 'replace-workspace', expectedRevision: engine.revision });
+      expect(engine.revision).toBe(next);
+      expect(engine.query(alice, 'mine', {}).data).toEqual(['Source record']);
+      expect(state.storage.sql.exec('SELECT value FROM wc_kv WHERE key = ?', 'private-setting').toArray()).toEqual([{ value: '{"enabled":true}' }]);
+      expect(() => engine.query({ id: 'bob' }, 'mine', {})).toThrow('Access denied');
+    });
+  });
   it('matches wildcard, empty, and keyed view dependencies', () => {
     const changed = new Set(['notes', builtinTriggers.history]);
     expect(shouldRefreshView(undefined, changed)).toBe(true);

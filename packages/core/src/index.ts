@@ -3,6 +3,7 @@ export type { Actor, Database, Definition, FileBucket, Json, Job, MigrationBundl
 export type { Run, Schedule } from './store.js';
 export { workcoreSchema } from './schema.js';
 export { builtinTriggers, shouldRefreshView } from './triggers.js';
+export { versionMatch, requireChanged } from './concurrency.js';
 export type { BuiltinTriggerKey, Trigger, TriggerKey } from './triggers.js';
 export { WorkcoreError, encode as encodeJson } from './json.js';
 export { displayDocumentSchema, field, ui, manifestSchema } from './ui.js';

@@ -54,7 +54,11 @@
   async function control(action: 'retry' | 'cancel') {
     if (!$session || !runId) return;
     if (action === 'retry' && !confirm('Create a new run? Previous external effects may already have happened.')) return;
-    try { await $session.client.system(action === 'retry' ? 'runs.retry' : 'runs.cancel', { runId }); $session.sources.refresh(); }
+    try {
+      const result = await $session.client.system(action === 'retry' ? 'runs.retry' : 'runs.cancel', { runId });
+      $session.sources.refresh();
+      if (result && typeof result === 'object' && !Array.isArray(result) && typeof result.runId === 'string' && host.runHref) await host.navigate(host.runHref(result.runId));
+    }
     catch (error) { traceError = error instanceof Error ? error.message : 'Run action failed'; }
   }
 </script>

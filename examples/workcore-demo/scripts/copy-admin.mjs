@@ -1,2 +1,2 @@
-import { cp } from 'node:fs/promises';
-await cp(new URL('../../../packages/admin/build/', import.meta.url), new URL('../build/admin-assets/', import.meta.url), { recursive: true });
+import { copyAdminAssets } from '@workcore/admin/assets';
+await copyAdminAssets(new URL('../build/admin-assets/', import.meta.url));

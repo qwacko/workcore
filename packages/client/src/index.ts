@@ -18,6 +18,7 @@ export type Subscription<T> = {
   whenRevision(revision: number, timeoutMs?: number): Promise<void>;
 };
 export type LiveSystemOperation =
+  | 'health.inspect'
   | 'runs.list'
   | 'runs.inspect'
   | 'runs.trace'
@@ -483,7 +484,7 @@ export function createClient<A extends Definition>(options: ClientOptions) {
       resource: 'run' | 'schedule',
       id: string,
       action: 'retry' | 'cancel' | 'enable' | 'disable',
-    ): Promise<{ revision: number }> {
+    ): Promise<{ revision: number; runId?: string }> {
       return write('control', { resource, id, action });
     },
     system(name: keyof Manifest['system'] & string, input: Json = {}): Promise<Json> {

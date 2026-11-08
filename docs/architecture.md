@@ -16,7 +16,7 @@ The database stores:
 
 This is SQLite embedded in the Durable Object, **not D1**. No separate database, Redis, event server, scheduler process or queue worker is required.
 
-Workspace names are routed with `namespace.idFromName`. They are identifiers, not credentials. Each definition's `authorize` callback must check current membership in the selected workspace.
+Workspace names are routed with `namespace.idFromName`. They are identifiers, not credentials. Each definition's `authorize` callback applies the application's current access policy; handlers enforce record-level permissions. A workspace is a storage/coordination boundary, not a prescribed team or membership model.
 
 ## The local transaction boundary
 
