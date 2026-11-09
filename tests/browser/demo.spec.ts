@@ -28,6 +28,36 @@ async function mutate(page: Page, workspace: string, name: string, input: unknow
   return (await result.json()).data;
 }
 
+test('mobile sign out invalidates the session and stays signed out after reload', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signup(page);
+  await page.getByRole('button', { name: 'Workspace menu' }).click();
+  const requestPromise = page.waitForRequest('/api/auth/sign-out');
+  await page.getByRole('menuitem', { name: 'Sign out', exact: true }).click();
+  const request = await requestPromise;
+  expect(request.headers()['content-type']).toBe('application/json');
+  expect(request.postDataJSON()).toEqual({});
+  await expect(page.getByRole('button', { name: 'Workspace menu' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: /Your work/ })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('heading', { name: /Your work/ })).toBeVisible();
+  const session = await page.request.get('/api/auth/get-session');
+  expect(await session.json()).toBeNull();
+});
+
+test('failed sign out reports the server error without pretending the session ended', async ({ page }) => {
+  await signup(page);
+  await page.route('**/api/auth/sign-out', route => route.fulfill({
+    status: 403,
+    contentType: 'application/json',
+    body: JSON.stringify({ message: 'Invalid origin' }),
+  }));
+  await page.getByRole('button', { name: 'Workspace menu' }).click();
+  await page.getByRole('menuitem', { name: 'Sign out', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Could not sign out (403): Invalid origin');
+  await expect(page.getByRole('button', { name: 'Workspace menu' })).toBeVisible();
+});
+
 test('custom shadcn chat creates an interactive task card, and task changes stay live across sections', async ({
   page,
 }) => {

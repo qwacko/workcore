@@ -101,9 +101,17 @@
     }
   }
   async function signout() {
+    error = '';
     try {
-      const response = await fetch('/api/auth/sign-out', { method: 'POST' });
-      if (!response.ok) throw new Error('Could not sign out');
+      const response = await fetch('/api/auth/sign-out', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null) as { message?: string } | null;
+        throw new Error(`Could not sign out (${response.status})${data?.message ? `: ${data.message}` : ''}`);
+      }
       taskClient?.close();
       noteClient?.close();
       taskClient = null;
