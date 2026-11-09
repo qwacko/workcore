@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — Unreleased
+## 0.1.0 — 2026-11-09
 
 Initial Cloudflare-first release, intended first for applications authored by the maintainer. The 0.x public API may change.
 

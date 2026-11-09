@@ -43,7 +43,7 @@ Serve those files through the host's asset binding and `serveAdmin` from `@workc
 - **Publish a GitHub Release:** checks out its exact `vX.Y.Z` tag, verifies every package version and repository field, requires finalized changelog notes, runs all checks, packs the five libraries, and attaches their tarballs and `release-manifest.json` to that GitHub Release. It publishes to npm **only if** repository variable `NPM_PUBLISH_ENABLED` is exactly `true`.
 - **Actions → Release packages → Run workflow:** takes an existing tag and verifies/packs it only. It never publishes to npm or modifies a GitHub Release, even when npm publication is enabled. Download its `npm-release` Actions artifact to inspect the result.
 
-The workflow uses GitHub-hosted Ubuntu runners, Node 24, pinned actions, and npm 11.21.0. Only the publish job can request an OIDC token; only the release-asset job can write GitHub contents. The publish job installs no project dependencies and does not rebuild anything: it consumes exactly the verified artifact. Releases are serialized and a running publication is never automatically canceled.
+The workflow uses GitHub-hosted Ubuntu 24.04 runners, Node 24, pinned Node-24-compatible actions, and npm 11.21.0. Only the publish job can request an OIDC token; only the release-asset job can write GitHub contents. The publish job installs no project dependencies and does not rebuild anything: it consumes exactly the verified artifact. Releases are serialized and a running publication is never automatically canceled.
 
 ### Do I need Cloudflare automatic deployment first?
 
