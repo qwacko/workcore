@@ -134,7 +134,7 @@ Only import the application **type** into browser code. Authenticate in the host
 
 These are separate actions:
 
-- **Cloudflare application:** configure the example's D1 database, R2 bucket, auth secrets and public origin, then run `pnpm deploy`. See the [example deployment instructions](examples/workcore-demo/README.md#cloudflare-deployment). `pnpm build` only builds and performs a deployment dry run.
+- **Cloudflare application:** configure the example's D1 database, R2 bucket, auth secrets and public origin, then run `pnpm run deploy`. See the [example deployment instructions](examples/workcore-demo/README.md#cloudflare-deployment). `pnpm build` only builds and performs a deployment dry run.
 - **npm libraries:** publish a versioned GitHub Release to trigger verification, pnpm packing and release-asset upload. npm publication is opt-in via `NPM_PUBLISH_ENABLED=true`, uses OIDC and waits for any `npm-release` environment approval. Keep the root and example private. See the [one-time setup, initial npm bootstrap and release instructions](docs/publishing.md).
 
 `pnpm test:packages` checks the packed artifacts without publishing. It also builds the existing todo/notes example against those artifacts, so a separate new application is not a prerequisite for this release check.

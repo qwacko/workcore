@@ -138,7 +138,7 @@
     <div>
       <div class="mb-7 flex items-center gap-2 font-semibold text-primary">
         <Layers class="size-5" />workcore
-        <span class="font-normal text-muted-foreground">/ demo</span>
+        <span class="font-normal text-muted-foreground">/ Cloudflare demo</span>
       </div>
       <h1 class="text-4xl leading-tight font-semibold tracking-tight">
         Your work.

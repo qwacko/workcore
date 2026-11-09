@@ -13,7 +13,7 @@
     "test:e2e": "pnpm --filter workcore-demo build:ui && playwright test",
     "test:packages": "pnpm --filter './packages/*' build && node scripts/package-smoke.mjs",
     "dev": "pnpm --filter workcore-demo dev",
-    "deploy": "pnpm --filter workcore-demo deploy",
+    "deploy": "pnpm --filter workcore-demo run deploy",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs"
   },

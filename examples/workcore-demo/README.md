@@ -67,10 +67,10 @@ pnpm --filter workcore-demo exec wrangler secret put BETTER_AUTH_URL --env=''
 5. Deploy explicitly when ready:
 
    ```sh
-   pnpm deploy
+   pnpm run deploy
    ```
 
-   The command rebuilds, performs a dry run and then deploys the Worker/static assets. Open the configured public origin, sign up/sign in, create a todo and a note, and verify updates across two tabs. Grant administrator inspection using the earlier instructions only to a trusted account. Check the Files page and a scheduled job if using those capabilities.
+    Use `pnpm run deploy` explicitly: `pnpm deploy` invokes pnpm's built-in package deployment command instead of this repository's script. The command rebuilds, performs a dry run and then deploys the Worker/static assets. Open the configured public origin, sign up/sign in, create a todo and a note, and verify updates across two tabs. Grant administrator inspection using the earlier instructions only to a trusted account. Check the Files page and a scheduled job if using those capabilities.
 
 This sample permits account creation without email verification; choose the appropriate authentication policy before exposing it publicly. Rehearse [backup and recovery](../../docs/recovery.md) before putting important data into it.
 

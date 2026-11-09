@@ -71,6 +71,8 @@
           <MoreHorizontal class="size-4" />
         </DropdownMenu.Trigger>
         <DropdownMenu.Content align="end">
+          <DropdownMenu.Label>Cloudflare demo</DropdownMenu.Label>
+          <DropdownMenu.Separator />
           <DropdownMenu.Item
             onSelect={() => location.assign(`/admin/${section === 'notes' ? 'notes' : 'demo'}`)}
           >
