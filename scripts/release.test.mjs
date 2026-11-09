@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { assertReleaseEvent, compareVersions, packageDirectories, publicationPlan, publishRelease, registryMetadata, releaseConfig, releaseVersion, validatePacked, verifyArtifacts } from './release.mjs';
+import { assertReleaseEvent, compareVersions, packageDirectories, publicationPlan, publishRelease, registryMetadata, releaseConfig, releaseVersion, validatePacked, verifyArtifacts, waitForPublication } from './release.mjs';
 
 const sri = value => `sha512-${createHash('sha512').update(value).digest('base64')}`;
 const pkg = { name: '@workcore/core', file: 'workcore-core-0.1.0.tgz', integrity: sri('core') };
@@ -105,6 +105,40 @@ test('partial publication can resume without republishing verified versions', as
     },
   });
   assert.deepEqual(calls, ['/artifacts/workcore-client-0.1.0.tgz']);
+});
+
+test('publication visibility waits for both the version and dist-tag without republishing', async () => {
+  let elapsed = 0;
+  const responses = [new Response('{}', { status: 404 }), Response.json({ ...metadata(), 'dist-tags': { latest: '0.0.9' } }), Response.json(metadata())];
+  await waitForPublication(manifest, pkg, {
+    request: async () => responses.shift(),
+    now: () => elapsed,
+    wait: async milliseconds => { elapsed += milliseconds; },
+  });
+  assert.equal(elapsed, 20_000);
+  assert.equal(responses.length, 0);
+});
+
+test('publication visibility has a bounded timeout and never retries integrity or registry errors', async () => {
+  let elapsed = 0;
+  await assert.rejects(waitForPublication(manifest, pkg, {
+    request: async () => new Response('{}', { status: 404 }),
+    now: () => elapsed,
+    wait: async milliseconds => { elapsed += milliseconds; },
+    timeout: 25_000,
+  }), /timed out waiting/);
+  assert.equal(elapsed, 25_000);
+  const wait = async () => { assert.fail('Must fail immediately'); };
+  for (const integrity of [sri('wrong'), undefined]) {
+    const remote = metadata();
+    remote.versions['0.1.0'].dist.integrity = integrity;
+    await assert.rejects(waitForPublication(manifest, pkg, {
+      request: async () => Response.json(remote), wait,
+    }), /integrity mismatch/);
+  }
+  await assert.rejects(waitForPublication(manifest, pkg, {
+    request: async () => new Response('{}', { status: 403 }), wait,
+  }), /refusing to assume/);
 });
 
 test('artifact verification rejects changed checksums and traversal before running tar or npm', async () => {

@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const packageDirectories = ['core', 'client', 'files', 'ai', 'admin'];
 const registry = 'https://registry.npmjs.org';
@@ -131,15 +132,28 @@ export function publicationPlan(manifest, metadata) {
     return { ...pkg, skip: false };
   });
 }
+export async function waitForPublication(manifest, pkg, { request = fetch, wait = delay, now = () => performance.now(), timeout = 300_000 } = {}) {
+  const deadline = now() + timeout;
+  for (;;) {
+    const remote = await registryMetadata(pkg.name, request);
+    const published = remote?.versions[manifest.version];
+    if (published) {
+      assert.equal(published.dist?.integrity, pkg.integrity, `${pkg.name}@${manifest.version}: published integrity mismatch; refusing to continue`);
+      if (remote['dist-tags'][manifest.distTag] === manifest.version) return;
+    }
+    const remaining = deadline - now();
+    assert(remaining > 0, `${pkg.name}@${manifest.version}: timed out waiting for registry visibility and ${manifest.distTag}; check npm, then rerun only the failed job with the original artifacts`);
+    console.log(`Waiting for npm to expose ${pkg.name}@${manifest.version} with verified integrity and ${manifest.distTag}...`);
+    await wait(Math.min(10_000, remaining));
+  }
+}
 export async function publishRelease(manifest, directory, { request = fetch, publish = path => execute('npm', ['publish', path, '--ignore-scripts', '--access', 'public', '--tag', manifest.distTag, `--registry=${registry}`], { stdio: 'inherit' }) } = {}) {
   // Preflight EVERY package before any publication; five npm publishes are not atomic.
   const plan = publicationPlan(manifest, await Promise.all(manifest.packages.map(pkg => registryMetadata(pkg.name, request))));
   for (const pkg of plan) {
     if (pkg.skip) { console.log(`Already published, integrity verified: ${pkg.name}@${manifest.version}`); continue; }
     await publish(join(directory, pkg.file));
-    const remote = await registryMetadata(pkg.name, request);
-    assert.equal(remote?.versions[manifest.version]?.dist?.integrity, pkg.integrity, 'Published version not yet visible with expected integrity; rerun the failed job after checking npm');
-    assert.equal(remote?.['dist-tags'][manifest.distTag], manifest.version, 'Unexpected npm dist-tag after publishing');
+    await waitForPublication(manifest, pkg, { request });
   }
 }
 export function assertReleaseEvent(environment, tag) {
