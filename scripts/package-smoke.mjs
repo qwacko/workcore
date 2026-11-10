@@ -95,16 +95,14 @@ try {
   run(join(root, 'node_modules/.bin/wrangler'), ['deploy', '--dry-run', '--outdir', 'bundle']);
 
   // Check the published usage instructions too, including first migration generation.
-  const readme = await readFile(join(root, 'README.md'), 'utf8');
   const guide = await readFile(join(root, 'docs/getting-started.md'), 'utf8');
   const starter = join(temp, 'documented-usage');
   await mkdir(join(starter, 'src'), { recursive: true });
   await mkdir(join(starter, 'scripts'));
   await writeFile(join(starter, 'package.json'), JSON.stringify({ type: 'module' }));
-  for (const filename of ['src/schema.ts', 'src/worker.ts', 'src/auth.ts', 'drizzle.config.ts', 'scripts/ingest-migrations.mjs']) {
+  for (const filename of ['src/schema.ts', 'src/app.ts', 'src/client.ts', 'src/worker.ts', 'src/auth.ts', 'drizzle.config.ts', 'scripts/ingest-migrations.mjs']) {
     await writeFile(join(starter, filename), documentedFile(guide, filename));
   }
-  await writeFile(join(starter, 'src/app.ts'), documentedFile(readme, 'src/app.ts'));
   await symlink(await realpath(join(root, 'examples/workcore-demo/node_modules/drizzle-kit')), join(modules, 'drizzle-kit'));
   run(join(root, 'examples/workcore-demo/node_modules/.bin/drizzle-kit'), ['generate'], starter);
   run(process.execPath, ['scripts/ingest-migrations.mjs'], starter);

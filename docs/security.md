@@ -39,6 +39,14 @@ Permission checks happen on each subscription refresh and every commit, even whe
 
 No rich-value codecs are supported. Dates, undefined, non-finite numbers, bigint, cycles, custom object prototypes and lossy JSON representations are rejected. Schemas must have an honest JSON Schema representation.
 
+## Error contract
+
+Application JSON API failures use an HTTP error status and `{ error: { code, message } }`. Throw `WorkcoreError(code, message, status = 400)` for an intentional application error. HTTP client calls translate structured server failures into `ClientError` with a `code`, `message` and numeric `status`; native transport/parsing failures may still be ordinary exceptions. Live subscription failures arrive as `LiveState.error`, not an HTTP exception to catch around `subscribe`.
+
+Important cases include unauthenticated/expired sessions (401), denied operations (403), unavailable/stale owner/version writes (`CONFLICT`, 409), oversized JSON (`TOO_LARGE`, 413), invalid plain JSON (`INVALID_JSON`), attempted asynchronous synchronous handlers (`ASYNC_TRANSACTION`), client teardown (`CLIENT_CLOSED`) and revision waits (`SYNC_TIMEOUT`). Read the returned code/status rather than treating every failure as a retryable network problem.
+
+Host authentication providers have their own response format. For example, Better Auth's sign-out route requires JSON content type/body; it is not a Workcore workspace endpoint. Do not bypass origin or permission checks to resolve a request-format error.
+
 ## Operational limitations
 
 This is an initial implementation. Before production use, account for:

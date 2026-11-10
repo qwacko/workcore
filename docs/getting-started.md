@@ -1,15 +1,17 @@
 # Use Workcore in your application
 
-For the first release, the existing todo/notes example is the runnable reference. You do not need to invent another example app to validate Workcore. Building/deploying that application and publishing the reusable npm packages are separate steps; see [example deployment](https://github.com/qwacko/workcore/tree/main/examples/workcore-demo#cloudflare-deployment) and [package publication](./publishing).
+Using a coding agent? Start with the [documentation map and implementation checklist](./coding-agents). For trusted identity, handler context, environment bindings and domain inputs, read [Context and identity](./context).
 
-This guide shows how those same APIs fit into a consuming application. Commands using `@workcore/*@0.1.0` apply once that version has been published. Until then, use packed tarballs as described in the publishing guide.
+This tutorial builds the minimal schema → operations → authenticated Worker → browser client integration in a separate repository. It requires Node.js 22.17+, pnpm, TypeScript/ESM and Cloudflare SQLite Durable Objects. For the runnable todo/notes application instead, see [the example and deployment guide](./deployment).
+
+The commands below pin the coordinated `0.1.1` packages. Check availability when selecting another version; use matching versions for all Workcore packages. The website can document changes newer than a published package: verify installed declarations and the matching release tag.
 
 ## 1. Install the packages
 
 Use Node.js 22.17+ and an ESM TypeScript project:
 
 ```sh
-pnpm add @workcore/core@0.1.0 @workcore/client@0.1.0 drizzle-orm@^0.45.4 zod@^4.6.7
+pnpm add @workcore/core@0.1.1 @workcore/client@0.1.1 drizzle-orm@^0.45.4 zod@^4.6.7
 pnpm add -D typescript wrangler drizzle-kit @cloudflare/workers-types
 ```
 
@@ -78,7 +80,40 @@ Commit the SQL, snapshots, journal and `src/migrations.ts` together. Workcore ap
 
 ## 4. Define operations
 
-Use the `src/app.ts` example in the [repository README](https://github.com/qwacko/workcore#authoring). It defines `addTodo`, an owner-filtered `myTodos` view and an operation allowlist; it imports the `schema.ts` and generated `migrations.ts` from the preceding steps.
+Create the application definition using the schema and generated migration bundle from the preceding steps:
+
+```ts
+// src/app.ts
+import { eq } from 'drizzle-orm';
+import { z } from 'zod';
+import { workspace } from '@workcore/core';
+import { schema, todos } from './schema.js';
+import migrations from './migrations.js';
+
+const app = workspace(schema, migrations, { triggerKeys: ['todos'] as const });
+const addTodo = app.mutation({
+  input: z.object({ title: z.string().min(1).max(200) }),
+  output: z.string(),
+  triggers: ['todos'],
+  handler: ({ db, actor }, input) => {
+    const id = crypto.randomUUID();
+    db.insert(todos).values({ id, ownerId: actor.id, title: input.title }).run();
+    return id;
+  },
+});
+const myTodos = app.view({
+  input: z.object({}),
+  output: z.array(z.object({ id: z.string(), title: z.string() })),
+  dependsOn: ['todos'],
+  handler: ({ db, actor }) => db.select({ id: todos.id, title: todos.title })
+    .from(todos).where(eq(todos.ownerId, actor.id)).orderBy(todos.id).limit(501).all(),
+});
+export const application = app.define({
+  mutations: { addTodo }, views: { myTodos }, queries: {}, jobs: {},
+  authorize: ({ actor }, action) => !!actor.id &&
+    ['$connect', 'mutation:addTodo', 'view:myTodos'].includes(action),
+});
+```
 
 An array view defaults to 500 rows. Its SQL query fetches 501 rows so Workcore rejects an oversized live result rather than silently presenting an incomplete collection. Larger datasets need an indexed, cursor-paginated query. SQL `.all()` does not automatically add a LIMIT.
 
@@ -156,13 +191,31 @@ The last command does not deploy. Once host authentication, permissions, configu
 
 ## 6. Use the client
 
-Use the typed `createClient<typeof application>` example in the README from your browser application. Import `application` with `import type` so the server implementation stays out of the browser bundle. Serve the frontend and API under the same origin; Workcore's host helper rejects cross-origin browser requests.
+In the browser application, create a client after sign-in. Import `application` with `import type` so the server implementation stays out of the browser bundle. Serve the frontend and API under the same origin; Workcore's host helper rejects cross-origin browser requests.
+
+```ts
+// src/client.ts
+import { createClient } from '@workcore/client';
+import type { application } from './app.js';
+
+const client = createClient<typeof application>({ baseUrl: '/api/workspaces/demo' });
+const subscription = client.subscribe('myTodos', {}, state => {
+  if (state.status === 'live') console.log(state.data);
+  // A real UI must also render loading, stale/reconnecting and error states.
+});
+const result = await client.mutate('addTodo', { title: 'Ship something small' });
+await subscription.whenRevision(result.revision);
+// On component teardown, release its subscription.
+subscription.unsubscribe();
+// On application teardown or identity change, close the shared client.
+client.close();
+```
 
 Call `query` for one-shot reads, `mutate` for writes, and `subscribe` for live view state. Handle error/reconnecting states, release subscriptions and close the client on teardown or sign-in identity changes. Keep a request ID for an identical retry after an uncertain network response. Request deduplication does not replace optimistic concurrency checks.
 
 ## Optional admin and coding-agent guidance
 
-Install `@workcore/admin@0.1.0` and use `copyAdminAssets` from `@workcore/admin/assets` during your Node build to copy the prebuilt SPA into your Worker's static assets. Serve `/admin` through `serveAdmin` from `@workcore/admin/server`; the example's `scripts/copy-admin.mjs` and `src/worker.ts` show the complete routing. The SPA is compiled for `/admin`. No Svelte build is required in a consuming app. Page access does not bypass operation permissions or grant `$admin`.
+Install `@workcore/admin@0.1.1` if needed and follow [console installation](./admin#install-and-serve-the-optional-console). It uses prebuilt assets; your application does not need a Svelte build. Page access does not bypass operation permissions or grant `$admin`.
 
 `@workcore/core` includes `AGENTS.example.md` for coding agents working in consuming apps:
 
@@ -171,4 +224,11 @@ Install `@workcore/admin@0.1.0` and use `copyAdminAssets` from `@workcore/admin/
 cp node_modules/@workcore/core/AGENTS.example.md ./AGENTS.md
 ```
 
-Adapt the paths and verification commands to your app. The template describes the library's real APIs, schema/migration workflow, permission boundaries, live subscriptions, background execution, and release safety; it is not a runtime AI system prompt.
+Adapt the paths and verification commands to your app. The template supplies a documentation reading map and essential safety boundaries; it is not an API manual or a runtime AI system prompt.
+
+## Next steps
+
+- [Application authoring](./authoring): richer reads/writes, schema changes and invalidation.
+- [Client guide](./custom-frontends) and [client reference](./client-api): integrate the UI lifecycle, errors and other methods.
+- [Context](./context) and [permissions](./multi-user): design identity, access policy and concurrent editing.
+- [Public API index](./reference): find optional features and exact entry points.

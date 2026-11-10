@@ -2,7 +2,56 @@
 
 Workcore's console is a SvelteKit client-rendered SPA, compiled with the static adapter. A Cloudflare Worker serves its assets under `/admin`; the browser uses the normal HTTP/WebSocket client. No SSR or SvelteKit server is deployed.
 
+## Install and serve the optional console
+
+Install `@workcore/admin` at the coordinated version used by your other Workcore packages. It ships a prebuilt SPA, so a consuming app does not need to compile Svelte or adopt the admin renderer for its own frontend.
+
+1. In a **Node build script**, import `copyAdminAssets` from `@workcore/admin/assets` and copy the compiled assets into the Worker's static asset directory. See the snippet below and the demo's `scripts/copy-admin.mjs`.
+2. Configure Wrangler's assets binding (`ASSETS`), `run_worker_first: true` and SPA fallback. Route the admin request before the application's own SPA fallback. If the app and admin share an asset directory, preserve their separate fallback paths as in the demo Worker.
+3. Authenticate access to `/admin`, then call `serveAdmin` from `@workcore/admin/server` with the admin asset fetcher. The console uses the same-origin `/api/workspaces/` endpoints; keep those behind `routeWorkspace` authentication.
+4. Open `/admin/<workspace-key>`. Registered operation schemas supply generated forms and an operation explorer even without custom display pages. Add the optional metadata below to improve those presentations.
+5. Explicitly decide who gets `$admin` inspection/control privileges. Merely serving or opening the console does not grant them. Normal operations remain authorized under the current actor, and private fields must be excluded by server handlers, not just hidden in display metadata.
+
+The demo's complete [Worker routing](https://github.com/qwacko/workcore/blob/main/examples/workcore-demo/src/worker.ts) and [administrator setup](https://github.com/qwacko/workcore/tree/main/examples/workcore-demo#administrator-access) are the reference for combined application/admin hosting. An application-defined dashboard need not grant `$admin`; that privilege exposes much more than ordinary owner-filtered views.
+
+```js
+// Node build tooling; adapt the output to your Worker's assets directory.
+import { copyAdminAssets } from '@workcore/admin/assets';
+await copyAdminAssets(new URL('./public/admin-assets/', import.meta.url));
+```
+
+## Display contract
+
 The console discovers the current actor's application through manifest protocol 3 and display protocol 3. Applications declare display documents; the frontend owns layout, responsive behaviour and components. Documents have stable node IDs and contain serialisable operation references, never executable functions, templates or HTML. Earlier protocol versions are intentionally unsupported by this in-repository breaking change.
+
+## UI helper reference
+
+Import `ui` from `@workcore/core`. These builders create definition data; they do not execute operations, install frontend components or grant permissions. Source/target arguments are registered operation objects, not invented endpoint strings. `BlockBase` options such as `id`, `title` and `description` supply stable node identity and presentation. Use installed declarations for full generic option shapes.
+
+| Helper | Inputs/result | Contract |
+| --- | --- | --- |
+| `ui.document(definition)` | `{ blocks, ... }` → document definition | Root composition; compiled/validated during runtime setup/resolution |
+| `ui.display(definition)` | Display metadata and static document or handler | Define a named display; `app.display` supplies the workspace context type for dynamic handlers |
+| `ui.collection(source, configure)` | Read operation and helper callback → collection block | Array/page rows with local presentation/filtering/actions; not a server search index |
+| `ui.record(source, options)` | Read operation, optional typed fields/input → record block | Authorized selected fields |
+| `ui.json(source, options)` | Read operation → JSON block | Technical presentation of already authorized data |
+| `ui.markdown(source, options)` | Read operation, optional result path → Markdown block | Sanitized presentation, not executable HTML |
+| `ui.form(target, options)` | Mutation/job, label/fixed values/effects → form block | Generated validated submission; does not bypass target authorization |
+| `ui.button(target, options)` | Mutation/job, label/variant/effects → action button | Declared action UI, not a browser callback |
+| `ui.chat(source, send, options)` | Read/send operations plus message field mapping → chat block | Application owns persistence, history and agent context |
+| `ui.system(options)` | Resource, operation-index, operation, run-detail or health options | Administrative presentation; independent system authorization |
+| `ui.custom(component, version, props, options)` | Registered contract name/version and validated props | Requires host-local renderer implementation; no downloaded executable UI |
+| `ui.section(options)` | Child nodes and optional appearance | Semantic container |
+| `ui.columns(options)` | One to four child columns, optional gap | Bounded responsive composition |
+| `ui.dialog(options)` | Trigger label and child nodes | Renderer-owned dialog lifecycle |
+| `ui.displayReference(display, options)` | Registered display name and optional input | Embed another authorized display; recursion/depth budgets still apply |
+| `ui.state(schema, options)` | Zod schema, default, optional memory/URL persistence | Typed display-local state, not server storage |
+| `ui.stateControl(state, options)` | Declared state name, label and finite choices | Change local display state; does not mutate application data |
+| `ui.combined.masterDetail(listSource, detailSource, options)` | List/detail operations and typed key/input mapping | Convenience composition using normal nodes and independent authorized reads |
+
+Binding helpers produce tagged data, not expressions: `ui.bind.property(path)` reads a validated display input, `ui.bind.selection(node)` reads the selected key, and `ui.bind.state(name)` reads declared display state.
+
+Success effects are `ui.effect.setState(name, value)`, `resetState(name)`, `resetForm()`, `closeDialog()`, `refreshSources()` and `navigate(display, bind)`. They run only after a submission is accepted; acceptance of a job is not completion. `navigate` maps declared result paths, not arbitrary script execution. See the examples below and the [display protocol](./display-protocol) for state lifetime, recursion, renderer compatibility and bounds.
 
 ## Field hints on ordinary Zod schemas
 

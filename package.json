@@ -12,6 +12,7 @@
     "test": "pnpm --filter workcore-demo build:ui && node --test scripts/*.test.mjs && vitest run",
     "test:e2e": "pnpm --filter workcore-demo build:ui && playwright test",
     "test:packages": "pnpm --filter './packages/*' build && node scripts/package-smoke.mjs",
+    "test:docs": "node --test scripts/docs.test.mjs",
     "dev": "pnpm --filter workcore-demo dev",
     "deploy": "pnpm --filter workcore-demo run deploy",
     "docs:dev": "vitepress dev docs",

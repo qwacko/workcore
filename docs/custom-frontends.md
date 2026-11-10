@@ -4,15 +4,30 @@ Workcore supplies typed operations, authorized live queries, durable storage and
 
 ## Use the typed client
 
+Install `@workcore/client` alongside the matching server package version. Create one client per active authenticated session and workspace URL; multiple components may share that instance. The frontend framework is your choice. The API and frontend should share an origin: HTTP requests use same-origin cookies, and the WebSocket handshake is authenticated by the host Worker.
+
+| Method | Purpose | Result/lifetime |
+| --- | --- | --- |
+| `client.query(name, input)` | Read a registered view or query once | Promise of `{ data, revision }`; does not subscribe or automatically refresh |
+| `client.mutate(name, input)` | Call a registered mutation | Promise of `{ data, revision }`; dependent live views update independently |
+| `client.subscribe(name, input, listener)` | Observe a registered view | Returns a subscription with `unsubscribe()`, `state` and `whenRevision(...)` |
+| `client.subscribeSystem(name, input, listener)` | Observe supported system resources such as run progress | Same lifecycle; system authorization still applies |
+| `client.close()` | End a session/workspace client | Closes transport, clears retained data and prevents further use; create a new instance to reconnect as another actor |
+
+Names and input/output shapes are inferred from the application definition. Do not use `query` to call an arbitrary SQL query or assume a registered one-shot query can be subscribed to as a view.
+
 ```ts
 import { createClient } from '@workcore/client';
 import type { tracker } from './server-definition';
 
 const client = createClient<typeof tracker>({ baseUrl: '/api/workspaces/demo' });
 const subscription = client.subscribe('tasks', { projectId: 'inbox' }, state => {
-  // state is typed: loading, live, reconnecting or error, with data and revision.
+  // Render loading/error explicitly; replace the displayed result with state.data.
+  // If reconnecting with data, identify it as stale rather than current.
+  // Do not preserve a previous user's private data when state.data is absent.
 });
-await client.mutate('createTask', { title: 'Review the release', private: true });
+const result = await client.mutate('createTask', { title: 'Review the release', private: true });
+await subscription.whenRevision(result.revision);
 // Dispose subscriptions when their consumer unmounts; close the client on logout.
 subscription.unsubscribe();
 client.close();
@@ -20,7 +35,15 @@ client.close();
 
 Create authenticated clients per session. Changes to the authenticated actor require a new client; changing UI metadata does not reauthenticate an open socket. A successful mutation triggers the declared dependent views. The server independently authorizes every read and write; UI affordances and record IDs grant no additional authority.
 
+Create subscriptions in your framework's mount/effect lifecycle, not on every render. When inputs change, unsubscribe the old consumer and subscribe with the new values. On logout/account switching, close the old client and clear the application's own component state too. A server-side authorization error is not just a cosmetic warning: stop displaying denied data.
+
+`LiveState<T>` has `status: 'loading' | 'live' | 'reconnecting' | 'error'`, optional `data`, a numeric `revision`, and an optional `{ code, message }` error. Callback snapshots replace previous results; they are not patches to merge into a growing list. HTTP calls reject with `ClientError` on failure. An accepted mutation's revision and a record's edit version are different concepts: use the former for observing writes, the latter for optimistic concurrency.
+
+`whenRevision` confirms that the subscription has observed at least that workspace revision. It is not a guarantee that a future job finished or that a mutation emitted all the keys it should have. Handle a failed wait without resubmitting an already accepted write.
+
 Queries return finite results. Use explicit cursor inputs/outputs for history and large datasets. A live working set and older paginated history can be combined in the application: keep a bounded live tail, merge older pages by stable record ID, and preserve the reader's scroll position. Use an indexed `(timestamp, id)` cursor so equal timestamps cannot skip or duplicate messages. There is no special chat table or infinite-scroll protocol in the library.
+
+For all method signatures/results, request IDs, system inspection, files and renderer helpers, see the [client API reference](./client-api). For host verification and namespace routing, see the [Worker reference](./hosting).
 
 ## Shared reads and retained live data
 

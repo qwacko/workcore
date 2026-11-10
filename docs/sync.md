@@ -21,6 +21,21 @@ const myTasks = app.view({
 
 `dependsOn` contains configured trigger keys, not table names. Mutations publish their declared `triggers` plus any keys emitted through `ctx.trigger(...)`; Workcore also publishes built-in keys for framework state. Keys publish only after commit. Omitted view dependencies mean wildcard; an empty array means no automatic recomputation. SQL is not parsed, so declarations must be complete. See [authoring and triggers](./authoring#trigger-keys-and-view-invalidation).
 
+## What is an update channel?
+
+There is no separate application API for joining an arbitrary payload-bearing channel. The pieces are:
+
+- **Workspace URL:** selects the storage/coordination boundary, for example `/api/workspaces/demo`. It is not an authorization credential.
+- **View name + validated input:** selects the authorized live result, for example `tasks` with `{ projectId: 'inbox' }`. Each subscriber's actor determines the permitted projection.
+- **Trigger keys:** server-side invalidation labels such as `tasks` or `permissions`. They carry no event payload. A mutation declares `triggers`, and a view declares `dependsOn`; matching keys cause the whole view to recompute.
+- **Revision:** identifies the workspace state observed by a result. A nonmatching view may acknowledge the revision without recomputing its data.
+
+For example, `createTask` commits with `triggers: ['tasks']`. A subscribed `tasks` view with `dependsOn: ['tasks', 'permissions']` then reruns for each authorized subscriber. The browser gets a replacement snapshot including records that entered or left the selected scope. It does not receive a raw SQL changefeed or a trusted “task created” event to interpret.
+
+Use dynamic `ctx.trigger(...)` when a mutation's impact depends on its input/result. Keys are not automatically scoped by project ID, so one `tasks` key can refresh several project-specific subscriptions; their handlers still select only authorized data. Scope keys are an optimization, never a privacy boundary. Start with wildcard defaults if dependencies are uncertain.
+
+For transient job/AI progress, use `ctx.progress` and an authorized run subscription, not a made-up trigger payload. For durable application events or chat messages, persist application records through mutations and observe a view over those records.
+
 Views may return small objects, summaries or scalars as well as arrays. Array outputs enforce `maxRows` (default 500, maximum 1,000). All outputs enforce a 512 KiB data limit. Workcore cannot infer whether a custom object contains a truncated dataset: handlers are responsible for making their completeness contract honest.
 
 ## Three ways to read

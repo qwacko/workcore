@@ -22,7 +22,7 @@ node scripts/package-smoke.mjs
 
 - Node imports, typed mutation inference and prebuilt admin asset copying.
 - The packaged `AGENTS.example.md` consumer guide.
-- The README/getting-started code: schema generation, migration ingestion, typechecking and a Worker deployment **dry run**.
+- The VitePress getting-started files: schema generation, migration ingestion, application/client typechecking and a Worker deployment **dry run**.
 - A temporary copy of the **existing example app**, built with the packed library exports instead of workspace TypeScript source, followed by its Wrangler deployment **dry run**. Only source/config inputs are copied, not local secrets or persisted data.
 
 The check also rejects published manifests that reference source files or workspace protocols. CI runs it after building. This validates packaging and the existing application without publishing or deploying; it is not proof of a fresh registry install or real Cloudflare behavior.

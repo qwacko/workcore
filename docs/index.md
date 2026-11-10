@@ -1,46 +1,44 @@
-# Workcore
+# Workcore documentation
 
-An opinionated kit for live workspace applications on Cloudflare. One workspace is one SQLite-backed Durable Object. Drizzle defines application tables; Zod validates operations; mutations own writes; authorised views supply live client datasets.
+Workcore is a Cloudflare-first kit for live workspace applications. Define Drizzle SQLite tables and validated operations; Workcore supplies transactional storage, authorized live snapshots and durable background execution. Your application owns its authentication, permission model and frontend.
 
-## Start locally
+## Choose a starting point
 
-```sh
-pnpm install
-cp examples/workcore-demo/.env.example examples/workcore-demo/.env
-# Set BETTER_AUTH_URL in .env to the exact origin you will open, then:
-pnpm dev
-```
+| Goal | Start here | Result |
+| --- | --- | --- |
+| Decide whether Workcore fits | [Architecture and boundaries](./architecture) | Understand one-workspace/one-Durable-Object ownership and its tradeoffs |
+| Build an application in another repo | [Getting started](./getting-started) | A schema, migrations, registered operations, authenticated Worker and typed client |
+| Instruct a coding agent | [Agent reading map](./coding-agents) | A task-oriented reading order and implementation/acceptance checklist |
+| Run or deploy the existing example | [Example and deployment](./deployment) | Local setup, Cloudflare resources, secrets and automatic deployment |
+| Find a symbol or method | [Public API index](./reference) | Package entry points, purpose, boundaries and links to detailed contracts |
+| Change Workcore itself | [Contributing and documentation](./contributing) | Repository workflow, required documentation updates and verification |
 
-Open the local URL printed by `pnpm dev` and create an account. Use the custom shadcn-svelte frontend to manage tasks, private notes and chat. Open another window to see live updates. A separate account cannot receive your private records.
+## How this manual is organized
 
-Do not overwrite an existing `.env`. See the [example README](https://github.com/qwacko/workcore/tree/main/examples/workcore-demo) for the complete local/Cloudflare configuration. Deploying that example and publishing the reusable npm packages are separate actions.
+1. **Start:** installation and the minimum end-to-end tutorial. Follow this before composing optional features.
+2. **Build an application:** task-oriented guides explaining the supported design patterns and their security/lifecycle implications.
+3. **API reference:** symbol/method lookup and contracts. Reference pages link back to recipes rather than hiding prerequisites in large examples.
+4. **Operate and maintain:** deployment, diagnostics, recovery, package publishing and contributing.
 
-## Use it in another app
+The sidebar follows this hierarchy. Pages use stable URLs so applications can link to specific guides; headings provide the next level of navigation. Prefer the reference index when searching by function name and the agent reading map when searching by task.
 
-The initial npm release target is `0.1.0`. Once published, install `@workcore/core` and `@workcore/client` with Drizzle/Zod, then follow [getting started](./getting-started). Optional packages provide prebuilt admin assets, R2 files and AI SDK integration. There is no umbrella `workcore` package or required Svelte frontend.
+## Core concepts
 
-The core package includes `AGENTS.example.md`; copy/merge it into a consuming app's `AGENTS.md` to give coding agents the library's actual APIs and development rules. The [publication guide](./publishing) covers package validation, tarballs and npm commands.
+| Concept | Meaning | Guide |
+| --- | --- | --- |
+| Workspace | One SQLite-backed Durable Object, not necessarily a team or organization | [Architecture](./architecture) |
+| Mutation | Synchronous transaction for SQL, KV, job enqueues and schedules | [Authoring](./authoring) |
+| View | Bounded read-only result eligible for live subscription | [Live data](./sync) |
+| Query | One-shot read, including application-defined pagination | [Client integration](./custom-frontends) |
+| Trigger key | Post-commit invalidation label, not an event payload or automatic SQL dependency | [Invalidation](./authoring#trigger-keys-and-view-invalidation) |
+| Actor | Verified initiating identity; permissions remain application-defined | [Context](./context) and [permissions](./multi-user) |
+| Task/agent | Persisted background run; external effects are not exactly-once | [Execution](./execution) |
+| Admin console | Optional prebuilt client for operations and privileged inspection | [Administration](./admin) |
 
-The optional SvelteKit admin console reads display documents from the runtime manifest. It generates forms from annotated schemas and renders table, list, record, JSON, safe Markdown and private chat presentations. Row actions bind record IDs and application-defined versions without making users copy them. Execution timelines, schedule controls, history and bounded read-only raw-table inspection remain server-authorised. It deliberately does not provide raw database editing or an arbitrary UI/template language.
+## Version and environment
 
-The tracker includes a scheduled task and an AI SDK assistant. Without a selected model it uses a deterministic application fallback for task/note creation and live lists. With `WORKCORE_AGENT_MODEL` and provider credentials it uses tracked multi-turn calls, checked tools and optional cross-provider fallback. See [AI SDK agents](./ai).
+The current package line is `0.1.x`. Use coordinated installed package versions and check their declarations: this site follows the repository and can describe unreleased changes. The matching [release tag and changelog](https://github.com/qwacko/workcore/releases) identify a published version. No compatibility with the previous portable runtime at Git revision `7c2c092` is implied.
 
-## Read next
+Core persistence requires Cloudflare SQLite Durable Objects, **not D1**. The example uses D1 only for host authentication. The browser client is framework-independent; neither Svelte nor the optional admin rendering protocol is required in a consuming app. There is no umbrella `workcore` package.
 
-- [Getting started](./getting-started): installation, file layout, migrations, hosting and client usage.
-- [Architecture](./architecture): ownership, transaction boundaries and deployment.
-- [Authoring](./authoring): tables, mutations, queries, migrations and the typed client.
-- [Custom frontends and chat](./custom-frontends): typed subscriptions, application-owned attachments, pagination and streaming progress.
-- [Optional admin metadata](./admin): typed field hints, display documents, actions and client state.
-- [Admin display protocol v3](./display-protocol): wire contract, bindings, lifecycle, compatibility, limits, and conformance fixtures.
-- [Sync](./sync): bounded live views, personalised results and larger datasets.
-- [File storage](./files): optional R2-backed files, metadata and lifecycle.
-- [Execution](./execution): tasks, schedules, agent tools and interruption.
-- [Security](./security): authentication, authorisation, limits and unsupported features.
-- [Publishing](./publishing): validate the existing example against packed libraries and publish the initial packages.
-
-## A fresh implementation
-
-This replaces the previous portable runtime, not extends it. No old adapters, APIs, rich-value codecs, application composition framework or old-data migrations are retained. The previous implementation is preserved in Git history at `7c2c092`.
-
-The root workspace and example remain private; the five library packages are prepared for public `0.1.0` publication. The API is intentionally early. Deployment still requires real host authentication, application permissions and appropriate operational limits.
+This is an early implementation, not a claim of exhaustive production validation. Read [security and limits](./security), use explicit application permissions, and rehearse [backup/recovery](./recovery) before storing important data.
